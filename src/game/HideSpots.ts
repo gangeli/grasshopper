@@ -36,6 +36,8 @@ export interface HideOptions {
   rng: Rng;
   objects: WorldObject[];
   eyeHeight: number;
+  /** Body sample offsets of the actual hiding poses (pet facing +Z), see measurePoseSamples. */
+  poseSamples?: { hide: Vec3[]; hideLow: Vec3[] };
 }
 
 /** Body sample points of a crouched pet standing at `p` (relative offsets). */
@@ -56,8 +58,10 @@ export function visibleFraction(g: VoxelGrid, eye: Vec3, points: Vec3[], skipEnd
   return vis / points.length;
 }
 
-export function samplesAt(p: Vec3): Vec3[] {
-  return HIDE_SAMPLES.map((o) => ({ x: p.x + o.x, y: p.y + o.y, z: p.z + o.z }));
+export function samplesAt(p: Vec3, offsets: Vec3[] = HIDE_SAMPLES, yaw = 0): Vec3[] {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  // Rotation about +Y by yaw (pet's +Z forward maps to (sin yaw, 0, cos yaw)).
+  return offsets.map((o) => ({ x: p.x + o.x * c + o.z * s, y: p.y + o.y, z: p.z - o.x * s + o.z * c }));
 }
 
 /** Spread-out seeker viewpoints on open floor (farthest-point sampling). */
@@ -145,7 +149,7 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
   const rng = opts.rng;
 
   // Stage 1: cheap filter — reachable, hidden from the seeker right now.
-  type Cand = { a: number; p: Vec3; hiddenNow: number; pre: number; cls: ReturnType<typeof classifySpot> };
+  type Cand = { a: number; p: Vec3; hiddenNow: number; pre: number; cls: ReturnType<typeof classifySpot>; pts: Vec3[] };
   const cands: Cand[] = [];
   for (let a = 0; a < nav.count; a++) {
     if (!(cost[a] <= opts.maxPathCost)) continue;
@@ -153,26 +157,33 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     const p = nav.pos(a);
     const dSeeker = Math.hypot(p.x - seekerEye.x, p.z - seekerEye.z);
     if (dSeeker < 1.0) continue;
-    const hiddenNow = 1 - visibleFraction(g, seekerEye, samplesAt(p));
-    if (hiddenNow < 0.85) continue;
+    if (visibleFraction(g, seekerEye, samplesAt(p)) > 0.5) continue; // quick reject
     const cls = classifySpot(g, nav, a, floorY);
+    const low = cls.kind === 'under' || cls.kind === 'inside';
+    const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
+    const pts = samplesAt(p, offs, cls.openYaw);
+    const hiddenNow = 1 - visibleFraction(g, seekerEye, pts);
+    if (hiddenNow < 0.85) continue;
     let pre = 0;
     pre += { inside: 1.0, under: 0.8, corner: 0.5, behind: 0.3, atop: 0.4 }[cls.kind];
     pre += Math.min(cls.walls, 5) * 0.05;
     pre -= Math.abs(dSeeker - 2.8) * 0.12;
-    cands.push({ a, p, hiddenNow, pre, cls });
+    cands.push({ a, p, hiddenNow, pre, cls, pts });
   }
   cands.sort((x, y) => y.pre - x.pre);
   const shortlist = cands.slice(0, 300);
 
   // Stage 2: coverage over likely seeker viewpoints.
-  const views = seekerViewpoints(nav, opts.eyeHeight, 20, new Rng(1234), floorY);
+  // Standing and crouching viewpoints: a spot only counts as findable from a
+  // viewpoint if most of the pet would be visible from there.
+  const standing = seekerViewpoints(nav, opts.eyeHeight, 16, new Rng(1234), floorY);
+  const views = [...standing, ...standing.filter((_, i) => i % 2 === 0).map((v) => ({ ...v, y: floorY + 0.85 }))];
   // Target coverage: easy → hidden from ~55% of the room, hard → ~90%.
   const target = 0.55 + 0.35 * opts.difficulty;
   const spots: HideSpot[] = shortlist.map((c) => {
-    const pts = samplesAt(c.p);
+    const pts = c.pts;
     let hiddenFrom = 0;
-    for (const v of views) if (visibleFraction(g, v, pts) < 0.3) hiddenFrom++;
+    for (const v of views) if (visibleFraction(g, v, pts) < 0.5) hiddenFrom++;
     const coverage = views.length ? hiddenFrom / views.length : 1;
     let score = c.pre;
     score -= Math.abs(coverage - target) * 2.2;

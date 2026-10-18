@@ -102,7 +102,7 @@ export class NavGrid {
         for (let j = floorTopJ; j < g.ny - 1; j++) {
           if (!g.solid(i, j, k) || g.solid(i, j + 1, k)) continue;
           if (j === floorTopJ && !g.isObserved(i, k)) continue;
-          if (g.underside[g.idx(i, j, k)]) continue;
+          if (g.underside[g.idx(i, j, k)] === 1) continue;
           if (j * r > p.maxSurfaceHeight) break;
           // Headroom.
           let h = 0;

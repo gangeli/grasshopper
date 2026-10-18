@@ -42,6 +42,8 @@ export interface WorldModelOptions {
 export const FLOOR_LAYERS_BELOW = 2;
 /** Weakly-free: inferred, not observed. Depth-based navigation doesn't trust it. */
 export const ASSUMED_FREE = -1;
+/** Guessed solid (see SOFT_SOLID): a few free-space rays clear it. */
+export const ASSUMED_SOLID = 15;
 const HOLLOW_LABELS = new Set(['table', 'desk', 'bed', 'shelf']);
 
 export class WorldModel {
@@ -134,7 +136,7 @@ export class WorldModel {
     // Narrow strips (couch backs, arm rests, shelves' tops) are almost never hollow.
     const narrow = Math.min(maxX - minX, maxZ - minZ) < 0.3;
     const hollow = label ? HOLLOW_LABELS.has(label) : heightAboveFloor >= 0.6 && !narrow;
-    const thickness = horizontal ? (hollow ? 0.04 : Math.max(0.04, heightAboveFloor)) : 0.08;
+    const thickness = horizontal ? 0.04 : 0.08;
     const min = { x: 0, y: 0, z: 0 }, max = { x: 0, y: 0, z: 0 };
     rasterizePolygon(plane.polygon, n, g.res * 0.7, (p) => {
       // Extrude into the solid side of the plane.
@@ -147,12 +149,14 @@ export class WorldModel {
       max.z = Math.max(p.z, q.z) + 1e-3;
       g.fillBox(min, max, 100);
     });
-    if (horizontal && hollow) {
-      // Plane detection says "table": assume open space beneath it.
+    if (horizontal) {
+      // Below a raised plane: tables are open underneath, seats/ottomans are
+      // probably solid. Either way it's only a guess: write it weakly into
+      // unknown cells so real depth observations override it.
       rasterizePolygon(plane.polygon, n, g.res * 0.7, (p) => {
         const i = g.cellX(p.x), k = g.cellZ(p.z);
         const jTop = g.cellY(p.y - thickness) - 1;
-        for (let j = this.floorLayer; j <= jTop; j++) if (g.get(i, j, k) === 0) g.set(i, j, k, ASSUMED_FREE);
+        for (let j = this.floorLayer; j <= jTop; j++) if (g.get(i, j, k) === 0) g.set(i, j, k, hollow ? ASSUMED_FREE : ASSUMED_SOLID);
       });
     }
     if (plane.label) this.addLabel(plane.id, plane.label, plane.polygon, horizontal ? -0.05 : 0);
@@ -177,6 +181,7 @@ export class WorldModel {
       const ny = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
       const nz = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
       const down = ny < -0.7 * Math.hypot(nx, ny, nz);
+      const up = ny > 0.7 * Math.hypot(nx, ny, nz);
       for (let u = 0; u <= nu; u++)
         for (let v = 0; v <= nv - (u * nv) / nu; v++) {
           const fu = u / nu, fv = v / nv;
@@ -188,7 +193,7 @@ export class WorldModel {
           } else {
             const i = g.cellX(x), j = g.cellY(y), k = g.cellZ(z);
             if (g.get(i, j, k) < 100) g.set(i, j, k, 100);
-            if (down && g.inBounds(i, j, k)) g.underside[g.idx(i, j, k)] = 1;
+            if (g.inBounds(i, j, k)) g.underside[g.idx(i, j, k)] |= down ? 1 : up ? 2 : 0;
           }
           if (mesh.label) pts.push({ x, y, z });
         }

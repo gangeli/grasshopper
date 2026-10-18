@@ -27,10 +27,12 @@ export function segmentObjects(world: WorldModel, maxHeight = 2.6): WorldObject[
   const N = g.nx * g.nz;
   const top = new Int16Array(N).fill(-1);
   const bottom = new Int16Array(N).fill(-1);
+  // Unknown space under observed tops counts as solid (see VoxelGrid.updateShadow).
+  g.updateShadow();
   for (let k = 0; k < g.nz; k++)
     for (let i = 0; i < g.nx; i++) {
       for (let j = j0; j <= j1; j++)
-        if (g.occ(i, j, k)) {
+        if (g.occ(i, j, k) || (bottom[k * g.nx + i] < 0 && g.solid(i, j, k) && g.data[g.idx(i, j, k)] >= 0)) {
           if (bottom[k * g.nx + i] < 0) bottom[k * g.nx + i] = j;
           top[k * g.nx + i] = j;
         }
@@ -56,7 +58,8 @@ export function segmentObjects(world: WorldModel, maxHeight = 2.6): WorldObject[
       mnK = Math.min(mnK, k);
       mxK = Math.max(mxK, k);
       mxJ = Math.max(mxJ, top[c]);
-      if (bottom[c] > j0 + 2) over++;
+      // Free space of 20cm+ under the top: a table or bed rather than a couch with feet.
+      if ((bottom[c] - world.floorLayer) * g.res >= 0.2) over++;
       for (const [di, dk] of NB) {
         const ii = i + di, kk = k + dk;
         if (ii < 0 || kk < 0 || ii >= g.nx || kk >= g.nz) continue;
@@ -116,6 +119,7 @@ function classify(o: WorldObject, world: WorldModel): string {
   if (h > 1.5 && (thin < 0.25 || fill < 0.3)) return 'wall';
   if (h > 1.2) return 'shelf';
   if (o.hollow) return 'basket';
+  if (o.overhang > 0.5 && area < 0.4) return h > 1.0 ? 'plant' : 'chair';
   if (o.overhang > 0.5) {
     if (h < 0.6 && area > 1.8) return 'bed';
     if (h < 0.6) return 'coffee table';

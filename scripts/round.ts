@@ -1,0 +1,14 @@
+import { Simulation } from '../src/sim/Simulation';
+import { SeekerBot } from '../src/sim/SeekerBot';
+const room = process.argv[2] ?? 'living';
+const sim = new Simulation({ room, seed: Number(process.argv[3] ?? 1) });
+const bot = new SeekerBot(sim);
+const msgs: string[] = [];
+sim.game.events.onMessage = (m) => msgs.push(`[${sim.time.toFixed(1)}] ${m}`);
+sim.game.events.onPhase = (p) => msgs.push(`[${sim.time.toFixed(1)}] phase ${p} pet=${sim.pet.pos.x.toFixed(2)},${sim.pet.pos.y.toFixed(2)},${sim.pet.pos.z.toFixed(2)} truthVis=${sim.truthVisibility().toFixed(2)}`);
+sim.game.events.onFound = () => msgs.push(`   truth visibility at found: ${sim.truthVisibility().toFixed(2)} cam ${sim.cam.pos.x.toFixed(2)},${sim.cam.pos.z.toFixed(2)}`);
+const t0 = performance.now();
+const dt = 1 / 30;
+while (bot.phase !== 'done' && sim.time < 240) bot.step(dt);
+console.log(msgs.join('\n'));
+console.log(bot.log.join('\n'), 'jumps', sim.pet.jumpsMade, 'dist', sim.pet.travelled.toFixed(1), 'wall ms', (performance.now() - t0) | 0, 'planMs', sim.game.stats.planMs | 0);

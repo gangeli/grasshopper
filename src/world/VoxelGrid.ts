@@ -18,8 +18,17 @@ export interface VoxelGridOptions {
 }
 
 export const OCC_THRESHOLD = 20;
+/**
+ * Cells in [SOFT_SOLID, OCC_THRESHOLD] are *guessed* solid (e.g. below a seat
+ * found by plane detection). Navigation avoids them, but they don't occlude
+ * the line of sight, since a wrong guess there would hide the pet for no
+ * visible reason.
+ */
+export const SOFT_SOLID = 10;
 const MAX_LO = 120;
 const MIN_LO = -60;
+
+const cls = (v: number) => (v > OCC_THRESHOLD ? 2 : v >= SOFT_SOLID ? 1 : 0);
 
 export interface RayHit {
   t: number;
@@ -38,7 +47,8 @@ export class VoxelGrid {
   /** Per-column flag: floor here has been observed (by planes or depth). */
   readonly observed: Uint8Array;
   /**
-   * Per-voxel flag: this voxel came from a downward-facing mesh surface (the
+   * Per-voxel bits: 1 = a downward-facing mesh surface passes here, 2 = an
+   * upward-facing one. "Underside only" (=== 1) voxels come from a downward-facing mesh surface (the
    * bottom of a couch, a table's underside). Standing on top of one would mean
    * standing *inside* the object, so navigation ignores those surfaces.
    */
@@ -103,7 +113,7 @@ export class VoxelGrid {
     if (v > MAX_LO) v = MAX_LO;
     if (v < MIN_LO) v = MIN_LO;
     this.data[n] = v;
-    if (before > OCC_THRESHOLD !== v > OCC_THRESHOLD) this.version++;
+    if (cls(before) !== cls(v)) this.version++;
   }
 
   set(i: number, j: number, k: number, v: number): void {
@@ -111,7 +121,7 @@ export class VoxelGrid {
     const n = this.idx(i, j, k);
     const before = this.data[n];
     this.data[n] = v;
-    if (before > OCC_THRESHOLD !== v > OCC_THRESHOLD) this.version++;
+    if (cls(before) !== cls(v)) this.version++;
   }
 
   markObserved(x: number, z: number, radiusCells = 0): void {
@@ -247,7 +257,7 @@ export class VoxelGrid {
           const n = (j * this.nz + k) * this.nx + i;
           const v = this.data[n];
           if (v > OCC_THRESHOLD) {
-            shadowing = !this.underside[n];
+            shadowing = this.underside[n] !== 1;
           } else if (v < 0) {
             shadowing = false;
           } else if (shadowing) {
@@ -264,7 +274,7 @@ export class VoxelGrid {
   solid(i: number, j: number, k: number): boolean {
     if (!this.inBounds(i, j, k)) return false;
     const n = this.idx(i, j, k);
-    return this.data[n] > OCC_THRESHOLD || (this.shadow !== null && this.shadow[n] === 1);
+    return this.data[n] >= SOFT_SOLID || (this.shadow !== null && this.shadow[n] === 1);
   }
 
   countOccupied(): number {
