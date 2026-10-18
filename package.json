@@ -1,0 +1,35 @@
+{
+  "name": "grasshopper",
+  "version": "1.0.0",
+  "description": "Hopper: an AR pet that plays hide and seek in your room (WebXR + three.js)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 4173",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc",
+    "sheet": "playwright test e2e/contact-sheet.spec.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gangeli/grasshopper.git"
+  },
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/gangeli/grasshopper/issues"
+  },
+  "homepage": "https://github.com/gangeli/grasshopper#readme",
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/three": "^0.186.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.0",
+    "vitest": "^5.0.5"
+  },
+  "private": true,
+  "type": "module"
+}
