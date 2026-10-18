@@ -12,7 +12,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'npx vite --port 5179 --strictPort',
-    url: 'http://localhost:5179/lab.html',
+    url: 'http://localhost:5179/index.html',
     reuseExistingServer: true,
     timeout: 60_000,
   },

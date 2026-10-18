@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1f2a33" />
+<title>Hopper — AR Hide & Seek</title>
+<style>
+  :root {
+    --ink: #1d2830; --paper: #fbf8f1; --mint: #5ccf9f; --mint-dark: #2f9a78; --glow: #ffd56a;
+    --shadow: 0 6px 24px rgba(0,0,0,.25);
+    font: 16px/1.4 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1f2a33; color: var(--ink); }
+  canvas { display: block; }
+  button { font: inherit; cursor: pointer; border: 0; }
+  #landing {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    padding: 24px 16px calc(28px + env(safe-area-inset-bottom)); box-sizing: border-box; z-index: 5; pointer-events: none;
+    background: linear-gradient(180deg, rgba(31,42,51,0) 40%, rgba(31,42,51,.85) 75%);
+  }
+  #landing > * { pointer-events: auto; }
+  #landing h1 { margin: 0; font-size: clamp(34px, 9vw, 54px); color: var(--paper); letter-spacing: .5px; }
+  #landing h1 span { color: var(--glow); }
+  #landing p { margin: 6px 0 18px; color: #d7e4e0; text-align: center; max-width: 420px; }
+  #landing .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #landing small { margin-top: 14px; color: #9fb3ad; text-align: center; max-width: 420px; }
+  .primary { background: var(--mint); color: #0d2a20; padding: 14px 22px; border-radius: 999px; font-weight: 700; box-shadow: var(--shadow); }
+  .primary:disabled { background: #9db5ab; color: #33463f; cursor: default; }
+  .secondary { background: var(--paper); color: var(--ink); padding: 14px 18px; border-radius: 999px; font-weight: 600; box-shadow: var(--shadow); }
+  .chip { background: rgba(251,248,241,.9); color: var(--ink); padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; }
+  .icon { background: rgba(251,248,241,.9); width: 34px; height: 34px; border-radius: 50%; font-weight: 700; }
+  .hud { position: fixed; inset: 0; pointer-events: none; z-index: 2147483000; font-family: inherit; }
+  .hud button { pointer-events: auto; }
+  .hud-top { position: absolute; top: calc(56px + env(safe-area-inset-top)); left: 16px; right: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .bubble { max-width: min(520px, calc(100vw - 32px)); background: var(--paper); padding: 10px 16px; border-radius: 18px; box-shadow: var(--shadow);
+    opacity: 0; transform: translateY(-8px); transition: opacity .25s, transform .25s; text-align: center; }
+  .bubble.show { opacity: 1; transform: none; }
+  .status { color: #fff; font-size: 14px; font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+  .hud-corner { position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 12px; display: flex; gap: 6px; align-items: center; }
+  .hud-bottom { position: absolute; left: 16px; right: 16px; bottom: calc(22px + env(safe-area-inset-bottom)); display: flex; gap: 10px; justify-content: center; }
+  .cover { position: absolute; inset: 0; background: radial-gradient(circle at 50% 40%, #2f3f4a, #10171c 70%); color: var(--paper);
+    flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; }
+  .cover-title { font-size: 28px; font-weight: 800; }
+  .cover-num { font-size: 120px; font-weight: 800; color: var(--glow); line-height: 1.1; }
+  .cover-sub { color: #b9c9c4; }
+  .card { position: absolute; left: 16px; right: 16px; bottom: calc(90px + env(safe-area-inset-bottom)); margin: 0 auto; max-width: 420px; background: var(--paper);
+    border-radius: 22px; padding: 18px; box-shadow: var(--shadow); flex-direction: column; gap: 12px; align-items: center; text-align: center; pointer-events: auto; }
+  .card-text { font-size: 18px; font-weight: 700; }
+  .place-hint { position: absolute; left: 16px; right: 16px; bottom: calc(110px + env(safe-area-inset-bottom)); text-align: center; color: #fff; font-weight: 700;
+    text-shadow: 0 1px 4px rgba(0,0,0,.7); }
+</style>
+</head>
+<body>
+<div id="landing">
+  <h1>Hop<span>per</span></h1>
+  <p>A tiny creature moves into your room. It maps your furniture, then hides — under tables, behind the couch, inside baskets. Can you find it?</p>
+  <div class="row">
+    <button id="btn-ar" class="primary" style="display:none">Start in AR</button>
+    <button id="btn-sim" class="secondary">Play in a virtual room</button>
+  </div>
+  <small id="support-note"></small>
+</div>
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>

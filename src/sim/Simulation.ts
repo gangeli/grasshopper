@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { HideAndSeek, type GameOptions } from '../game/HideAndSeek';
+import type { HideAndSeek, GameOptions } from '../game/HideAndSeek';
 import type { ViewPose } from '../game/Visibility';
-import { Animator } from '../pet/Animator';
-import { PetController } from '../pet/PetController';
-import { buildPet, type PetRig } from '../pet/PetModel';
-import { WorldModel } from '../world/WorldModel';
+import type { Animator } from '../pet/Animator';
+import type { PetController } from '../pet/PetController';
+import type { PetRig, PALETTES } from '../pet/PetModel';
+import type { WorldModel } from '../world/WorldModel';
+import { createStack } from '../game/stack';
 import { roomFromName, type SimRoom } from './SimRoom';
 import { cameraBasis, SimSensor, type SensorCaps, type SimCamera } from './SimSensor';
 import { senseFrame } from './scan';
@@ -22,12 +23,13 @@ export interface SimOptions {
   seed?: number;
   /** Sense every N frames (depth integration is the expensive part). */
   senseEvery?: number;
+  palette?: keyof typeof PALETTES;
 }
 
 export class Simulation {
   readonly room: SimRoom;
   readonly sensor: SimSensor;
-  readonly world = new WorldModel();
+  readonly world: WorldModel;
   readonly rig: PetRig;
   readonly anim: Animator;
   readonly pet: PetController;
@@ -40,12 +42,14 @@ export class Simulation {
   constructor(opts: SimOptions = {}) {
     this.room = typeof opts.room === 'object' ? opts.room : roomFromName(opts.room ?? 'living');
     this.sensor = new SimSensor(this.room, opts.caps ?? { depth: true, planes: true, mesh: false }, opts.seed ?? 7);
+    const stack = createStack({ seed: opts.seed, palette: opts.palette, game: opts.game });
+    this.world = stack.world;
+    this.rig = stack.rig;
+    this.anim = stack.anim;
+    this.pet = stack.pet;
+    this.game = stack.game;
     this.world.setFloor(0, { x: 0, y: 0, z: 0 });
     if (this.sensor.caps.mesh) for (const m of this.sensor.meshes()) this.world.ingestMesh(m);
-    this.rig = buildPet('mint');
-    this.anim = new Animator(this.rig, opts.seed ?? 1);
-    this.pet = new PetController(this.rig, this.anim);
-    this.game = new HideAndSeek(this.world, this.pet, this.anim, this.rig, { seed: opts.seed ?? 1, ...opts.game });
     this.senseEvery = opts.senseEvery ?? 3;
   }
 

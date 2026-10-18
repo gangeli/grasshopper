@@ -147,7 +147,7 @@ function planeSamples(p: PlaneInput): Vec3[] {
 const lerp3 = (a: Vec3, b: Vec3, t: number): Vec3 => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
 
 /** Derive the planes a plane-detector would find: floor, raised tops, wall faces. */
-function buildPlanes(room: SimRoom): PlaneInput[] {
+export function buildPlanes(room: SimRoom): PlaneInput[] {
   const planes: PlaneInput[] = [];
   const W = room.halfW, D = room.halfD;
   planes.push({
