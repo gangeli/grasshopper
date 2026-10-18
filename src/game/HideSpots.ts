@@ -151,6 +151,8 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
   // Stage 1: cheap filter — reachable, hidden from the seeker right now.
   type Cand = { a: number; p: Vec3; hiddenNow: number; pre: number; cls: ReturnType<typeof classifySpot>; pts: Vec3[] };
   const cands: Cand[] = [];
+  const J = 0.15;
+  const jitterEyes = [seekerEye, ...[[J, 0], [-J, 0], [0, J], [0, -J]].map(([dx, dz]) => ({ x: seekerEye.x + dx, y: seekerEye.y, z: seekerEye.z + dz }))];
   for (let a = 0; a < nav.count; a++) {
     if (!(cost[a] <= opts.maxPathCost)) continue;
     if ((nav.ni[a] + 2 * nav.nk[a]) % 2 !== 0) continue; // thin out
@@ -162,7 +164,13 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
     const pts = samplesAt(p, offs, cls.openYaw);
-    const hiddenNow = 1 - visibleFraction(g, seekerEye, pts);
+    // Robust to map quantisation and to the seeker shifting a little: must be
+    // hidden from the eye and from points ~15cm around it.
+    let hiddenNow = 1;
+    for (const e of jitterEyes) {
+      hiddenNow = Math.min(hiddenNow, 1 - visibleFraction(g, e, pts));
+      if (hiddenNow < 0.85) break;
+    }
     if (hiddenNow < 0.85) continue;
     let pre = 0;
     pre += { inside: 1.0, under: 0.8, corner: 0.5, behind: 0.3, atop: 0.4 }[cls.kind];

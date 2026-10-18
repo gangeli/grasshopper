@@ -274,6 +274,7 @@ export class HideAndSeek {
     const r = this.rng.next();
     const fidget = r < 0.25 ? 'lookAround' : r < 0.45 ? 'sniff' : r < 0.55 ? 'wave' : 'idle';
     this.pet.perform(fidget, 0.3);
+    this.pet.arriveAction = fidget;
     this.pet.arriveYaw = Math.atan2(view.pos.x - this.pet.pos.x, view.pos.z - this.pet.pos.z);
     this.pet.state = 'idle';
     this.roamTimer = 2.5 + this.rng.next() * 2.5;
@@ -357,9 +358,11 @@ export class HideAndSeek {
         poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
       },
       this.world.floorY,
-      2,
+      4,
     );
     for (const s of spots) {
+      // A sneak should actually go somewhere new.
+      if (Math.hypot(s.pos.x - this.pet.pos.x, s.pos.z - this.pet.pos.z) < 0.6) continue;
       const path = nav.findPath(this.pet.pos, s.pos);
       if (!path) continue;
       this.relocated = true;

@@ -41,6 +41,7 @@ export class PetController {
   events: PetEvents = {};
   /** Total distance travelled (diagnostics). */
   travelled = 0;
+  private turning = false;
   jumpsMade = 0;
 
   constructor(readonly rig: PetRig, readonly anim: Animator) {}
@@ -108,6 +109,7 @@ export class PetController {
 
   private arrive(): void {
     this.state = 'idle';
+    this.turning = false;
     this.speed = 0;
     this.anim.ctx.speed = 0;
     this.anim.play(this.arriveAction, 0.3);
@@ -205,7 +207,24 @@ export class PetController {
       }
       case 'idle':
       case 'perform': {
-        if (this.arriveYaw !== null && this.state === 'idle') this.yaw = dampAngle(this.yaw, this.arriveYaw, 4, dt);
+        if (this.arriveYaw !== null && this.state === 'idle') {
+          const err = wrapAngle(this.arriveYaw - this.yaw);
+          // Big turns are done with little hops on the spot instead of sliding round.
+          if (Math.abs(err) > 0.5 && !this.turning) {
+            this.turning = true;
+            a.play('hop', 0.15);
+          }
+          if (this.turning) {
+            this.yaw += Math.sign(err) * Math.min(Math.abs(err), 3.2 * dt);
+            this.hopPhase += dt * 3;
+            a.ctx.hopPhase = this.hopPhase % 1;
+            a.ctx.speed = 0.15;
+            if (Math.abs(err) < 0.05) {
+              this.turning = false;
+              a.play(this.arriveAction, 0.25);
+            }
+          } else this.yaw = dampAngle(this.yaw, this.arriveYaw, 4, dt);
+        }
         break;
       }
     }

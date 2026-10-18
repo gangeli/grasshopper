@@ -47,3 +47,37 @@ describe('hide and seek, played by a bot', () => {
     expect(found / Math.max(1, reports.length)).toBeGreaterThanOrEqual(0.7);
   });
 });
+
+describe('hard mode', () => {
+  it('Hopper sneaks to a new hidden spot when the seeker gets close without seeing it', async () => {
+    const { Simulation } = await import('../src/sim/Simulation');
+    const { SeekerBot } = await import('../src/sim/SeekerBot');
+    const sim = new Simulation({ room: 'living', seed: 5, game: { difficulty: 0.9 } });
+    const bot = new SeekerBot(sim);
+    const dt = 1 / 30;
+    while (sim.game.phase !== 'seek' && sim.time < 80) bot.step(dt);
+    expect(sim.game.phase).toBe('seek');
+    const start = sim.pet.pos.clone();
+    // Find a nearby standing spot from which Hopper is NOT visible.
+    let placed = false;
+    for (let a = 0; a < 24 && !placed; a++) {
+      for (const r of [1.0, 1.2, 1.35]) {
+        const x = start.x + Math.sin((a / 24) * Math.PI * 2) * r, z = start.z + Math.cos((a / 24) * Math.PI * 2) * r;
+        if (Math.abs(x) > sim.room.halfW - 0.2 || Math.abs(z) > sim.room.halfD - 0.2) continue;
+        if (sim.room.solidAt({ x, y: 1.0, z }, 0.15) || sim.room.solidAt({ x, y: 0.3, z }, 0.15)) continue;
+        sim.cam.pos = { x, y: 1.45, z };
+        sim.cam.yaw = Math.atan2(-(start.x - x), -(start.z - z));
+        sim.cam.pitch = -0.6;
+        if (sim.truthVisibility() === 0) {
+          placed = true;
+          break;
+        }
+      }
+    }
+    expect(placed).toBe(true);
+    for (let i = 0; i < 30 * 8; i++) sim.step(dt);
+    expect(sim.game.stats.replans).toBe(1);
+    expect(sim.pet.pos.distanceTo(start)).toBeGreaterThan(0.3);
+    if (sim.game.phase === 'seek') expect(sim.truthVisibility()).toBeLessThanOrEqual(0.25);
+  }, 120_000);
+});
