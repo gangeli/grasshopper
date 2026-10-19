@@ -69,10 +69,11 @@ for (const action of actions) {
   let c = 0;
   for (const t of times) {
     for (const yaw of yaws) {
-      poseAt(action, t);
+      // The pet looks at this cell's camera (set before posing so it's not the previous cell's).
       camera.position.set(Math.sin(yaw) * dist, camY, Math.cos(yaw) * dist);
       camera.lookAt(0, lookY, 0);
       anim.lookTarget = camera.position.clone();
+      poseAt(action, t);
       renderer.setViewport(c * cell, H - (r + 1) * cell, cell, cell);
       renderer.setScissor(c * cell, H - (r + 1) * cell, cell, cell);
       renderer.setClearColor(r % 2 ? 0xe2e8ee : 0xeef2f5);

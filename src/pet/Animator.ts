@@ -246,20 +246,39 @@ const ACTIONS: Record<ActionName, ActionFn> = {
     p.lookWeight = 1;
   },
   giggle(t, c, p) {
+    // Stays crouched (it may be giggling from a hiding spot) but the head comes
+    // up, eyes squeeze into happy "^^" arcs and the whole body bounces with
+    // each "hee".
     hideBase(t, c, p, false);
+    const e = smoothstep(0, 0.2, t);
+    const hee = Math.abs(Math.sin(t * 9));
     const shake = Math.sin(t * 30);
-    p.bodyY += 0.012;
-    p.chestRoll = 0.1 * shake;
-    p.headRoll = 0.15 * Math.sin(t * 15);
-    p.armLPitch = p.armRPitch = -1.1;
-    p.armLRaise = p.armRRaise = 0.25;
-    p.elbowL = p.elbowR = 1.6; // hands to mouth
+    p.bodyY += 0.01 + 0.007 * hee * e;
+    p.squash += 0.07 + 0.05 * hee * e;
+    p.bodyPitch -= 0.12 * e;
+    p.spinePitch -= 0.06 * e;
+    p.chestRoll = 0.05 * shake;
+    p.neckPitch = -0.1 * e;
+    // Chin up, a happy side-to-side head tilt and a little nod per giggle.
+    p.headPitch = -0.12 - 0.12 * e - 0.08 * hee;
+    p.headRoll = 0.2 * Math.sin(t * 4.5) * e;
+    p.headYaw = 0.1 * Math.sin(t * 2.3);
+    // Paws clasped under the chin.
+    p.armLPitch = p.armRPitch = -1.15;
+    p.armLRaise = p.armRRaise = -0.05;
+    p.elbowL = p.elbowR = 1.25;
     p.happy = 1;
-    p.eyeOpen = 0.8;
-    p.mouthOpen = 0.35 + 0.25 * Math.abs(Math.sin(t * 18));
+    p.eyeOpen = 0.9;
+    p.smile = 1;
+    p.mouthOpen = (0.3 + 0.3 * hee) * e;
     p.blush = 1;
-    p.antLift = -0.2 + 0.25 * Math.sin(t * 14);
+    p.antLift = 0.25 + 0.3 * Math.sin(t * 14);
+    p.antSpread = 0.2;
+    p.earLift = 0.35 + 0.25 * Math.sin(t * 9);
     p.tailSide = 0.5 * Math.sin(t * 12);
+    p.tailLift = 0.1;
+    p.wingSpread = 0.2;
+    p.lookWeight = 0.7;
     p.glow = 1;
   },
   surprised(t, c, p) {
@@ -313,7 +332,6 @@ const ACTIONS: Record<ActionName, ActionFn> = {
     p.bodyRoll = 0.08 * e;
     p.headRoll = -0.15 * e;
     p.happy = 0.7 * e;
-    p.eyeOpen = 1 - 0.4 * e;
     p.mouthOpen = 0.3 * e;
     p.antLift = 0.2 * e;
     p.earLift = 0.4 * e;
@@ -585,12 +603,23 @@ export class Animator {
     // Face.
     const open = clamp(P.eyeOpen, 0, 1.25);
     const happy = clamp(P.happy, 0, 1);
-    // Upper lid: a hemispherical shell that rotates from tucked back (open)
-    // to covering the front of the eye (closed). Lower lid rises for squints.
-    const up = THREE.MathUtils.lerp(1.5, -1.65, clamp(open + happy * 0.5, 0, 1)) - (open > 1 ? (open - 1) * 0.6 : 0);
-    const lo = THREE.MathUtils.lerp(1.65, 0.62, happy);
+    // Lids are hemispherical shells hinged at the eye's corners. Upper lid:
+    // -1.65 is tucked back (open), 0.42 closed with the lash line low across
+    // the eye ("‿", like a sleeping eye) instead of wrapping the whole ball.
+    // Lower lid: 1.65 is tucked away, smaller values rise with an arched "◠" rim.
+    // Happy squeezes both together into "^^" arcs: the upper lid's line arches
+    // up over the raised lower lid.
+    const o = clamp(open, 0, 1);
+    let up = THREE.MathUtils.lerp(0.42, -1.65, o) - (open > 1 ? (open - 1) * 0.6 : 0);
+    up = Math.max(up, THREE.MathUtils.lerp(-1.65, -0.1, happy * happy));
+    const lo = Math.min(THREE.MathUtils.lerp(0.95, 1.65, o), THREE.MathUtils.lerp(1.65, 0.02, happy));
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
+    // When happy the lower lid grows over the upper one, so its arched lash
+    // line is the one that shows.
+    const ls = 0.99 + 0.07 * smoothstep(0.2, 0.8, happy);
+    face.lidLoL.scale.set(ls, -ls, ls);
+    face.lidLoR.scale.set(ls, -ls, ls);
     const ps = clamp(P.pupilSize, 0.5, 1.5);
     for (const ir of [face.irisL, face.irisR]) {
       const pupil = ir.getObjectByName('pupil')!;
@@ -604,6 +633,8 @@ export class Animator {
     const mo = clamp(P.mouthOpen, 0, 1);
     face.mouthOpen.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.12);
     face.mouthOpen.visible = mo > 0.04;
+    // A happy open mouth is a "D" (flat top, round bottom); a startled one an "O".
+    if (face.mouthOpen.morphTargetInfluences) face.mouthOpen.morphTargetInfluences[0] = clamp(happy * 1.3, 0, 1) * clamp(P.smile, 0, 1);
     face.smile.visible = mo < 0.25;
     face.smile.scale.set(1, clamp(P.smile, 0.05, 1.2), 1);
     face.blushMat.opacity = 0.35 + 0.5 * clamp(P.blush, 0, 1);

@@ -138,7 +138,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // Lids are vertex-coloured (darker towards the lash line) and get their own fur shells.
   const lidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
   const lowerLidMat = lidMat;
-  const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.3);
+  const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.12);
   const lashMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(pal.bodyDark).multiplyScalar(0.35), roughness: 0.7 });
   const noseMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(pal.bodyDark).lerp(new THREE.Color(0x5c2a36), 0.88), roughness: 0.32, clearcoat: 0.5 });
   const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1420, roughness: 0.6 });
@@ -364,7 +364,7 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     const lo = furryLid(lid.lower, LO_ARCH);
     // A softer lash line defines the lower lid when it rises into a happy squint.
     const loPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * (LID_R + 0.002), LO_ARCH, -Math.PI * 0.42 + (q / 24) * Math.PI * 0.84));
-    lo.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(loPts), 40, 0.0007, 5), m.lashMat));
+    lo.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(loPts), 40, 0.0012, 6), m.lashMat));
     lo.scale.set(0.99, -1, 0.99);
     eye.add(lo);
     return { eye, iris, up, lo };
@@ -409,8 +409,18 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     // Planar UVs so the painted cavity stretches with the mouth's shape.
     const pos = mouthGeo.attributes.position, uv = mouthGeo.attributes.uv;
     for (let i = 0; i < pos.count; i++) uv.setXY(i, pos.getX(i) / 0.021 + 0.5, pos.getY(i) / 0.021 + 0.5);
+    // Morph target: a grin. The top lip flattens and its corners curl up, so
+    // the open mouth becomes a "D" smile.
+    const grin = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      const xn = x / 0.0105;
+      grin.set([x * 1.08, y > 0 ? y * 0.22 + 0.0042 * xn * xn : y * 1.05 + 0.0016 * xn * xn, z], i * 3);
+    }
+    mouthGeo.morphAttributes.position = [new THREE.Float32BufferAttribute(grin, 3)];
   }
   const mouthOpen = new THREE.Mesh(mouthGeo, m.tongueMat);
+  mouthOpen.updateMorphTargets();
   mouthOpen.scale.set(1, 0.35, 0.01);
   mouthOpen.position.set(0, -0.004, -0.001);
   mouth.add(mouthOpen);
@@ -577,16 +587,20 @@ function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferG
     const t2 = theta * (1 + (arch * front) / (Math.PI / 2));
     v.set(Math.sin(t2) * Math.sin(phi), Math.cos(t2), Math.sin(t2) * Math.cos(phi));
     g.attributes.normal.setXYZ(i, v.x, v.y, v.z);
-    v.multiplyScalar(r);
+    // A soft fold a little above the lash line and a plump lid margin below it,
+    // so a closed lid reads as a lid and not as a smooth dome.
+    const crease = Math.exp(-Math.pow((rimT[i] - 0.6) / 0.08, 2));
+    v.multiplyScalar(r * (1 - 0.045 * crease + 0.025 * smooth((rimT[i] - 0.7) / 0.2) * (1 - smooth((rimT[i] - 0.94) / 0.06))));
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   const col = new Float32Array(pos.count * 3), fl = new Float32Array(pos.count);
   const c = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
     const k = smooth((1 - rimT[i]) / 0.35); // 1 on top of the lid, 0 at the lash line
-    c.copy(color).multiplyScalar(0.72 + 0.28 * k);
+    const crease = Math.exp(-Math.pow((rimT[i] - 0.6) / 0.06, 2));
+    c.copy(color).multiplyScalar((0.72 + 0.28 * k) * (1 - 0.3 * crease));
     col.set([c.r, c.g, c.b], i * 3);
-    fl[i] = 0.0036 * (0.3 + 0.7 * k);
+    fl[i] = 0.0036 * (0.3 + 0.7 * k) * (1 - 0.6 * crease);
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.setAttribute('furLen', new THREE.BufferAttribute(fl, 1));
