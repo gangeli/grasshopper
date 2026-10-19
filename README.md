@@ -86,8 +86,24 @@ npm run sheet            # just the pose contact sheet → artifacts/contact-she
   turning the emulated device, plays a round and walks the seeker around until Hopper is found.
 * `e2e/contact-sheet.spec.ts`: renders every animation at several times as a review sheet.
 
+### Stress testing mapping & pathfinding (realistic sensing, real data)
+
+See **[docs/stress-testing.md](docs/stress-testing.md)** for the full results. In short:
+
+* `test/mapping-stress.test.ts` (CI): ground-truth collision / landing / false-free guards in cluttered
+  rooms with blank walls, dark sofas, glass, mirrors, a person walking through, phone-like depth
+  (persistent bias, holes, flying pixels) and tracking errors (drift, relocalisation jumps, loss).
+* `test/runtime-safety.test.ts` (CI): a box dropped in Hopper's path mid-walk is detected and avoided.
+* `scripts/map-report.ts`, `scripts/real-report.ts`: full metric tables across sensor profiles.
+* `scripts/tum-replay.ts`: replays **real** RGB-D data (TUM fr1_room) and evaluates against held-out
+  real frames: `python3 -I scripts/tum/prep_tum.py <tum_dir> data/tum/fr1_room && npx tsx scripts/tum-replay.ts data/tum/fr1_room --phone --pose-noise`.
+
+**Record your own room on a phone:** open the app with `?record=1`, play/map as usual, tap ✕. The
+browser downloads a `.hopperrec` file (depth frames + tracked poses), and
+`npx tsx scripts/tum-replay.ts your-room.hopperrec --png map.png` reports the same metrics on it.
+
 Handy URL parameters: `?sim=1&room=living|bedroom|empty|r<seed>&bot=1&speed=4&fixed=1&seed=N`,
-`?emulate=phone|quest` (AR without a device).
+`?emulate=phone|quest` (AR without a device), `?record=1` (record an AR session for offline replay).
 
 ## Development
 

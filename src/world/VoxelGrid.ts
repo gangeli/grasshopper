@@ -308,7 +308,74 @@ export class VoxelGrid {
   solid(i: number, j: number, k: number): boolean {
     if (!this.inBounds(i, j, k)) return false;
     const n = this.idx(i, j, k);
-    return this.data[n] >= SOFT_SOLID || (this.shadow !== null && this.shadow[n] === 1);
+    return this.data[n] >= SOFT_SOLID || (this.shadow !== null && this.shadow[n] === 1) || this.isTransient(n);
+  }
+
+  // --- Dynamic obstacle layer --------------------------------------------------------------
+  // Space the map is confident is empty can't be flipped quickly by normal
+  // evidence. When new readings say "something is here" inside such space
+  // (a box put down, someone's feet), the cells become temporary obstacles
+  // straight away; they expire unless re-observed.
+  /** Current time (s), set by the world model as frames arrive. */
+  now = 0;
+  private transient = new Map<number, number>();
+  private surprise = new Map<number, { n: number; t: number }>();
+
+  /**
+   * A reading landed in voxel (i,j,k) although the map believes it empty.
+   * `dir` is the viewing ray direction; `floorJ` the first layer above the floor.
+   */
+  noteSurprise(i: number, j: number, k: number, dir: { x: number; z: number }, floorJ: number, holdSeconds = 3): void {
+    if (!this.inBounds(i, j, k)) return;
+    const n = this.idx(i, j, k);
+    const s = this.surprise.get(n);
+    // Two surprises within half a second: not a lone noisy pixel.
+    if (!(s && this.now - s.t < 0.5)) {
+      this.surprise.set(n, { n: 1, t: this.now });
+      return;
+    }
+    this.surprise.delete(n);
+    // What we saw is the front of something standing on the floor: mark the
+    // column down to the floor, and ~20cm behind the seen face, as obstacle.
+    const until = this.now + holdSeconds;
+    const L = Math.hypot(dir.x, dir.z) || 1;
+    for (let back = 0; back <= 0.2 + 1e-6; back += this.res) {
+      const ii = this.cellX(this.centerX(i) + (dir.x / L) * back), kk = this.cellZ(this.centerZ(k) + (dir.z / L) * back);
+      for (let jj = floorJ; jj <= j; jj++) {
+        if (!this.inBounds(ii, jj, kk)) continue;
+        const m = this.idx(ii, jj, kk);
+        if (!this.transient.has(m)) this.version++;
+        this.transient.set(m, until);
+      }
+    }
+  }
+
+  isTransient(n: number): boolean {
+    const until = this.transient.get(n);
+    if (until === undefined) return false;
+    if (until < this.now) {
+      this.transient.delete(n);
+      this.version++;
+      return false;
+    }
+    return true;
+  }
+
+  /** Occupied, or a fresh dynamic obstacle. */
+  blocked(i: number, j: number, k: number): boolean {
+    if (!this.inBounds(i, j, k)) return false;
+    const n = this.idx(i, j, k);
+    return this.data[n] > OCC_THRESHOLD || this.isTransient(n);
+  }
+
+  /** Drop expired bookkeeping (call occasionally). */
+  pruneTransient(): void {
+    for (const [n, until] of this.transient) if (until < this.now) (this.transient.delete(n), this.version++);
+    for (const [n, s] of this.surprise) if (this.now - s.t > 1) this.surprise.delete(n);
+  }
+
+  get transientCount(): number {
+    return this.transient.size;
   }
 
   /** Running estimate of where inside voxel (i,j,k) the surface is (height y). */

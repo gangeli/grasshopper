@@ -49,7 +49,7 @@ export class GameUI {
         const ready = game.canStart();
         hud.setPrimary(ready ? 'Play hide & seek' : 'Look around to map…', 'play', ready);
         hud.setSecondary(false);
-        hud.setStatus(ready ? `Mapped ${area.toFixed(1)} m²` : `Mapping… ${area.toFixed(1)} / 2 m²`);
+        hud.setStatus(ready ? `Mapped ${area.toFixed(1)} m²` : `Mapping… ${area.toFixed(1)} / 2 m² — walk around, look under tables`);
         break;
       }
       case 'countdown': {

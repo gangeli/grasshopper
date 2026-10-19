@@ -98,7 +98,7 @@ export type NoiseName = keyof typeof NOISE_PROFILES;
 const MAT_CODE = { matte: 0, textureless: 1, dark: 2, glass: 0, mirror: 0 } as const;
 
 /** Smooth 3D value noise in [-1,1], ~0.4m feature size. */
-function worldNoise(x: number, y: number, z: number): number {
+export function worldNoise(x: number, y: number, z: number): number {
   const s = 2.5;
   x *= s;
   y *= s;

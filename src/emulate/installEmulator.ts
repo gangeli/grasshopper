@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { XRDevice, metaQuest3, NativePlane, NativeMesh, XRRigidTransform, type XRDeviceConfig } from 'iwer';
 import { roomFromName, type SimRoom } from '../sim/SimRoom';
-import { buildPlanes, SimSensor } from '../sim/SimSensor';
+import { buildPlanes, SimSensor, worldNoise } from '../sim/SimSensor';
 
 /**
  * Installs the IWER WebXR runtime with a synthetic environment backed by one
@@ -136,7 +136,7 @@ class SimRoomSEM {
     return [new Float32Array(out.elements)];
   }
 
-  /** Z-depth in metres, row 0 at the top of the view, downsampled for speed. */
+  /** Z-depth in metres (with realistic phone-like error), row 0 at the top of the view, downsampled for speed. */
   computeDepthBuffer(viewMatrix: Float32Array | number[], projectionMatrix: Float32Array | number[], width: number, height: number) {
     const w = Math.min(width, 64), h = Math.max(1, Math.round((w * height) / width));
     const invProj = new THREE.Matrix4().fromArray(Array.from(projectionMatrix)).invert();
@@ -150,7 +150,13 @@ class SimRoomSEM {
         p.set(((c + 0.5) / w) * 2 - 1, 1 - ((r + 0.5) / h) * 2, -1).applyMatrix4(invProj).applyMatrix4(camWorld);
         const d = p.sub(eye).normalize();
         const hit = this.room.raycast(eye, d, 8);
-        data[r * w + c] = Number.isFinite(hit.t) ? hit.t * d.dot(fwd) : 0;
+        if (!Number.isFinite(hit.t) || Math.random() < 0.1) continue; // holes
+        // Phone-like error: per-pixel noise plus a persistent, world-anchored bias.
+        const z = hit.t * d.dot(fwd);
+        const sigma = 0.008 + 0.015 * z * z;
+        const at = eye.clone().addScaledVector(d, hit.t);
+        const gauss = Math.sqrt(-2 * Math.log(Math.max(1e-9, Math.random()))) * Math.cos(2 * Math.PI * Math.random());
+        data[r * w + c] = Math.max(0, z + sigma * (0.6 * gauss + 1.5 * worldNoise(at.x, at.y, at.z)));
       }
     return { data: data.buffer, width: w, height: h, rawValueToMeters: 1 };
   }

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { GameStack } from '../game/stack';
 import { viewFromCamera } from '../game/Visibility';
 import type { DepthImage } from '../world/DepthFrame';
+import { Recorder } from './Recorder';
 import type { Vec3 } from '../core/math';
 import type { Hud } from './Hud';
 import type { Stage } from './Stage';
@@ -31,6 +32,8 @@ export class ArMode {
   /** Diagnostics exposed for tests/debug overlay. */
   readonly stats = { planes: 0, meshes: 0, depthFrames: 0, depthRejected: 0, depthUsage: '' as string, refSpace: '' as string };
   onExit: (() => void) | null = null;
+  /** Session recorder (?record=1): depth + poses for offline evaluation. */
+  readonly recorder = new URLSearchParams(location.search).get('record') === '1' ? new Recorder() : null;
 
   constructor(readonly stage: Stage, readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     this.ui = new GameUI(stack, hud, voice);
@@ -82,7 +85,11 @@ export class ArMode {
     });
     this.hud.on('play', () => this.startRound());
     this.hud.on('again', () => this.startRound());
-    this.hud.on('exit', () => void session.end());
+    this.hud.on('exit', () => {
+      // Offer the recording before leaving.
+      if (this.recorder && this.recorder.count) this.recorder.download();
+      void session.end();
+    });
     this.hud.on('debug', () => (this.stage.debug = !this.stage.debug));
     this.hud.showPlaceHint(true, 'Point at the floor and tap to place Hopper');
     this.hud.say('Move your phone slowly so I can see the floor…', 6);
@@ -228,6 +235,7 @@ export class ArMode {
     // Same front end as the simulator: discontinuity filter + tracking gate.
     const img = sampleDepthImage(info, view, 40, 30);
     const emulated = !!viewerPose?.emulatedPosition;
+    if (this.recorder && !emulated) this.recorder.add(img, frame.predictedDisplayTime / 1000);
     if (!this.stack.world.ingestDepthImage(img, frame.predictedDisplayTime / 1000, emulated)) this.stats.depthRejected++;
   }
 }

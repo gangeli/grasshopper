@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 /**
  * Runs the real WebXR AR code path against the IWER emulator, with a
@@ -21,7 +21,7 @@ for (const profile of ['phone', 'quest']) {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     await page.setViewportSize({ width: 430, height: 860 });
-    await page.goto(`/?emulate=${profile}&room=living&seed=3`);
+    await page.goto(`/?emulate=${profile}&room=living&seed=3&record=1`);
     await expect(page.locator('#btn-ar')).toBeVisible({ timeout: 20_000 });
     await page.locator('#btn-ar').click();
     await expect.poll(() => ev(page, () => !!(window.__hopper?.ar as { session: unknown } | undefined)?.session), { timeout: 20_000 }).toBe(true);
@@ -50,6 +50,19 @@ for (const profile of ['phone', 'quest']) {
       expect(stats.depthPoints).toBeGreaterThan(1000);
     } else expect(stats.meshes as number).toBeGreaterThan(3);
     expect(stats.area).toBeGreaterThan(2);
+
+    // The session recorder captured the phone's depth + poses; save it for offline replay.
+    if (profile === 'phone') {
+      const b64 = await page.evaluate(async () => {
+        const rec = (window.__hopper?.ar as { recorder: { count: number; toBlob(): Blob } }).recorder;
+        const buf = new Uint8Array(await rec.toBlob().arrayBuffer());
+        let s = '';
+        for (let i = 0; i < buf.length; i += 0x8000) s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+        return { n: rec.count, data: btoa(s) };
+      });
+      expect(b64.n).toBeGreaterThan(20);
+      writeFileSync('artifacts/emulated-phone.hopperrec', Buffer.from(b64.data, 'base64'));
+    }
 
     // Face the pet and start a round.
     const pet = await ev(page, () => (window.__hopper?.stack as { pet: { pos: { x: number; y: number; z: number } } }).pet.pos);

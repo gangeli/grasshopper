@@ -67,6 +67,7 @@ export class WorldModel {
   floorRefinements = 0;
   private floorPlanes = new Map<string, { y: number; area: number }>();
   private pendingFloorOffset: number | null = null;
+  private histRefined = false;
   /** Set false once play starts: rebuilding the map mid-round would be disruptive. */
   allowFloorRefine = true;
   /** Number of depth points integrated so far (diagnostics/HUD). */
@@ -237,6 +238,13 @@ export class WorldModel {
   maxHitSigma = 0.06;
 
   readonly poseGate = new PoseGate();
+  private frameCount = 0;
+  /** Treat precise readings 2.5–6cm above the floor as weak obstacle evidence. */
+  lowBandEvidence = true;
+  /** Free-space carving stops this many sigmas short of each reading. */
+  carveSigmas = 3.5;
+  /** Dynamic-obstacle (change) detection, see VoxelGrid.noteSurprise. */
+  detectChanges = true;
   /** Weight free-space evidence by measurement precision (see ingestDepth). */
   weightedCarving = true;
   /** Gate depth frames on tracking quality. */
@@ -256,6 +264,10 @@ export class WorldModel {
     const M = img.camToWorld;
     const eye = { x: M[12], y: M[13], z: M[14] };
     const fwd = { x: -M[8], y: -M[9], z: -M[10] };
+    if (this.grid) {
+      this.grid.now = t;
+      if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
+    }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
     this.ingestDepth(eye, depthImageToPoints(img, this.filterEdges ? filterDiscontinuities(img) : img.depth));
     return true;
@@ -277,7 +289,7 @@ export class WorldModel {
       const sigma = this.depthSigmaA + this.depthSigmaB * d * d;
       const dirY = (p.y - eye.y) / d;
       // Collect floor-height evidence from close, steeply downward readings.
-      if (d < 2.0 && dirY < -0.4 && Math.abs(p.y - this.floorY) < 0.15) {
+      if (d < 1.5 && dirY < -0.4 && Math.abs(p.y - this.floorY) < 0.15) {
         this.floorHist[Math.round((p.y - this.floorY) * 100) + 15]++;
         this.floorSamples++;
       }
@@ -290,7 +302,7 @@ export class WorldModel {
         // Floor (within noise). Free space down to just above it.
         g.markObserved(p.x, p.z);
         const lowBand = p.y > this.floorY + 0.025;
-        if (lowBand && sigma <= 0.03) {
+        if (lowBand && sigma <= 0.03 && this.lowBandEvidence) {
           // Ambiguous: noisy floor or a small toy. A close, precise reading here
           // is weak obstacle evidence; consistent repeats make it an obstacle.
           g.add(g.cellX(p.x), g.cellY(p.y), g.cellZ(p.z), 5);
@@ -308,7 +320,13 @@ export class WorldModel {
         g.integrateRay(eye, target, false, 0, -1, 3 * sigma);
         continue;
       }
-      const carveShort = Math.max(r * 1.5, 2.5 * sigma);
+      // Change detection: a reading inside space we're confident is empty
+      // means something new is there (works at any range we trust at all).
+      if (this.detectChanges && sigma < 0.15 && p.y > this.floorY + 0.06) {
+        const i = g.cellX(p.x), j = g.cellY(p.y), k = g.cellZ(p.z);
+        if (g.inBounds(i, j, k) && g.data[g.idx(i, j, k)] <= -10) g.noteSurprise(i, j, k, { x: p.x - eye.x, z: p.z - eye.z }, this.floorLayer);
+      }
+      const carveShort = Math.max(r * 1.5, this.carveSigmas * sigma);
       // Free-space evidence is weighted by precision too: a close, precise ray
       // clears space confidently, a distant noisy one only nudges it.
       const miss = this.weightedCarving ? -Math.max(1, Math.round(3 * Math.min(1, 0.03 / sigma))) : -3;
@@ -356,7 +374,12 @@ export class WorldModel {
     this.pendingFloorOffset = Math.abs(off) >= (this.floorRefinements ? 0.05 : 0.03) ? off : null;
     if (prev === null || this.pendingFloorOffset === null || Math.abs(prev - off) > 0.015) return false;
     this.pendingFloorOffset = null;
-    return this.rebuildAtFloor(this.floorY + (prev + off) / 2);
+    // Depth alone (no floor plane to confirm) is biased on blank floors: allow
+    // only one small correction this way.
+    if (this.histRefined) return false;
+    this.histRefined = true;
+    const corr = Math.max(-0.03, Math.min(0.03, (prev + off) / 2));
+    return this.rebuildAtFloor(this.floorY + corr);
   }
 
   private rebuildAtFloor(newY: number): boolean {

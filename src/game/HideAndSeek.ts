@@ -4,7 +4,9 @@ import { clamp, wrapAngle } from '../core/math';
 import type { Animator } from '../pet/Animator';
 import type { PetController } from '../pet/PetController';
 import type { PetRig } from '../pet/PetModel';
-import { NavGrid, NAV_NONE } from '../world/NavGrid';
+import { NavGrid, NAV_NONE, type Waypoint } from '../world/NavGrid';
+import type { ActionName } from '../pet/Animator';
+import type { Vec3 } from '../core/math';
 import { segmentObjects, type WorldObject } from '../world/Segmentation';
 import type { WorldModel } from '../world/WorldModel';
 import { describeSpot, findHideSpots, type HideSpot } from './HideSpots';
@@ -77,7 +79,7 @@ export class HideAndSeek {
   private lastView: ViewPose | null = null;
   events: GameEvents = {};
   /** Diagnostics for tests and the debug overlay. */
-  readonly stats = { spotsConsidered: 0, planMs: 0, replans: 0, relaxed: false };
+  readonly stats = { spotsConsidered: 0, planMs: 0, replans: 0, relaxed: false, blockedReplans: 0 };
 
   constructor(
     readonly world: WorldModel,
@@ -170,7 +172,7 @@ export class HideAndSeek {
       const path = nav.findPath(this.pet.pos, s.pos);
       if (!path) continue;
       this.spot = s;
-      this.pet.follow(path, 1.0, s.kind === 'under' || s.kind === 'inside' ? 'hideLow' : 'hide', s.faceYaw);
+      this.follow(path, 1.0, s.kind === 'under' || s.kind === 'inside' ? 'hideLow' : 'hide', s.faceYaw);
       this.pet.events.onArrive = () => this.onArrivedAtSpot();
       break;
     }
@@ -206,6 +208,67 @@ export class HideAndSeek {
     this.anim.play('giggle', 0.15, true);
     this.peekTimer = 1.6;
     this.events.onGiggle?.(this.pet.pos.clone(), loud);
+  }
+
+  // --- Runtime path safety ---------------------------------------------------------------
+  // The map keeps changing while Hopper moves (someone walks into the way, a
+  // new object gets mapped). Plans are re-checked against the live map a few
+  // times a second; if the way ahead is blocked Hopper stops and replans.
+  private move: { goal: Vec3; cruise: number; action: ActionName; yaw: number | null } | null = null;
+  private guardTimer = 0;
+
+  private follow(path: Waypoint[], cruise: number, action: ActionName, yaw: number | null) {
+    const end = path[path.length - 1];
+    this.move = end ? { goal: { x: end.x, y: end.y, z: end.z }, cruise, action, yaw } : null;
+    this.pet.follow(path, cruise, action, yaw);
+  }
+
+  /** Is the rest of Hopper's current path still clear in the live map? */
+  pathAheadClear(lookahead = 1.2): boolean {
+    const g = this.world.grid, nav = this.nav;
+    if (!g || !nav) return true;
+    const path = this.pet.path;
+    let from: Vec3 = { x: this.pet.pos.x, y: this.pet.pos.y, z: this.pet.pos.z };
+    let dist = 0;
+    for (let s = this.pet.segment; s < path.length && dist < lookahead; s++) {
+      const w = path[s];
+      if (w.jump) {
+        if (this.pet.state !== 'air' && !nav.arcClear(from, w, w.lift ?? 0)) return false;
+      } else {
+        const len = Math.hypot(w.x - from.x, w.z - from.z);
+        const n = Math.max(1, Math.ceil(len / 0.04));
+        for (let q = 1; q <= n; q++) {
+          const t = q / n;
+          const x = from.x + (w.x - from.x) * t, z = from.z + (w.z - from.z) * t, y = from.y + (w.y - from.y) * t;
+          // Body core: a narrow column from just above the feet to head height.
+          for (const h of [0.07, 0.13, 0.19])
+            for (const [ox, oz] of [[0, 0], [0.05, 0], [-0.05, 0], [0, 0.05], [0, -0.05]])
+              if (g.blocked(g.cellX(x + ox), g.cellY(y + h), g.cellZ(z + oz))) return false;
+          if (dist + len * t > lookahead) break;
+        }
+        dist += len;
+      }
+      from = w;
+    }
+    return true;
+  }
+
+  private guardPath(dt: number) {
+    if (!this.pet.moving || !this.move || this.pet.state === 'air' || this.pet.state === 'crouch') return;
+    this.guardTimer -= dt;
+    if (this.guardTimer > 0) return;
+    this.guardTimer = 0.3;
+    if (this.pathAheadClear()) return;
+    this.stats.blockedReplans++;
+    const nav = this.refreshNav(true);
+    const m = this.move;
+    const path = nav?.findPath(this.pet.pos, m.goal);
+    if (path && path.length) this.pet.follow(path, m.cruise, m.action, m.yaw);
+    else {
+      // No way through right now: wait where we are (the obstacle may move away).
+      this.pet.stop('idle');
+      this.move = null;
+    }
   }
 
   /** Tap/select: if aimed at a visible pet, that counts as found. */
@@ -260,6 +323,7 @@ export class HideAndSeek {
         break;
     }
     this.tickTimers(dt);
+    this.guardPath(dt);
     this.pet.update(dt);
     this.anim.update(dt);
   }
@@ -281,7 +345,7 @@ export class HideAndSeek {
         const path = nav.findPath(this.pet.pos, g);
         if (path) {
           const faceYaw = Math.atan2(view.pos.x - g.x, view.pos.z - g.z);
-          this.pet.follow(path, 0.55, 'idle', faceYaw);
+          this.follow(path, 0.55, 'idle', faceYaw);
           this.roamTimer = 1.5;
           return;
         }
@@ -385,7 +449,7 @@ export class HideAndSeek {
       this.relocated = true;
       this.stats.replans++;
       this.spot = s;
-      this.pet.follow(path, 0.9, s.kind === 'under' || s.kind === 'inside' ? 'hideLow' : 'hide', s.faceYaw);
+      this.follow(path, 0.9, s.kind === 'under' || s.kind === 'inside' ? 'hideLow' : 'hide', s.faceYaw);
       return;
     }
   }
@@ -399,7 +463,7 @@ export class HideAndSeek {
       const goal = nav.nearest({ x: this.pet.pos.x + (dx / d) * 0.6, y: this.world.floorY, z: this.pet.pos.z + (dz / d) * 0.6 }, 0.5);
       if (goal !== NAV_NONE) {
         const path = nav.findPath(this.pet.pos, nav.pos(goal));
-        if (path) this.pet.follow(path, 0.8, 'wave', Math.atan2(dx, dz));
+        if (path) this.follow(path, 0.8, 'wave', Math.atan2(dx, dz));
       }
     }
     this.foundIt(true);

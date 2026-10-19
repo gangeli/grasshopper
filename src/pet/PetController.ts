@@ -27,6 +27,10 @@ export class PetController {
   state: MoveState = 'idle';
   path: Waypoint[] = [];
   private seg = 0;
+  /** Index of the waypoint currently being travelled to. */
+  get segment(): number {
+    return this.seg;
+  }
   private stateT = 0;
   private speed = 0;
   private hopPhase = 0;

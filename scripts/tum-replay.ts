@@ -1,8 +1,11 @@
 /**
- * Replay a real RGB-D recording (TUM format, prepared by scripts/tum/prep_tum.py)
- * through the world model and navigation, and evaluate against held-out real
- * frames. Usage:
+ * Replay a real RGB-D recording through the world model and navigation, and
+ * evaluate against held-out real frames. Input is either a TUM sequence
+ * prepared by scripts/tum/prep_tum.py (<prefix>.json + <prefix>.bin) or a
+ * session recorded on a phone with the app's ?record=1 mode (*.hopperrec).
+ * Usage:
  *   npx tsx scripts/tum-replay.ts data/tum/fr1_room [--pose-noise] [--phone] [--png out.png]
+ *   npx tsx scripts/tum-replay.ts my-living-room.hopperrec
  *
  *   --pose-noise  corrupt the mapping frames' poses with phone-like drift,
  *                 jitter and relocalisation jumps (held-out frames keep the
@@ -22,9 +25,21 @@ const poseNoise = args.includes('--pose-noise');
 const phone = args.includes('--phone');
 const pngOut = args.includes('--png') ? args[args.indexOf('--png') + 1] : null;
 
-const meta = JSON.parse(readFileSync(`${prefix}.json`, 'utf8')) as { w: number; h: number; invProj: number[]; frames: { t: number; camToWorld: number[] }[] };
-const bin = readFileSync(`${prefix}.bin`);
-const all = new Float32Array(bin.buffer, bin.byteOffset, bin.byteLength / 4);
+type Meta = { w: number; h: number; invProj: number[]; frames: { t: number; camToWorld: number[] }[] };
+let meta: Meta, all: Float32Array;
+if (prefix.endsWith('.hopperrec')) {
+  // A session recorded on a phone by the app (?record=1), see src/app/Recorder.ts.
+  const buf = readFileSync(prefix);
+  const hl = buf.readUInt32LE(0);
+  meta = JSON.parse(buf.subarray(4, 4 + hl).toString('utf8'));
+  const start = 4 + hl + ((4 - ((4 + hl) % 4)) % 4);
+  const data = buf.subarray(start);
+  all = new Float32Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+} else {
+  meta = JSON.parse(readFileSync(`${prefix}.json`, 'utf8'));
+  const bin = readFileSync(`${prefix}.bin`);
+  all = new Float32Array(bin.buffer, bin.byteOffset, bin.byteLength / 4);
+}
 const W = meta.w, H = meta.h;
 
 function frame(i: number): DepthImage {
@@ -73,8 +88,27 @@ function corrupt(M: number[]): number[] {
 
 // --- Build the map from even frames -----------------------------------------------------------
 const world = new WorldModel();
+Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
 const first = meta.frames[0].camToWorld;
-world.setFloor(0, { x: first[12], y: 0, z: first[14] });
+// Emulate the placement tap (a hit-test on the floor, ~1cm accurate on ARCore):
+// the mode of steep, close floor readings in the first second of data.
+const tapFloor = (() => {
+  const hist = new Map<number, number>();
+  for (let i = 0; i < Math.min(10, meta.frames.length); i++) {
+    const img = frame(i);
+    const M = img.camToWorld;
+    for (const p of depthImageToPoints(img)) {
+      const d = Math.hypot(p.x - M[12], p.y - M[13], p.z - M[14]);
+      if (d > 2 || (p.y - M[13]) / d > -0.6 || Math.abs(p.y) > 0.3) continue;
+      const b = Math.round(p.y * 100);
+      hist.set(b, (hist.get(b) ?? 0) + 1);
+    }
+  }
+  let best = 0, bn = -1;
+  for (const [b, n] of hist) if (n > bn) (bn = n), (best = b);
+  return best / 100 + (rng.next() - 0.5) * 0.02;
+})();
+world.setFloor(tapFloor, { x: first[12], y: tapFloor, z: first[14] });
 const mapIdx: number[] = [], heldIdx: number[] = [];
 for (let i = 0; i < meta.frames.length; i++) (i % 2 === 0 ? mapIdx : heldIdx).push(i);
 let rejected = 0;
@@ -87,7 +121,7 @@ for (const i of mapIdx) {
 }
 const mapMs = performance.now() - t0;
 const g = world.grid!;
-const nav = new NavGrid(world);
+const nav = new NavGrid(world, JSON.parse(process.env.NAV ?? '{}'));
 
 // --- Evaluate against held-out frames (ground-truth poses) -------------------------------------
 let surfPts = 0, surfHit = 0, rays = 0, raysPhantom = 0, ffPts = 0, ffBad = 0;
