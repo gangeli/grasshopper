@@ -139,6 +139,16 @@ and after a loss, new territory was read as a contradiction. In the 3 of 12 soak
 floor was dressed fully textureless, camera depth mapped under 1 m² of floor: the game keeps
 asking the player for more light / a textured floor rather than inventing ground.
 
+| Camera-only fault soak (12 rooms × 5 min, faults every 60–90 s) | Before these fixes | After |
+|---|---|---|
+| Longest stretch with no round going anywhere | 262 s | **32 s** (median 18 s) |
+| Crashes / exceptions | 0 | 0 |
+| Rounds played | 40 (9 rooms) | 40 (10 rooms; the 3 textureless-floor rooms play little or not at all) |
+| Pet inside real furniture | 49 s in one room (r23) | 42 s total, 26 s of it in one living-room run that a re-run on the final code (0 s) didn't reproduce |
+
+A floor fault in a room with a textureless floor stays uncorrected: neither camera depth nor
+(on a real phone) plane detection sees that floor.
+
 **Real camera images (TUM fr1/room colour frames, Kinect as reference)**, after undistortion: motion
 stereo has a median error of 4.3% (signed −1.2%), 6% of pixels off by >25%. Mapping from *dense*
 (filled) stereo without the consistency gate puts phantom surfaces on 31% of held-out rays and real
