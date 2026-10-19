@@ -125,3 +125,110 @@ export class PoseGate {
     return ok;
   }
 }
+
+/**
+ * Multi-view consistency check for depth that may be densified (ARCore's
+ * "full depth", which WebXR delivers): holes in texture-less areas are
+ * filled by interpolation, and those guesses change as the camera moves,
+ * while real geometry doesn't. Each pixel of a new frame is lifted to 3D and
+ * re-projected into recent frames taken from elsewhere:
+ *  - consistent: an earlier frame saw a surface at the same depth;
+ *  - contradicted: an earlier frame looked *through* that point, i.e. saw
+ *    something clearly farther along the same line of sight.
+ * Pixels with no support from any other view, or with any contradiction,
+ * are dropped. This costs coverage and saves the map from
+ * hallucinated surfaces and, worse, hallucinated free space.
+ */
+export interface ConsistencyOptions {
+  /** Frames kept for comparison. */
+  history: number;
+  /** Minimum camera displacement (m) or rotation (rad) for an earlier view to count as "elsewhere". */
+  minBaseline: number;
+  minAngle: number;
+  maxAge: number;
+  /** Depth agreement tolerance: max(abs, rel × depth). */
+  tolAbs: number;
+  tolRel: number;
+  /** Required supporting views. */
+  minSupport: number;
+}
+
+export const DEFAULT_CONSISTENCY: ConsistencyOptions = { history: 8, minBaseline: 0.05, minAngle: 0.08, maxAge: 3, tolAbs: 0.04, tolRel: 0.05, minSupport: 1 };
+
+export class DepthConsistency {
+  readonly opts: ConsistencyOptions;
+  private frames: { img: DepthImage; inv: number[]; t: number }[] = [];
+  /** Running counts (for reports). */
+  kept = 0;
+  dropped = 0;
+  constructor(opts: Partial<ConsistencyOptions> = {}) {
+    this.opts = { ...DEFAULT_CONSISTENCY, ...opts };
+  }
+
+  reset(): void {
+    this.frames = [];
+  }
+
+  /** Returns a filtered copy of `depth` (0 = rejected) and remembers the frame. */
+  filter(img: DepthImage, depth: Float32Array, t: number): Float32Array {
+    const O = this.opts, M = img.camToWorld;
+    const others = this.frames.filter((f) => {
+      if (t - f.t > O.maxAge || t < f.t) return false;
+      const F = f.img.camToWorld;
+      const b = Math.hypot(F[12] - M[12], F[13] - M[13], F[14] - M[14]);
+      const ang = Math.acos(Math.max(-1, Math.min(1, F[8] * M[8] + F[9] * M[9] + F[10] * M[10])));
+      return b >= O.minBaseline || ang >= O.minAngle;
+    });
+    const out = new Float32Array(depth.length);
+    const pts = depthImageToPoints(img, depth);
+    // depthImageToPoints skips invalid pixels; walk pixels in the same order.
+    let q = 0;
+    for (let i = 0; i < depth.length; i++) {
+      if (!(depth[i] > 0.05)) continue;
+      const p = pts[q++];
+      let support = 0, contra = false;
+      for (const f of others) {
+        const z = sampleDepthAt(f.img, f.inv, p);
+        if (z === null) continue;
+        const { proj, seen } = z;
+        if (!(seen > 0.05)) continue;
+        const tol = Math.max(O.tolAbs, O.tolRel * proj);
+        if (Math.abs(seen - proj) <= tol) support++;
+        else if (seen > proj + 2 * tol) {
+          contra = true;
+          break;
+        }
+      }
+      if (!contra && support >= O.minSupport) {
+        out[i] = depth[i];
+        this.kept++;
+      } else this.dropped++;
+    }
+    this.frames.push({ img: { ...img, depth: depth.slice() }, inv: invertRigidArr(M), t });
+    if (this.frames.length > O.history) this.frames.shift();
+    return out;
+  }
+}
+
+function invertRigidArr(M: ArrayLike<number>): number[] {
+  const o = new Array(16).fill(0);
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[c * 4 + r] = M[r * 4 + c];
+  for (let r = 0; r < 3; r++) o[12 + r] = -(o[r] * M[12] + o[4 + r] * M[13] + o[8 + r] * M[14]);
+  o[15] = 1;
+  return o;
+}
+
+/** Project world point p into a depth image: its z-depth there, and the depth the image recorded at that pixel. */
+function sampleDepthAt(img: DepthImage, inv: number[], p: Vec3): { proj: number; seen: number } | null {
+  const cx = inv[0] * p.x + inv[4] * p.y + inv[8] * p.z + inv[12];
+  const cy = inv[1] * p.x + inv[5] * p.y + inv[9] * p.z + inv[13];
+  const cz = inv[2] * p.x + inv[6] * p.y + inv[10] * p.z + inv[14];
+  if (cz > -0.05) return null;
+  // Inverse of depthImageToPoints: with the inverse projections used here (no
+  // z terms in x/y), a view direction is (P0·nx + P12 − P8, P5·ny + P13 − P9, −1).
+  const P = img.invProj;
+  const nx = (cx / -cz - (P[12] - P[8])) / P[0], ny = (cy / -cz - (P[13] - P[9])) / P[5];
+  if (nx < -1 || nx > 1 || ny < -1 || ny > 1) return null;
+  const x = Math.min(img.w - 1, Math.floor(((nx + 1) / 2) * img.w)), y = Math.min(img.h - 1, Math.floor(((1 - ny) / 2) * img.h));
+  return { proj: -cz, seen: img.depth[y * img.w + x] };
+}

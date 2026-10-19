@@ -1,6 +1,6 @@
 import type { Vec3 } from '../core/math';
 import { VoxelGrid } from './VoxelGrid';
-import { depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
+import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 
 /**
  * Everything the pet knows about the physical room. It fuses the sensor
@@ -251,6 +251,11 @@ export class WorldModel {
   gateFrames = true;
   /** Drop depth-discontinuity pixels. */
   filterEdges = true;
+  /**
+   * Multi-view consistency gate for densified depth without confidence (what
+   * WebXR depth-sensing delivers on phones without a depth sensor). Null = off.
+   */
+  multiView: DepthConsistency | null = null;
   /** Max height above the floor at which a noisy reading still counts as floor. */
   floorTolCap = 0.06;
 
@@ -270,7 +275,9 @@ export class WorldModel {
     }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
     const sig: number[] | undefined = img.sigma ? [] : undefined;
-    this.ingestDepth(eye, depthImageToPoints(img, this.filterEdges ? filterDiscontinuities(img) : img.depth, sig), 4.5, sig);
+    let depth = this.filterEdges ? filterDiscontinuities(img) : img.depth;
+    if (this.multiView) depth = this.multiView.filter(img, depth, t);
+    this.ingestDepth(eye, depthImageToPoints(img, depth, sig), 4.5, sig);
     return true;
   }
 

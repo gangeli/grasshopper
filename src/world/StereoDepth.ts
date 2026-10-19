@@ -63,6 +63,13 @@ export interface StereoOptions {
   minSources: number;
   /** Depths beyond this are dropped from the output (the sweep still covers maxDepth). */
   maxOutputDepth: number;
+  /**
+   * Densify like ARCore's "full depth" (what WebXR depth-sensing delivers):
+   * fill holes from the confident matches, guided by image intensity so fills
+   * don't bleed across edges. The output then carries no per-pixel sigma, as
+   * on a real phone.
+   */
+  fill: boolean;
   /** Frames kept for source selection. */
   history: number;
 }
@@ -88,6 +95,7 @@ export const DEFAULT_STEREO: StereoOptions = {
   maxAngVel: 1.0,
   minSources: 3,
   maxOutputDepth: 3.5,
+  fill: false,
   history: 24,
 };
 
@@ -312,14 +320,93 @@ export class MotionStereo {
         confidence[gy * gw + gx] = margin;
         stats.accepted++;
       }
-    const tx = gw * st / 2 / fx, ty = gh * st / 2 / fy;
-    const n = 0.1, f = 100;
-    const invProj = [tx, 0, 0, 0, 0, ty, 0, 0, 0, 0, 0, (n - f) / (2 * f * n), 0, 0, -1, (f + n) / (2 * f * n)];
+    // Inverse projection of the output grid, including an off-centre principal point:
+    // NDC (nx, ny) -> view-space point (a·nx + b, c·ny + e, -1).
+    const W = gw * st, H = gh * st;
+    const invProj = [W / 2 / fx, 0, 0, 0, 0, H / 2 / fy, 0, 0, 0, 0, 0, 0, (W / 2 - cx) / fx, (cy - H / 2) / fy, -1, 1];
+    if (O.fill) {
+      const guide = new Float32Array(gw * gh);
+      for (let gy = 0; gy < gh; gy++)
+        for (let gx = 0; gx < gw; gx++) {
+          let a = 0;
+          for (let dy = 0; dy < st; dy++) for (let dx = 0; dx < st; dx++) a += ref.gray[(gy * st + dy) * w + gx * st + dx];
+          guide[gy * gw + gx] = a / (st * st);
+        }
+      const dense = densify(depth, guide, gw, gh);
+      return { image: { w: gw, h: gh, depth: dense, invProj, camToWorld: ref.camToWorld }, confidence, sources: srcs.length, stats };
+    }
     return { image: { w: gw, h: gh, depth, invProj, camToWorld: ref.camToWorld, sigma }, confidence, sources: srcs.length, stats };
   }
 }
 
 const clampI = (x: number, n: number) => (x < 0 ? 0 : x >= n ? n - 1 : x);
+
+/**
+ * Edge-aware hole filling in inverse depth: a push-pull pyramid gives every
+ * hole a smooth guess from its surroundings, then joint-bilateral passes pull
+ * filled pixels towards neighbours of similar intensity. Known pixels stay.
+ */
+export function densify(sparse: Float32Array, guide: Float32Array, w: number, h: number, iters = 6, sigmaI = 12): Float32Array {
+  // Pyramid of (sum of inverse depth, weight).
+  type Lvl = { w: number; h: number; v: Float32Array; wt: Float32Array };
+  const base: Lvl = { w, h, v: new Float32Array(w * h), wt: new Float32Array(w * h) };
+  for (let i = 0; i < w * h; i++)
+    if (sparse[i] > 0) {
+      base.v[i] = 1 / sparse[i];
+      base.wt[i] = 1;
+    }
+  const pyr: Lvl[] = [base];
+  while (pyr[pyr.length - 1].w > 2 && pyr[pyr.length - 1].h > 2) {
+    const a = pyr[pyr.length - 1];
+    const b: Lvl = { w: Math.ceil(a.w / 2), h: Math.ceil(a.h / 2), v: new Float32Array(Math.ceil(a.w / 2) * Math.ceil(a.h / 2)), wt: new Float32Array(Math.ceil(a.w / 2) * Math.ceil(a.h / 2)) };
+    for (let y = 0; y < a.h; y++)
+      for (let x = 0; x < a.w; x++) {
+        const j = (y >> 1) * b.w + (x >> 1);
+        b.v[j] += a.v[y * a.w + x] * a.wt[y * a.w + x];
+        b.wt[j] += a.wt[y * a.w + x];
+      }
+    for (let j = 0; j < b.v.length; j++) if (b.wt[j] > 0) b.v[j] /= b.wt[j];
+    for (let j = 0; j < b.wt.length; j++) b.wt[j] = Math.min(1, b.wt[j]);
+    pyr.push(b);
+  }
+  // Pull: fill each level's holes from the coarser level.
+  for (let l = pyr.length - 2; l >= 0; l--) {
+    const a = pyr[l], b = pyr[l + 1];
+    for (let y = 0; y < a.h; y++)
+      for (let x = 0; x < a.w; x++) {
+        const i = y * a.w + x;
+        const c = b.v[(y >> 1) * b.w + (x >> 1)];
+        a.v[i] = a.wt[i] * a.v[i] + (1 - a.wt[i]) * c;
+      }
+  }
+  // Edge-aware refinement of filled pixels.
+  let cur = base.v;
+  const known = base.wt;
+  for (let it = 0; it < iters; it++) {
+    const next = new Float32Array(cur);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (known[i] >= 1) continue;
+        let sw = 0, sv = 0;
+        for (let dy = -2; dy <= 2; dy++)
+          for (let dx = -2; dx <= 2; dx++) {
+            const xx = x + dx, yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+            const j = yy * w + xx;
+            const dI = guide[j] - guide[i];
+            const wgt = Math.exp(-(dI * dI) / (2 * sigmaI * sigmaI)) * (known[j] >= 1 ? 2 : 1);
+            sw += wgt;
+            sv += wgt * cur[j];
+          }
+        if (sw > 0) next[i] = sv / sw;
+      }
+    cur = next;
+  }
+  const out = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) out[i] = cur[i] > 0 ? 1 / cur[i] : 0;
+  return out;
+}
 
 /**
  * Modified 5x5 census on a lightly smoothed image: each neighbour is compared

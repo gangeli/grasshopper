@@ -11,21 +11,32 @@
  *                 jitter and relocalisation jumps (held-out frames keep the
  *                 motion-capture ground truth)
  *   --phone       resample to a 40x30 depth grid like the app uses on ARCore
+ *   --stereo      build the map from motion stereo on the real colour images
+ *                 (prep with --rgb) instead of the Kinect depth; held-out
+ *                 frames still use the Kinect for evaluation
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { WorldModel } from '../src/world/WorldModel';
 import { NavGrid } from '../src/world/NavGrid';
-import { depthImageToPoints, type DepthImage } from '../src/world/DepthFrame';
+import { DepthConsistency, depthImageToPoints, type DepthImage } from '../src/world/DepthFrame';
 import { Rng } from '../src/core/rng';
+import { MotionStereo, type StereoOptions } from '../src/world/StereoDepth';
 import type { Vec3 } from '../src/core/math';
 
 const args = process.argv.slice(2);
 const prefix = args[0] ?? 'data/tum/fr1_room';
 const poseNoise = args.includes('--pose-noise');
 const phone = args.includes('--phone');
+const stereoMode = args.includes('--stereo');
 const pngOut = args.includes('--png') ? args[args.indexOf('--png') + 1] : null;
 
-type Meta = { w: number; h: number; invProj: number[]; frames: { t: number; camToWorld: number[] }[] };
+type Meta = {
+  w: number;
+  h: number;
+  invProj: number[];
+  frames: { t: number; camToWorld: number[] }[];
+  rgb?: { w: number; h: number; fx: number; fy: number; cx: number; cy: number; poses: number[][]; t: number[] };
+};
 let meta: Meta, all: Float32Array;
 if (prefix.endsWith('.hopperrec')) {
   // A session recorded on a phone by the app (?record=1), see src/app/Recorder.ts.
@@ -86,9 +97,32 @@ function corrupt(M: number[]): number[] {
   return out;
 }
 
+// VIO-like error for camera frames: the same drift and jumps, but smooth frame to frame.
+const errS = { x: 0, y: 0, z: 0, yaw: 0 };
+function corruptSmooth(M: number[]): number[] {
+  const before = { ...err };
+  corrupt(M);
+  const jump = { x: err.x - before.x, z: err.z - before.z, yaw: err.yaw - before.yaw };
+  const isJump = Math.abs(jump.x) > 0.02 || Math.abs(jump.z) > 0.02;
+  for (const k of ['x', 'y', 'z', 'yaw'] as const) errS[k] += isJump && k !== 'y' ? jump[k] : (err[k] - errS[k]) * 0.03;
+  const c = Math.cos(errS.yaw), s = Math.sin(errS.yaw);
+  const out = M.slice();
+  for (const col of [0, 4, 8]) {
+    const x = M[col], z = M[col + 2];
+    out[col] = c * x + s * z;
+    out[col + 2] = -s * x + c * z;
+  }
+  const px = M[12], pz = M[14];
+  out[12] = c * px + s * pz + errS.x + gauss() * 0.0004;
+  out[13] = M[13] + errS.y + gauss() * 0.0004;
+  out[14] = -s * px + c * pz + errS.z + gauss() * 0.0004;
+  return out;
+}
+
 // --- Build the map from even frames -----------------------------------------------------------
 const world = new WorldModel();
 Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
+if (process.env.MULTIVIEW) world.multiView = new DepthConsistency(JSON.parse(process.env.MULTIVIEW === '1' ? '{}' : process.env.MULTIVIEW));
 const first = meta.frames[0].camToWorld;
 // Emulate the placement tap (a hit-test on the floor, ~1cm accurate on ARCore):
 // the mode of steep, close floor readings in the first second of data.
@@ -113,11 +147,68 @@ const mapIdx: number[] = [], heldIdx: number[] = [];
 for (let i = 0; i < meta.frames.length; i++) (i % 2 === 0 ? mapIdx : heldIdx).push(i);
 let rejected = 0;
 const t0 = performance.now();
+const stereo = new MotionStereo(JSON.parse(process.env.STEREO ?? '{}') as Partial<StereoOptions>);
+const gray = stereoMode ? readFileSync(`${prefix}.gray`) : null;
+const d160 = stereoMode ? (() => { const b = readFileSync(`${prefix}.d160`); return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4); })() : null;
+const stereoErr: number[] = [];
+let stereoPx = 0, stereoFrames = 0, stereoCand = 0;
 for (const i of mapIdx) {
+  if (stereoMode) {
+    const R = meta.rgb!;
+    const truePose = R.poses[i];
+    const pose = poseNoise ? corruptSmooth(Array.from(truePose)) : truePose;
+    stereo.push({ w: R.w, h: R.h, gray: new Uint8Array(gray!.buffer, gray!.byteOffset + i * R.w * R.h, R.w * R.h), fx: R.fx, fy: R.fy, cx: R.cx, cy: R.cy, camToWorld: pose, t: R.t[i] });
+    const res = stereo.compute();
+    if (process.env.DUMP && i % 40 === 0) dumpStereo(i, res?.image.depth ?? null, res?.image.w ?? 0);
+    if (!res) continue;
+    stereoFrames++;
+    stereoCand += res.stats.candidates;
+    // Accuracy against the Kinect: lift each stereo pixel with the true colour pose,
+    // project it into the depth frame (true pose) and compare depths there.
+    const pts = depthImageToPoints({ ...res.image, camToWorld: truePose });
+    const D = meta.frames[i].camToWorld, inv = invRigid(D);
+    for (const p of pts) {
+      stereoPx++;
+      const cx = inv[0] * p.x + inv[4] * p.y + inv[8] * p.z + inv[12], cy = inv[1] * p.x + inv[5] * p.y + inv[9] * p.z + inv[13], cz = inv[2] * p.x + inv[6] * p.y + inv[10] * p.z + inv[14];
+      if (cz > -0.1) continue;
+      const u = Math.floor((R.fx * cx) / -cz + R.cx), v = Math.floor((-R.fy * cy) / -cz + R.cy);
+      if (u < 0 || v < 0 || u >= R.w || v >= R.h) continue;
+      const k = d160![i * R.w * R.h + v * R.w + u];
+      if (k > 0.3 && k < 4.5) stereoErr.push((-cz - k) / k);
+    }
+    if (!world.ingestDepthImage(res.image, R.t[i])) rejected++;
+    world.refineFloor();
+    continue;
+  }
   const img = frame(i);
   if (poseNoise) img.camToWorld = corrupt(Array.from(img.camToWorld));
   if (!world.ingestDepthImage(img, meta.frames[i].t)) rejected++;
   world.refineFloor();
+}
+function dumpStereo(i: number, dep: Float32Array | null, gw: number) {
+  const R = meta.rgb!, W2 = R.w * 3, buf = Buffer.alloc(W2 * R.h);
+  for (let y = 0; y < R.h; y++)
+    for (let x = 0; x < R.w; x++) {
+      buf[y * W2 + x] = gray![i * R.w * R.h + y * R.w + x];
+      const gx = Math.floor(x / 3), gy = Math.floor(y / 3);
+      const d = dep && gx < gw ? dep[gy * gw + gx] ?? 0 : 0;
+      buf[y * W2 + R.w + x] = d ? Math.min(255, 40 + d * 50) : 0;
+      const k = d160![i * R.w * R.h + y * R.w + x];
+      buf[y * W2 + 2 * R.w + x] = k ? Math.min(255, 40 + k * 50) : 0;
+    }
+  writeFileSync(`artifacts/cam/tum-${i}.pgm`, Buffer.concat([Buffer.from(`P5 ${W2} ${R.h} 255\n`), buf]));
+}
+function invRigid(M: ArrayLike<number>): number[] {
+  const o = new Array(16).fill(0);
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[c * 4 + r] = M[r * 4 + c];
+  for (let r = 0; r < 3; r++) o[12 + r] = -(o[r] * M[12] + o[4 + r] * M[13] + o[8 + r] * M[14]);
+  o[15] = 1;
+  return o;
+}
+if (stereoMode) {
+  const a = stereoErr.map(Math.abs).sort((x, y) => x - y), sg = stereoErr.slice().sort((x, y) => x - y);
+  const q = (arr: number[], f: number) => (arr[Math.floor(arr.length * f)] * 100).toFixed(1) + '%';
+  console.log(`  motion stereo on real RGB: ${stereoFrames}/${mapIdx.length} frames with depth, density ${((stereoPx / Math.max(1, stereoCand)) * 100).toFixed(1)}%, vs Kinect (${a.length} px): |err| median ${q(a, 0.5)} p90 ${q(a, 0.9)}, signed median ${q(sg, 0.5)}, >10% ${((a.filter((e) => e > 0.1).length / a.length) * 100).toFixed(1)}%, >25% ${((a.filter((e) => e > 0.25).length / a.length) * 100).toFixed(1)}%`);
 }
 const mapMs = performance.now() - t0;
 const g = world.grid!;
@@ -227,7 +318,7 @@ for (let a = 0; a < nav.count; a += 7) {
 }
 
 const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(1) + '%' : 'n/a');
-console.log(`TUM replay ${prefix}${poseNoise ? ' +pose-noise' : ''}${phone ? ' +phone-res' : ''}: ${mapIdx.length} mapping frames (${rejected} gated), ${heldIdx.length} held-out, map ${(mapIdx.length / (mapMs / 1000)).toFixed(0)} fps`);
+console.log(`TUM replay ${prefix}${poseNoise ? ' +pose-noise' : ''}${phone ? ' +phone-res' : ''}${stereoMode ? ' +STEREO-from-RGB' : ''}: ${mapIdx.length} mapping frames (${rejected} gated), ${heldIdx.length} held-out, map ${(mapIdx.length / (mapMs / 1000)).toFixed(0)} fps`);
 console.log(`  floor ${world.floorY.toFixed(3)} (refined ${world.floorRefinements}x), walkable ${(nav.count * g.res * g.res).toFixed(1)} m², nodes ${nav.count}`);
 console.log(`  held-out surface consistency ${pct(surfHit, surfPts)} | rays through phantoms ${pct(raysPhantom, rays)} | false-free strict(4cm) ${pct(ffBad, ffPts)} robust(8cm,<2m) ${pct(ffBad8, ffPts8)}`);
 console.log(`  pet-body intrusions: strict ${pct(bodyHits.size, nav.count)} | ≥3pts/2frames ${pct(bodyHitsRobust.size, nav.count)} | real object (≥25% of footprint readings 8-22cm up) ${pct(bodyHitsObject.size, nav.count)}`);
