@@ -62,6 +62,32 @@ export function visibleFraction(g: VoxelGrid, eye: Vec3, points: Vec3[], skipEnd
   return vis / points.length;
 }
 
+/**
+ * Like `visibleFraction`, but stops casting rays once more than `limit` of the
+ * points are visible, returning a value above `limit`. Exact at or below it.
+ */
+export function visibleFractionUpTo(g: VoxelGrid, eye: Vec3, points: Vec3[], limit: number, skipEnd = 0.04): number {
+  const n = points.length;
+  let vis = 0;
+  for (const q of points) {
+    if (g.segmentClear(eye, q, skipEnd)) vis++;
+    if (vis > limit * n) break;
+  }
+  return vis / n;
+}
+
+/** Exactly `visibleFraction(...) < frac`, deciding with as few rays as it can. */
+export function visibleLessThan(g: VoxelGrid, eye: Vec3, points: Vec3[], frac: number, skipEnd = 0.04): boolean {
+  const n = points.length, need = frac * n;
+  let vis = 0;
+  for (let i = 0; i < n; i++) {
+    if (g.segmentClear(eye, points[i], skipEnd)) vis++;
+    if (vis >= need) return false;
+    if (vis + (n - i - 1) < need) return true;
+  }
+  return vis < need;
+}
+
 export function samplesAt(p: Vec3, offsets: Vec3[] = HIDE_SAMPLES, yaw = 0): Vec3[] {
   const c = Math.cos(yaw), s = Math.sin(yaw);
   // Rotation about +Y by yaw (pet's +Z forward maps to (sin yaw, 0, cos yaw)).
@@ -171,7 +197,7 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     const dSeeker = Math.hypot(p.x - seekerEye.x, p.z - seekerEye.z);
     if (dSeeker < 1.0) continue;
     const minHidden = opts.minHiddenNow ?? 0.85;
-    if (minHidden > 0.5 && visibleFraction(g, seekerEye, samplesAt(p)) > 0.5) continue; // quick reject
+    if (minHidden > 0.5 && visibleFractionUpTo(g, seekerEye, samplesAt(p), 0.5) > 0.5) continue; // quick reject
     const cls = classifySpot(g, nav, a, floorY);
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
@@ -183,7 +209,7 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     // hidden from the eye and from points ~15cm around it.
     let hiddenNow = 1;
     for (const e of jitterEyes) {
-      hiddenNow = Math.min(hiddenNow, 1 - visibleFraction(g, e, ptsUp));
+      hiddenNow = Math.min(hiddenNow, 1 - visibleFractionUpTo(g, e, ptsUp, 1 - minHidden));
       if (hiddenNow < minHidden) break;
     }
     if (hiddenNow < minHidden) continue;
@@ -207,7 +233,7 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
   const spots: HideSpot[] = shortlist.map((c) => {
     const pts = c.pts;
     let hiddenFrom = 0;
-    for (const v of views) if (visibleFraction(g, v, pts) < 0.5) hiddenFrom++;
+    for (const v of views) if (visibleLessThan(g, v, pts, 0.5)) hiddenFrom++;
     const coverage = views.length ? hiddenFrom / views.length : 1;
     let score = c.pre;
     score -= Math.abs(coverage - target) * 2.2;
