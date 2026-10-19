@@ -218,7 +218,7 @@ export class HealthMonitor {
       this.floorCand = null;
       return;
     }
-    if (f.mass < O.floorMinMass || Math.abs(f.offset) < O.floorMinOffset) {
+    if (f.mass < O.floorMinMass || (Math.abs(f.offset) < O.floorMinOffset && Math.abs(f.kernelMode) < O.floorMinOffset)) {
       this.floorCand = null;
       return;
     }
@@ -228,17 +228,21 @@ export class HealthMonitor {
       // about as much: go to the plane's height.
       const po = plane.y - w.floorY;
       if (Math.sign(po) === Math.sign(f.offset) && Math.abs(po) >= O.floorMinOffset && Math.abs(po - f.offset) <= 0.04 && f.share >= 0.35) target = plane.y;
-    } else if (Math.abs(f.offset) >= 0.05 && f.share >= 0.35) {
-      // Depth alone: only errors well beyond its own bias.
-      target = w.floorY + f.offset;
-    } else if (f.share >= O.floorMinShare) target = w.floorY + f.offset;
+    } else if (Math.abs(f.kernelMode) >= 0.05 && f.kernelGain >= 1.25) {
+      // Depth alone, robustly (noisy depth spreads floor readings over
+      // ±20cm): the smoothed peak is well off our floor and clearly denser
+      // than the readings at our floor height.
+      target = w.floorY + f.kernelMode;
+    } else if (Math.abs(f.offset) >= 0.05 && f.share >= 0.35) target = w.floorY + f.offset;
+    else if (f.share >= O.floorMinShare) target = w.floorY + f.offset;
     if (target === null) {
       this.floorCand = null;
       return;
     }
     // Consistent over a few seconds before rebuilding anything.
-    if (!this.floorCand || Math.abs(this.floorCand.off - f.offset) > 0.015) {
-      this.floorCand = { off: f.offset, t: this.t };
+    const want = target - w.floorY;
+    if (!this.floorCand || Math.abs(this.floorCand.off - want) > 0.02) {
+      this.floorCand = { off: want, t: this.t };
       return;
     }
     if (this.t - this.floorCand.t < (plane ? 3 : 5)) return;

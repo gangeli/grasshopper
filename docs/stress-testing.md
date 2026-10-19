@@ -129,6 +129,67 @@ objects inside the pet's body at 2.1% of nodes; with the gate those drop to 10% 
 map: 9% and 0.2%). Coverage on that sequence is low (1.6 m² vs 8.2 m² from the Kinect), because the
 camera mostly looks at desks and the floor is only glimpsed.
 
+## Staying unstuck: fault injection and recovery
+
+A mapping mistake is bad; a state the game can't get out of is worse. `src/game/Health.ts` watches
+for impossible or contradictory states every frame and recovers, gentlest fix first. It is exercised
+two ways:
+
+- `test/health.test.ts` (CI) breaks one thing at a time: NaN/negative/huge camera input, a NaN pet,
+  a floating pet, a floor estimate 5–10cm too low or too high, a covered camera, a map wipe mid-round,
+  a map rebuild under the nav graph, and a big relocalisation jump after a tracking loss.
+- `scripts/soak-batch.sh` plays 12 rooms × 5 minutes continuously (round after round) while injecting
+  a random fault every 60–90s: relocalisation jumps of 15–35cm (with a tracking-loss event),
+  "silent" loop-closure jumps of 6–15cm, floor shifts of ±5–10cm, a covered camera, NaN poses, the
+  pet dropped inside furniture / into mid-air / to NaN, and full map wipes. On top of that the
+  sensor itself is the pessimistic `real` profile (drift, its own relocalisation blips, tracking
+  loss, persistent depth bias).
+
+| Fault soak: 12 rooms × 5 min, a random fault every 60–90 s, `real` sensing | Result |
+|---|---|
+| Rounds played | 59 |
+| Longest stretch with no round going anywhere | **41 s** (median 23 s) — never stuck |
+| Crashes / exceptions | **0** |
+| Frames with a non-finite pet position (the injected `petNaN` fault, fixed the next frame) | 2 |
+| Time the pet was visibly inside real furniture | 16 s in total (one case: 6 cm into a textureless bookshelf that depth barely sees) |
+| Map precision at the end (mapped obstacles that are real, as the camera now sees the room) | median 64%, min 46% — faults every minute leave some ghosts that later views clear |
+
+Healthy sessions (24 rounds, no injected faults): every round finished, no false realignments, no
+false depth-only floor moves (plane-based refinements improved floor accuracy, e.g. 4.0→1.2cm);
+after the simulator's own tracking losses the map was aged a few times and reset twice.
+
+**Mechanisms** (and the bugs the fault tests found on the way):
+
+- **Map frame vs tracking frame.** Everything (map, nav, pet) lives in a map frame; incoming data is
+  mapped into it through `trackingToMap = registration · anchor`. On devices with WebXR anchors the
+  app feeds the anchor's motion in, so platform relocalisations carry the map along. Content is
+  rendered under a `mapRoot` group with the inverse transform.
+- **Self-registration (`DriftMonitor`).** Recent precise depth is scored against a *snapshot* of the map
+  taken before those frames (the live map is already contaminated by them). A correction is applied
+  only with strong support, when it beats "no correction" by 2×, agrees across two looks and — for
+  drift — across two snapshots (a person walking by "aligns" with where they were a moment ago; real
+  drift moves everything the same way). Ties prefer the smallest correction, so a long wall can't drag
+  the map along itself. Big searches (±50cm) only happen right after the device reports a tracking
+  loss, against the map as it was at the loss; the correction then undoes everything since (grid
+  restored from a snapshot, buffered frames replayed corrected). False realignments in healthy
+  sessions: 5 of 18 rounds before these rules, 0 of 18 after.
+- **When no consistent correction exists** after a loss, the evidence is aged (keeping every voxel's
+  class — an earlier version scaled log-odds and made obstacles vanish, so a hidden pet was "found"
+  through a box) and, if the world clearly moved a lot, the map is cleared and the pet re-anchored in
+  front of the player. No new rounds start while the map is suspicious.
+- **Floor.** Floor planes and depth near the floor must agree (or depth alone must show an error
+  ≥5cm, beyond its own few-cm bias) before the floor moves; the move keeps the rest of the map (voxels
+  shifted, only the near-floor band re-learned) and is undone if fresh evidence points back.
+- **Pet sanity.** NaN, off-map, under the floor, floating, or inside something — judged from the
+  map, from space the map infers is solid (inside a sofa), and from *live* depth landing in the pet's
+  body — leads to a hop to the nearest valid node (or back to the player).
+- **Flow.** A move that stops making progress along its path, or a phase far past its time limit, is
+  ended; a seek phase reveals the pet even if it never stopped moving (it used to wait forever).
+- **Garbage in.** Covered-camera frames (most readings <30cm), NaN/∞ depth and non-finite poses are
+  rejected before they touch the map.
+- **A latent sink fixed:** the nav graph kept a reference to the old voxel grid after *any* map
+  rebuild (including the original floor refinement), freezing navigation on a stale map forever.
+
 ## What the stress tests found (and what changed)
 
 Ordered roughly by impact:

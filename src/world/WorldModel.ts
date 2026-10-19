@@ -598,7 +598,7 @@ export class WorldModel {
    * current estimate: the dominant 1cm height bin (smoothed), its share of all
    * such readings, and their (decayed) count.
    */
-  floorEvidence(): { offset: number; share: number; mass: number } {
+  floorEvidence(): { offset: number; share: number; mass: number; median: number; below: number; above: number; kernelMode: number; kernelGain: number } {
     const h = this.floorWatch;
     let total = 0, best = 0, bestB = 25;
     for (let b = 0; b < h.length; b++) {
@@ -614,7 +614,41 @@ export class WorldModel {
       sw += h[b];
       sy += h[b] * (b - 25);
     }
-    return { offset: sw ? sy / sw / 100 : 0, share: total ? sw / total : 0, mass: total };
+    // Robust summaries for broad distributions: median offset, and the share
+    // of readings clearly below / above the current floor (±2cm).
+    let acc = 0, median = 0, below = 0, above = 0;
+    for (let b = 0; b < h.length; b++) {
+      if (acc < total / 2 && acc + h[b] >= total / 2) median = (b - 25) / 100;
+      acc += h[b];
+      if (b - 25 <= -2) below += h[b];
+      if (b - 25 >= 2) above += h[b];
+    }
+    // Kernel-smoothed mode (σ = 3cm) and how much denser the readings are
+    // there than at the current floor height: robust for broad, noisy data.
+    const dens = (c: number) => {
+      let d = 0;
+      for (let b = 0; b < h.length; b++) d += h[b] * Math.exp(-((b - 25 - c) ** 2) / 18);
+      return d;
+    };
+    let kMode = 0, kBest = -1;
+    for (let c = -20; c <= 20; c++) {
+      const d = dens(c);
+      if (d > kBest) {
+        kBest = d;
+        kMode = c;
+      }
+    }
+    const d0 = dens(0);
+    return {
+      offset: sw ? sy / sw / 100 : 0,
+      share: total ? sw / total : 0,
+      mass: total,
+      median,
+      below: total ? below / total : 0,
+      above: total ? above / total : 0,
+      kernelMode: kMode / 100,
+      kernelGain: d0 > 0 ? kBest / d0 : 0,
+    };
   }
 
   /**

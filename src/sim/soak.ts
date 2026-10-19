@@ -71,6 +71,11 @@ export function runSoak(room: string, seed: number, seconds: number, opts: Parti
     if (g === 'seek' && bot.phase === 'searching') lastActive = Math.max(lastActive, sim.time - 0); // searching is progress until the watchdog
     rep.longestStall = Math.max(rep.longestStall, sim.time - lastActive);
     if (!Number.isFinite(sim.pet.pos.x + sim.pet.pos.y + sim.pet.pos.z)) rep.nanFrames++;
+    if (process.env.SOAK_FLOOR && sim.time > Number(process.env.SOAK_FLOOR) && Math.floor(sim.time / 3) !== Math.floor((sim.time - dt) / 3)) {
+      const f = sim.world.floorEvidence(), pl = sim.world.floorPlaneEstimate();
+      if (process.env.SOAK_HIST) console.log('hist', Array.from((sim.world as any).floorWatch as Float32Array).map((v, i) => `${i - 25}:${v.toFixed(0)}`).filter((x) => !x.endsWith(':0')).join(' '));
+      console.log(`${sim.time.toFixed(0)}s floorY ${(sim.world.floorY * 100).toFixed(1)} evidence ${(f.offset * 100).toFixed(1)} kmode ${(f.kernelMode * 100).toFixed(0)} gain ${f.kernelGain.toFixed(2)} median ${(f.median * 100).toFixed(1)} below ${(f.below * 100).toFixed(0)} above ${(f.above * 100).toFixed(0)} share ${(f.share * 100).toFixed(0)} mass ${f.mass.toFixed(0)} plane ${pl ? (pl.y * 100).toFixed(1) : '-'} phase ${sim.game.phase} bot ${bot.phase}`);
+    }
     if (Math.floor(sim.time / 15) !== Math.floor((sim.time - dt) / 15)) rep.precisionTimeline.push({ t: sim.time, p: mapPrecision(sim) });
     // The pet's body against the real room (after any frame correction, the map
     // frame should match reality, so compare in the map frame).
