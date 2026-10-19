@@ -595,7 +595,7 @@ export class Animator {
       if (fan) {
         fan.visible = blurK > 0.01;
         if (fan.visible) {
-          (fan.userData.mat as THREE.Material).opacity = 0.2 * blurK;
+          (fan.userData.mat as THREE.Material).opacity = 0.14 * blurK;
           for (const pv of fan.children) {
             const d = (pv.userData.f as number) * flapAmp - flapNow;
             pv.rotation.set(0, -s * d * 0.3, s * d * 0.7);

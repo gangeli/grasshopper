@@ -34,7 +34,7 @@ export interface PetPalette {
 }
 
 export const PALETTES: Record<string, PetPalette> = {
-  mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0xb4b8ff },
+  mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0xb4b8ff, markings: 0.8 },
   plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0, markings: 0.45 },
   ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffb4d4, markings: 0.5 },
 };
@@ -141,7 +141,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     );
   };
   glowMaterial.customProgramCacheKey = () => 'glow-orb';
-  const lidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.1);
+  const lidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.2);
   const sclera = scleraMaterial(lidColor);
   const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye), roughness: 0.4 });
   const pupilMat = new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.3 });
@@ -295,7 +295,9 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     blur.visible = false;
     blur.userData.mat = wingGhostMat;
     bones[`wing${side}`].add(blur);
-    for (const f of [-1, -0.6, -0.2, 0.2, 0.6, 1]) {
+    for (let q = 0; q < 9; q++) {
+      // Denser towards the ends of the stroke, where a flapping wing lingers.
+      const f = -Math.cos((q / 8) * Math.PI);
       const pivot = new THREE.Group();
       pivot.userData.f = f;
       const ghost = new THREE.Mesh(wing.geometry, wingGhostMat);
