@@ -33,5 +33,7 @@ for (const [room, seed, noise] of cases) {
     }
   }
   console.log(`== ${room} seed ${seed} ${noise}: ${bot.phase} at ${sim.time.toFixed(2)} spot=${sim.game.spot?.kind} ${JSON.stringify(sim.game.spot?.pos)}`);
-  console.log(lines.join('\n'));
+  const drift = (sim.game.health as unknown as { drift: { trace: string[]; corrections: number } }).drift;
+  console.log(`health: ${JSON.stringify(sim.game.health.log.map((e) => e.issue + "@" + e.t.toFixed(2)))} drift corrections ${drift.corrections} trace ${drift.trace.join("|")}`);
+  console.log(lines.join("\n"));
 }

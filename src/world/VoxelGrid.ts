@@ -39,6 +39,14 @@ export interface RayHit {
   k: number;
 }
 
+/** The grid's storage (see the VoxelGrid fields). */
+export interface GridArrays {
+  data: Int8Array;
+  observed: Uint8Array;
+  underside: Uint8Array;
+  topFrac: Uint8Array;
+}
+
 export class VoxelGrid {
   readonly origin: Vec3;
   readonly res: number;
@@ -66,16 +74,17 @@ export class VoxelGrid {
   /** Increments whenever occupancy changes meaningfully, so derived data can be cached. */
   version = 0;
 
-  constructor(o: VoxelGridOptions) {
+  /** `arrays`: wrap existing storage instead of allocating (a grid copy handed to a worker). */
+  constructor(o: VoxelGridOptions, arrays?: GridArrays) {
     this.origin = { ...o.origin };
     this.res = o.res;
     this.nx = o.nx;
     this.ny = o.ny;
     this.nz = o.nz;
-    this.data = new Int8Array(o.nx * o.ny * o.nz);
-    this.observed = new Uint8Array(o.nx * o.nz);
-    this.underside = new Uint8Array(o.nx * o.ny * o.nz);
-    this.topFrac = new Uint8Array(o.nx * o.ny * o.nz).fill(255);
+    this.data = arrays?.data ?? new Int8Array(o.nx * o.ny * o.nz);
+    this.observed = arrays?.observed ?? new Uint8Array(o.nx * o.nz);
+    this.underside = arrays?.underside ?? new Uint8Array(o.nx * o.ny * o.nz);
+    this.topFrac = arrays?.topFrac ?? new Uint8Array(o.nx * o.ny * o.nz).fill(255);
   }
 
   idx(i: number, j: number, k: number): number {
@@ -377,6 +386,17 @@ export class VoxelGrid {
   }
   private _shadowCols: Uint8Array | null = null;
 
+  /**
+   * Install a shadow mask computed elsewhere (a background nav build on a
+   * copy of this grid at `version`); it is recomputed when the grid has
+   * changed since. Pass version -1 to force a recompute into `mask`.
+   */
+  adoptShadow(mask: Uint8Array, version: number): void {
+    if (mask.length !== this.data.length) return;
+    this.shadow = mask;
+    this.shadowVersion = version;
+  }
+
   /** Same rule as updateShadow, for one voxel (walks its column from the top; no full-grid pass). */
   shadowAt(i: number, j: number, k: number): boolean {
     if (!this.inBounds(i, j, k)) return false;
@@ -459,6 +479,12 @@ export class VoxelGrid {
   pruneTransient(): void {
     for (const [n, until] of this.transient) if (until < this.now) (this.transient.delete(n), this.version++);
     for (const [n, s] of this.surprise) if (this.now - s.t > 1) this.surprise.delete(n);
+  }
+
+  /** Replace the dynamic-obstacle cells (a grid copy in a worker). */
+  loadTransient(entries: ArrayLike<number>): void {
+    this.transient.clear();
+    for (let q = 0; q + 1 < entries.length; q += 2) this.transient.set(entries[q], entries[q + 1]);
   }
 
   /** Dynamic-obstacle cells and their expiry times (read only; see isTransient). */

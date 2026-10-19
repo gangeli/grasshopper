@@ -802,23 +802,82 @@ export class WorldModel {
     if (n < 60) return null;
     // Subsample to keep it cheap.
     const stride = Math.max(1, Math.floor(n / 1500));
+    // The search below scores ~500 candidate corrections: precompute what
+    // doesn't depend on the candidate (offsets from the pivot, voxel layer)
+    // into typed arrays, and inline the grid indexing (same arithmetic).
+    const m = Math.ceil(pts.length / (3 * stride));
+    const RX = new Float64Array(m), RZ = new Float64Array(m), J = new Int32Array(m);
+    for (let q = 0, u = 0; q < pts.length; q += 3 * stride, u++) {
+      RX[u] = pts[q] - pivot.x;
+      RZ[u] = pts[q + 2] - pivot.z;
+      J[u] = g.cellY(pts[q + 1]);
+    }
+    const px = pivot.x, pz = pivot.z, ox = g.origin.x, oz = g.origin.z, res = g.res, gnx = g.nx, gny = g.ny, gnz = g.nz;
+    const layer = gnx * gnz, inv = 1 / res;
+    for (let u = 0; u < m; u++) J[u] = J[u] >= 0 && J[u] < gny ? J[u] * layer : -1;
+    // Each voxel's contribution only depends on the snapshot: memoise it
+    // (0 none, 1 = +1, 2 = +0.7, 3 = +0.35, 4 = -0.5; 127 = not yet known).
+    const cls = this.scoreClasses(data);
+    const classOf = (n0: number) => {
+      let c = cls[n0];
+      if (c !== 127) return c;
+      if (data[n0] > STRONG_OCC) c = 1;
+      else if (data[n0] > OCC_THRESHOLD) c = 2;
+      else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - gnx] > STRONG_OCC || data[n0 + gnx] > STRONG_OCC) c = 3;
+      else if (data[n0] < -20) c = 4;
+      else c = 0;
+      cls[n0] = c;
+      return c;
+    };
+    // Rotated offsets per yaw (the search visits ~80 shifts per yaw).
+    const X0 = new Float64Array(m), Z0 = new Float64Array(m);
+    // ...and each point's x cell (+ layer) per (yaw, dx): the search sweeps dz innermost.
+    const XI = new Int32Array(m);
+    let cachedYaw = NaN, cachedDx = NaN;
     const score = (dx: number, dz: number, yaw: number) => {
-      const c = Math.cos(yaw), s = Math.sin(yaw);
+      if (yaw !== cachedYaw) {
+        const c = Math.cos(yaw), s = Math.sin(yaw);
+        for (let u = 0; u < m; u++) {
+          const rx = RX[u], rz = RZ[u];
+          X0[u] = px + c * rx + s * rz;
+          Z0[u] = pz - s * rx + c * rz;
+        }
+        cachedYaw = yaw;
+        cachedDx = NaN;
+      }
+      if (dx !== cachedDx) {
+        for (let u = 0; u < m; u++) {
+          const a = X0[u] + dx - ox, qt = a * inv;
+          let i = Math.floor(qt);
+          if (qt - i < 1e-9 || i + 1 - qt < 1e-9) i = Math.floor(a / res);
+          XI[u] = J[u] < 0 || i < 1 || i >= gnx - 1 ? -1 : J[u] + i;
+        }
+        cachedDx = dx;
+      }
+      // Hot loop: everything in locals (closure slots aren't hoisted out of loops).
+      const xi = XI, z0 = Z0, C = cls, n = m, ozz = oz, iv = inv, rs = res, kmax = gnz - 1, rowLen = gnx;
       let sc = 0;
-      for (let q = 0; q < pts.length; q += 3 * stride) {
-        const rx = pts[q] - pivot.x, rz = pts[q + 2] - pivot.z;
-        const x = pivot.x + c * rx + s * rz + dx, z = pivot.z - s * rx + c * rz + dz;
-        const i = g.cellX(x), j = g.cellY(pts[q + 1]), k = g.cellZ(z);
-        if (i < 1 || k < 1 || j < 0 || i >= g.nx - 1 || k >= g.nz - 1 || j >= g.ny) continue;
-        const n0 = g.idx(i, j, k);
-        // Soft score: on a confident surface voxel, or right next to one (x/z).
-        if (data[n0] > STRONG_OCC) sc += 1;
-        // Surfaces seen less often (a wall the camera only swept past) count too, a bit less.
-        else if (data[n0] > OCC_THRESHOLD) sc += 0.7;
-        else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - g.nx] > STRONG_OCC || data[n0 + g.nx] > STRONG_OCC) sc += 0.35;
-        // Landing deep in space the old map saw through clearly argues against
-        // a correction (a look-alike surface elsewhere would put points there).
-        else if (data[n0] < -20) sc -= 0.5;
+      for (let u = 0; u < n; u++) {
+        const ji = xi[u];
+        if (ji < 0) continue;
+        // floor(a / res), exactly: the multiply is the same up to a few ulps,
+        // so only a quotient within 1e-9 of a cell boundary needs the division.
+        const a = z0[u] + dz - ozz, qt = a * iv;
+        let k = Math.floor(qt);
+        if (qt - k < 1e-9 || k + 1 - qt < 1e-9) k = Math.floor(a / rs);
+        if (k < 1 || k >= kmax) continue;
+        const n0 = ji + k * rowLen;
+        const cc = C[n0];
+        // Soft score: on a confident surface voxel (+1), or one seen less
+        // often, e.g. a wall the camera only swept past (+0.7), or right next
+        // to a confident one in x/z (+0.35); landing deep in space the old map
+        // saw through clearly argues against a correction (-0.5): a look-alike
+        // surface elsewhere would put points there.
+        const c = cc !== 127 ? cc : classOf(n0);
+        if (c === 1) sc += 1;
+        else if (c === 2) sc += 0.7;
+        else if (c === 3) sc += 0.35;
+        else if (c === 4) sc -= 0.5;
       }
       return sc;
     };
@@ -863,6 +922,21 @@ export class WorldModel {
     }
     const degenerate = flat >= 5 || slides;
     return { dx: best.dx, dz: best.dz, dyaw: best.dyaw, pivot: { ...pivot }, base: Math.round(base), best: Math.round(best.s), n: used, degenerate, snapT: snap.t };
+  }
+
+  private scoreMemo: { data: Int8Array | null; t: number; cls: Int8Array | null } = { data: null, t: NaN, cls: null };
+  /** Per-voxel score classes for estimateMisalignment, memoised per snapshot (127 = unknown). */
+  private scoreClasses(data: Int8Array): Int8Array {
+    const m = this.scoreMemo;
+    // Snapshot buffers are reused, so the key is the buffer and its contents' time.
+    const snapT = this.snapshots.find((s) => s.data === data)?.t ?? this.eventSnapshot?.t ?? NaN;
+    if (!m.cls || m.cls.length !== data.length) m.cls = new Int8Array(data.length);
+    if (m.data !== data || m.t !== snapT || Number.isNaN(snapT)) {
+      m.cls.fill(127);
+      m.data = data;
+      m.t = snapT;
+    }
+    return m.cls;
   }
 
   /**

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { applyPetEnvironment } from '../pet/lighting';
 import type { GameStack } from '../game/stack';
-import { Occluder } from './Occluder';
+import { Occluder, OCCLUDER_RADIUS } from './Occluder';
+import { activeNavWorker } from '../world/NavWorkerClient';
 import { PerfMonitor, petScreenCoverage } from './Perf';
 
 /**
@@ -139,10 +140,23 @@ export class Stage {
     this.shadowCatcher.position.set(g.x, g.y + 0.002, g.z);
   }
 
-  updateOccluder(stack: GameStack) {
+  /**
+   * Refresh the occluder mesh if the map changed or the pet moved away.
+   * `background`: mesh it in the nav worker (when there is one) and install
+   * it when ready, instead of stalling this frame for tens of ms.
+   */
+  updateOccluder(stack: GameStack, background = false) {
     const g = stack.world.grid;
     if (!g) return;
-    this.occluder.update(g, stack.pet.pos, stack.world.floorLayer);
+    const occ = this.occluder;
+    const worker = background ? activeNavWorker() : null;
+    if (worker && occ.stale(g, stack.pet.pos)) {
+      const ok = worker.requestOccluder(g, stack.pet.pos, OCCLUDER_RADIUS, stack.world.floorLayer, (positions, grid, version, center) => {
+        if (stack.world.grid === grid) occ.install(positions, grid, version, center);
+      });
+      if (ok) return;
+    }
+    occ.update(g, stack.pet.pos, stack.world.floorLayer);
   }
 
   /** Debug: show occupied voxels (by height) and nav nodes. */

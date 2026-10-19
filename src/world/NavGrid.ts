@@ -87,15 +87,28 @@ export class NavGrid {
   }
 
   /** Rebuild if the grid changed. Returns true if rebuilt. */
-  refresh(): boolean {
+  /**
+   * Rebuild if the grid changed. Returns true if rebuilt. With `background`
+   * and a background builder installed (the browser's nav worker), the
+   * rebuild is handed off and the new graph is installed when it is ready
+   * (returns false): routine refreshes then cost the frame loop nothing.
+   */
+  refresh(background = false): boolean {
     if (this.g.version === this.builtVersion) return false;
+    if (background && NavGrid.background?.request(this)) return false;
     this.build();
     return true;
   }
 
+  /** Background builder (see refresh); null = always build synchronously (node, tests). */
+  static background: { request(nav: NavGrid): boolean } | null = null;
+  /** Synchronous builds so far: a background result older than the latest one is dropped. */
+  syncBuilds = 0;
+
   build(): void {
     const res = computeNav(this.g, this.world, this.p, this.colStart, this.colCount, this.scratch);
     this.adopt(res, this.g.version);
+    this.syncBuilds++;
   }
 
   /** Install a computed graph (from build(), or from a background build of a grid snapshot taken at `version`). */

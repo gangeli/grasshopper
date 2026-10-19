@@ -9,6 +9,7 @@ import { createStack } from './game/stack';
 import { Animator } from './pet/Animator';
 import { buildPet } from './pet/PetModel';
 import { applyPetEnvironment } from './pet/lighting';
+import { installNavWorker } from './world/NavWorkerClient';
 
 /**
  * Entry point. URL parameters (handy for testing):
@@ -74,10 +75,12 @@ async function main() {
     if (mode === 'ar') {
       const stage = new Stage(document.body, { ar: true });
       const hud = new Hud(document.body);
+      // Nav-graph rebuilds run in a worker (they took 100ms+ of a frame every few seconds).
+      const navWorker = installNavWorker();
       const stack = createStack({ seed });
       stage.addPet(stack);
       const ar = new ArMode(stage, stack, hud, voice);
-      window.__hopper = { ...window.__hopper, mode: 'ar', stage, hud, stack, ar, game: stack.game, THREE };
+      window.__hopper = { ...window.__hopper, mode: 'ar', stage, hud, stack, ar, game: stack.game, THREE, navWorker };
       // Leaving AR (or AR failing) goes back to a fresh start page: never a dead AR screen.
       const backToStart = (msg?: string) => {
         try {
@@ -112,6 +115,7 @@ async function main() {
         location.reload();
         return;
       }
+      installNavWorker();
       const stage = new Stage(document.body, { ar: true });
       const hud = new Hud(document.body);
       const sim = new SimMode(stage, hud, voice, { room: 'empty', seed, bot: false, speed: 1, fixed: false, camera: feed });
@@ -121,6 +125,8 @@ async function main() {
       sim.start();
       if (!(await motion)) hud.say('Motion access was declined, so the view can’t follow your phone. Drag to look around — or reload and tap “Allow”.', 9);
     } else {
+      // The bot harness stays fully synchronous (reproducible test runs).
+      if (q.get('bot') !== '1' && q.get('fixed') !== '1') installNavWorker();
       const stage = new Stage(document.body, { ar: false });
       const hud = new Hud(document.body);
       const sim = new SimMode(stage, hud, voice, {

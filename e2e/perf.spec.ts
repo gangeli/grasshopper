@@ -77,6 +77,8 @@ test('AR frame-time breakdown (emulated phone)', async ({ page }) => {
   });
   console.log(JSON.stringify(out.scene), JSON.stringify(out.xr));
   console.log(`--- ${label}: roam/mapping ---\n${await perfText(page)}`);
+  out.navWorkerRoam = await ev(page, () => (window.__hopper?.navWorker as { stats?: unknown } | undefined)?.stats ?? null);
+  console.log('nav worker', JSON.stringify(out.navWorkerRoam));
 
   if (process.env.PERF_SEEK === '0') {
     writeFileSync(`artifacts/perf-${label}.json`, JSON.stringify(out, null, 2));

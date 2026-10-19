@@ -10,6 +10,7 @@ import type { Voice } from './Voice';
 import { GameUI } from './GameUI';
 import { NavGrid } from '../world/NavGrid';
 import { VoxelGrid } from '../world/VoxelGrid';
+import { NavWorkerClient } from '../world/NavWorkerClient';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -134,6 +135,8 @@ export class ArMode {
     perf.instrument(stack.game, 'refreshNav', 'game.refreshNav');
     perf.instrument(NavGrid.prototype, 'build', 'nav.build');
     perf.instrument(VoxelGrid.prototype, 'updateShadow', 'grid.updateShadow');
+    perf.instrument(NavWorkerClient.prototype, 'request', 'nav.worker request');
+    perf.instrument(NavWorkerClient.prototype, 'receive', 'nav.worker install');
     perf.instrument(stack.game.health, 'update', 'game.health');
     perf.instrument(stack.anim, 'update', 'game.anim');
     perf.instrument(stack.pet, 'update', 'game.pet');
@@ -524,8 +527,8 @@ export class ArMode {
         this.guard('stage', () => {
           this.stage.followPet(this.stack);
           // Occluder meshing takes tens of ms on a phone: refresh every ~2s while the
-          // map grows, less often once a round is under way.
-          if (this.frameNo % (game.phase === 'roam' ? 120 : 300) === 0) this.stage.updateOccluder(this.stack);
+          // map grows, less often once a round is under way (in the nav worker).
+          if (this.frameNo % (game.phase === 'roam' ? 120 : 300) === 0) this.stage.updateOccluder(this.stack, true);
           this.stage.updateDebug(this.stack);
         });
         this.maybeAutoRecover();

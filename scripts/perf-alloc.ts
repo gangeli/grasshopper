@@ -92,14 +92,14 @@ if (session) {
   const { profile } = await post('HeapProfiler.stopSampling');
   const self = new Map<string, number>();
   let total = 0;
-  const walk = (n: any, stack: string) => {
+  const walk = (n: any) => {
     const f = n.callFrame;
     const here = `${f.functionName || '(anon)'} ${String(f.url).split('/').pop()}:${f.lineNumber + 1}`;
     self.set(here, (self.get(here) ?? 0) + n.selfSize);
     total += n.selfSize;
-    for (const c of n.children) walk(c, here);
+    for (const c of n.children) walk(c);
   };
-  walk(profile.head, '');
+  walk(profile.head);
   console.log(`\nallocated (sampled) ${(total / 1048576).toFixed(0)} MB; top sites:`);
   for (const [k, v] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 25)) console.log(`${(v / 1048576).toFixed(1).padStart(8)} MB  ${k}`);
 }

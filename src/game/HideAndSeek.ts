@@ -208,7 +208,7 @@ export class HideAndSeek {
     // The world replaces its grid when it rebuilds (floor correction, reset):
     // a nav graph bound to the old grid would freeze on a stale map forever.
     if (!this.nav || this.nav.g !== this.world.grid) this.nav = new NavGrid(this.world);
-    else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh();
+    else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh(!force); // routine refreshes may run in the background (browser)
     return this.nav;
   }
 
