@@ -218,12 +218,17 @@ export class HealthMonitor {
       this.floorCand = null;
       return;
     }
-    if (f.mass < O.floorMinMass || (Math.abs(f.offset) < O.floorMinOffset && Math.abs(f.kernelMode) < O.floorMinOffset)) {
+    // Depth too sparse to say anything (camera-only depth while the phone is
+    // held still, or only glancing at the floor): a big detected floor plane
+    // that clearly disagrees with our floor decides on its own, more slowly.
+    const planeOnly = !!plane && f.mass < O.floorMinMass && plane.area >= 3 && Math.abs(plane.y - w.floorY) >= 0.05;
+    if (!planeOnly && (f.mass < O.floorMinMass || (Math.abs(f.offset) < O.floorMinOffset && Math.abs(f.kernelMode) < O.floorMinOffset))) {
       this.floorCand = null;
       return;
     }
     let target: number | null = null;
-    if (plane) {
+    if (planeOnly) target = plane!.y;
+    else if (plane) {
       // Plane and depth agree the floor is off, in the same direction and by
       // about as much: go to the plane's height.
       const po = plane.y - w.floorY;
@@ -245,13 +250,13 @@ export class HealthMonitor {
       this.floorCand = { off: want, t: this.t };
       return;
     }
-    if (this.t - this.floorCand.t < (plane ? 3 : 5)) return;
+    if (this.t - this.floorCand.t < (planeOnly ? 6 : plane ? 3 : 5)) return;
     const off = Math.max(-0.2, Math.min(0.2, target - w.floorY));
     this.floorUndo = { prevY: w.floorY, areaBefore: game.mappedArea(), t: this.t };
     w.relevelFloor(w.floorY + off);
     this.lastRelevel = this.t;
     this.floorCand = null;
-    this.report(off > 0 ? 'floorTooLow' : 'floorTooHigh', `floor moved ${(off * 100).toFixed(1)}cm (evidence share ${(f.share * 100).toFixed(0)}%${plane ? ', plane agrees' : ''})`);
+    this.report(off > 0 ? 'floorTooLow' : 'floorTooHigh', `floor moved ${(off * 100).toFixed(1)}cm (evidence share ${(f.share * 100).toFixed(0)}%${planeOnly ? ', depth too sparse: floor plane decides' : plane ? ', plane agrees' : ''})`);
     game.mapChanged();
   }
 
