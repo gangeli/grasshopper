@@ -62,6 +62,8 @@ async function main() {
     /* storage unavailable */
   }
 
+  setupInstall(note);
+
   // Showcase: Hopper waves on the landing page.
   const showcase = startShowcase();
 
@@ -145,6 +147,34 @@ async function main() {
   if (q.get('sim') === '1') void enter('sim');
 }
 
+/**
+ * Installable app: an offline cache (production builds only) and an install
+ * button — Chrome's own prompt where it offers one, a how-to on iPhone.
+ */
+function setupInstall(note: HTMLElement) {
+  if (import.meta.env.PROD && 'serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => undefined);
+  const btn = document.getElementById('btn-install') as HTMLButtonElement | null;
+  if (!btn) return;
+  const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || (navigator as { standalone?: boolean }).standalone === true;
+  if (standalone) return;
+  let deferred: (Event & { prompt(): Promise<void> }) | null = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferred = e as Event & { prompt(): Promise<void> };
+    btn.style.display = '';
+  });
+  window.addEventListener('appinstalled', () => (btn.style.display = 'none'));
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  if (ios) btn.style.display = '';
+  btn.onclick = () => {
+    if (deferred) {
+      void deferred.prompt();
+      deferred = null;
+      btn.style.display = 'none';
+    } else if (ios) note.textContent = 'To install: tap the Share button (□↑) in Safari, then “Add to Home Screen”.';
+  };
+}
+
 /** What this browser can do, in plain words (and what would work better). */
 function supportNote(arOk: boolean, camOk: boolean): string {
   const ua = navigator.userAgent;
@@ -222,22 +252,28 @@ function startShowcase() {
   // Frame Hopper in the upper part of the screen, above the title and buttons.
   cam.position.set(0, 0.36, portrait ? 2.2 : 2.1);
   cam.lookAt(0, portrait ? -0.2 : -0.28, 0);
+  // ?icon=1: a head-and-shoulders portrait (used to render the app icons).
+  const icon = q.get('icon') === '1';
+  if (icon) {
+    cam.position.set(0, 0.26, 0.95);
+    cam.lookAt(0, 0.19, 0);
+  }
   anim.lookTarget = cam.position.clone();
   const cycle = ['wave', 'idle', 'giggle', 'lookAround', 'celebrate', 'idle', 'peek', 'idle'] as const;
   let i = 0, t = 0, last = performance.now();
-  anim.play('wave', 0);
+  anim.play(icon ? 'idle' : 'wave', 0);
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     t += dt;
-    if (t > 2.6) {
+    if (t > 2.6 && !icon) {
       t = 0;
       i = (i + 1) % cycle.length;
       anim.ctx.peekSide = 1;
       anim.play(cycle[i], 0.3, true);
     }
-    rig.group.rotation.y = Math.sin(now / 2400) * 0.35;
+    rig.group.rotation.y = icon ? 0.18 : Math.sin(now / 2400) * 0.35;
     anim.update(dt);
     renderer.render(scene, cam);
   });
