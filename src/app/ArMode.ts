@@ -8,6 +8,7 @@ import type { Hud } from './Hud';
 import type { Stage } from './Stage';
 import type { Voice } from './Voice';
 import { GameUI } from './GameUI';
+import { HIDE_SEEK_MIN_AREA } from '../game/Activities';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -333,7 +334,8 @@ export class ArMode {
       this.tryPlace(frame);
       return;
     }
-    // Tap on the pet.
+    // Tap on the pet (a reaction, or "found" while seeking) or on the floor
+    // (Hopper goes there); the screen tap's ray goes through the tapped pixel.
     if (this.tracking.frozen || !this.refSpace) return;
     const pose = frame.getPose(e.inputSource.targetRaySpace, this.refSpace);
     if (!pose || !isFiniteMatrix(pose.transform.matrix)) return;
@@ -602,7 +604,7 @@ export class ArMode {
       if (this.lastHit) this.noHitTold = false;
       return;
     }
-    if (game.phase === 'roam' && game.mappedArea() < 2 && now - this.mappingSince > 30 && now - this.lastTipT > 30) {
+    if (game.phase === 'roam' && game.mappedArea() < HIDE_SEEK_MIN_AREA && now - this.mappingSince > 30 && now - this.lastTipT > 30) {
       this.lastTipT = now;
       const noDepth = this.stats.depthUsage !== 'cpu-optimized' || this.stats.depthDead;
       const tips = noDepth
