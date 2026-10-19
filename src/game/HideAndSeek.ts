@@ -49,6 +49,8 @@ export interface GameOptions {
   difficulty: number;
   eyeHeight: number;
   seed: number;
+  /** How far in front of the player Hopper likes to hang out while roaming (m). */
+  roamDistance?: number;
   health?: Partial<HealthOptions>;
 }
 
@@ -451,7 +453,8 @@ export class HideAndSeek {
     const fwd = new THREE.Vector3(view.forward.x, 0, view.forward.z);
     if (fwd.lengthSq() < 1e-4) fwd.set(0, 0, -1);
     fwd.normalize();
-    const want = new THREE.Vector3(view.pos.x + fwd.x * 1.1, this.world.floorY, view.pos.z + fwd.z * 1.1);
+    const rd = this.opts.roamDistance ?? 1.1;
+    const want = new THREE.Vector3(view.pos.x + fwd.x * rd, this.world.floorY, view.pos.z + fwd.z * rd);
     const d = Math.hypot(want.x - this.pet.pos.x, want.z - this.pet.pos.z);
     if (nav && d > 0.8) {
       const goal = nav.nearest(want, 0.8);

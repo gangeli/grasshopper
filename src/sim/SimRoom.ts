@@ -335,6 +335,13 @@ export function livingRoom(): SimRoom {
   return room;
 }
 
+/** An empty room of the given size (walls only). */
+export function openRoom(width: number, depth: number): SimRoom {
+  const room = new SimRoom(width, depth);
+  addWalls(room);
+  return room;
+}
+
 export function emptyRoom(): SimRoom {
   const room = new SimRoom(4, 4);
   addWalls(room);

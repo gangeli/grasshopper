@@ -3,12 +3,13 @@ import { applyPetEnvironment } from '../pet/lighting';
 import { Simulation } from '../sim/Simulation';
 import { SeekerBot } from '../sim/SeekerBot';
 import { cameraBasis } from '../sim/SimSensor';
-import type { SimRoom } from '../sim/SimRoom';
+import { openRoom, type SimRoom } from '../sim/SimRoom';
 import { clamp } from '../core/math';
 import type { Hud } from './Hud';
 import type { Stage } from './Stage';
 import type { Voice } from './Voice';
 import { GameUI } from './GameUI';
+import type { CameraFeed } from './CameraFeed';
 
 /**
  * Virtual-room mode: the same world model, pet and game, but the "camera
@@ -24,6 +25,12 @@ export interface SimModeOptions {
   speed: number;
   /** Fixed timestep (deterministic). */
   fixed: boolean;
+  /**
+   * Camera mode: the live camera is the background and the phone's
+   * orientation turns the view; the simulated room is empty and invisible
+   * (there is no depth sensing to learn the real one).
+   */
+  camera?: CameraFeed;
 }
 
 export class SimMode {
@@ -36,17 +43,30 @@ export class SimMode {
   private joy: { x: number; y: number } = { x: 0, y: 0 };
   private roomGroup = new THREE.Group();
   frames = 0;
+  private readonly camera: CameraFeed | null;
+  private readonly _e = new THREE.Euler();
   onExit: (() => void) | null = null;
 
   constructor(readonly stage: Stage, readonly hud: Hud, readonly voice: Voice, readonly opts: SimModeOptions) {
-    this.sim = new Simulation({ room: opts.room, seed: opts.seed });
+    this.camera = opts.camera ?? null;
+    // Camera mode: the player stands still (orientation-only tracking), so
+    // Hopper keeps a bit further off, where a phone held normally sees it.
+    this.sim = new Simulation({ room: this.camera ? openFloor() : opts.room, seed: opts.seed, game: this.camera ? { roamDistance: 1.8, eyeHeight: 1.35 } : undefined });
     this.bot = opts.bot ? new SeekerBot(this.sim) : null;
     this.ui = new GameUI(this.sim, hud, voice);
     stage.scene.add(this.sim.rig.group);
     applyPetEnvironment(stage.renderer, this.sim.rig);
-    this.buildRoom(this.sim.room);
-    stage.scene.add(this.roomGroup);
-    stage.scene.background = new THREE.Color(0x202430);
+    if (this.camera) {
+      // Video shows through the transparent canvas; keep the grounding shadow.
+      stage.scene.background = null;
+      stage.renderer.setClearColor(0x000000, 0);
+      Object.assign(stage.renderer.domElement.style, { position: 'fixed', inset: '0', zIndex: '1' });
+      this.sim.cam.pos.y = 1.35;
+    } else {
+      this.buildRoom(this.sim.room);
+      stage.scene.add(this.roomGroup);
+      stage.scene.background = new THREE.Color(0x202430);
+    }
     // In the simulator the rendered room already hides the pet; keep the
     // occluder only for the debug view.
     stage.occluder.mesh.visible = false;
@@ -63,7 +83,14 @@ export class SimMode {
       this.stage.occluder.mesh.visible = this.stage.debug;
       if (this.stage.debug) this.stage.updateOccluder(this.sim);
     });
-    if (!this.bot) {
+    if (this.camera) {
+      hud.say('Look around slowly so Hopper can settle in — it appears in a moment!', 7);
+      this.bindControls();
+      // No motion sensor (a laptop webcam): drag to look instead.
+      setTimeout(() => {
+        if (!this.camera!.hasOrientation) hud.say('No motion sensor here: drag to look around.', 6);
+      }, 2500);
+    } else if (!this.bot) {
       hud.say('Virtual room: drag to look, WASD / left-thumb to walk, C to crouch. Hopper appears in a moment!', 7);
       this.bindControls();
     }
@@ -79,8 +106,14 @@ export class SimMode {
     const cam = this.stage.camera;
     const c = this.sim.cam;
     cam.position.set(c.pos.x, c.pos.y, c.pos.z);
-    cam.rotation.set(c.pitch, c.yaw, 0, 'YXZ');
-    cam.fov = (c.fovY * 180) / Math.PI;
+    if (this.camera?.hasOrientation) {
+      // The phone's full orientation (roll too, so the pet stays upright against the video).
+      cam.quaternion.copy(this.camera.quaternion);
+      cam.fov = this.camera.fovY;
+    } else {
+      cam.rotation.set(c.pitch, c.yaw, 0, 'YXZ');
+      cam.fov = this.camera ? this.camera.fovY : (c.fovY * 180) / Math.PI;
+    }
     cam.updateProjectionMatrix();
     cam.updateMatrixWorld();
     this.stage.followPet(this.sim);
@@ -96,9 +129,28 @@ export class SimMode {
       this.bot.step(dt);
       return;
     }
-    this.move(dt);
-    if (sim.game.phase === 'waiting' && sim.time > 1.5) sim.spawnPet();
+    if (this.camera) {
+      this.camera.update(dt);
+      if (this.camera.hasOrientation) {
+        // The game's camera follows where the phone points.
+        this._e.setFromQuaternion(this.camera.quaternion, 'YXZ');
+        sim.cam.yaw = this._e.y;
+        sim.cam.pitch = clamp(this._e.x, -1.5, 1.5);
+      }
+      sim.cam.fovY = (this.camera.fovY * Math.PI) / 180;
+      this.syncAspect();
+    } else this.move(dt);
+    if (sim.game.phase === 'waiting' && sim.time > 1.5) sim.spawnPet(this.camera ? this.spawnPoint() : undefined);
     sim.step(dt);
+  }
+
+  /** Camera mode: where the middle of the view meets the floor (1.2–2.5m away), so Hopper appears on screen. */
+  private spawnPoint() {
+    const c = this.sim.cam;
+    const { forward } = cameraBasis(c);
+    const fl = Math.hypot(forward.x, forward.z) || 1;
+    const d = forward.y < -0.1 ? clamp(c.pos.y / -forward.y * fl, 1.2, 2.5) : 2;
+    return { x: c.pos.x + (forward.x / fl) * d, y: 0, z: c.pos.z + (forward.z / fl) * d };
   }
 
   /** Keep the simulator's camera aspect in sync with the window. */
@@ -141,7 +193,7 @@ export class SimMode {
     canvas.addEventListener('pointerdown', (e) => {
       this.voice.unlock();
       // Left third of a touch screen is a virtual joystick.
-      const move = e.pointerType === 'touch' && e.clientX < window.innerWidth * 0.33;
+      const move = !this.camera && e.pointerType === 'touch' && e.clientX < window.innerWidth * 0.33;
       this.drag = { x: e.clientX, y: e.clientY, id: e.pointerId, move };
       canvas.setPointerCapture(e.pointerId);
     });
@@ -154,6 +206,7 @@ export class SimMode {
       }
       this.drag.x = e.clientX;
       this.drag.y = e.clientY;
+      if (this.camera?.hasOrientation) return; // the phone itself is the look control
       const c = this.sim.cam;
       c.yaw -= dx * 0.005;
       c.pitch = clamp(c.pitch - dy * 0.005, -1.4, 1.2);
@@ -203,6 +256,14 @@ export class SimMode {
     lamp.position.set(0, 2.2, 0);
     g.add(lamp);
   }
+}
+
+/**
+ * Camera mode's stand-in for the real room: open floor around the player,
+ * bounded ~3m away so Hopper stays within sight of a player standing still.
+ */
+function openFloor(): SimRoom {
+  return openRoom(6, 6);
 }
 
 function checkerTexture(): THREE.CanvasTexture {

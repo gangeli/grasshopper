@@ -3,28 +3,61 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#1f2a33" />
+<meta name="theme-color" content="#141a2c" />
 <title>Hopper — AR Hide & Seek</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet" />
 <style>
   :root {
     --ink: #1d2830; --paper: #fbf8f1; --mint: #5ccf9f; --mint-dark: #2f9a78; --glow: #ffd56a;
     --shadow: 0 6px 24px rgba(0,0,0,.25);
     font: 16px/1.4 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #1f2a33; color: var(--ink); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #141a2c; color: var(--ink); }
   canvas { display: block; }
   button { font: inherit; cursor: pointer; border: 0; }
   #landing {
     position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
-    padding: 24px 16px calc(28px + env(safe-area-inset-bottom)); box-sizing: border-box; z-index: 5; pointer-events: none;
-    background: linear-gradient(180deg, rgba(31,42,51,0) 40%, rgba(31,42,51,.85) 75%);
+    padding: 24px 20px calc(26px + env(safe-area-inset-bottom)); box-sizing: border-box; z-index: 5; pointer-events: none;
+    background: linear-gradient(180deg, rgba(14,18,30,0) 38%, rgba(14,18,30,.72) 62%, rgba(14,18,30,.94) 100%);
+    font-family: "Fredoka", ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
   }
   #landing > * { pointer-events: auto; }
-  #landing h1 { margin: 0; font-size: clamp(34px, 9vw, 54px); color: var(--paper); letter-spacing: .5px; }
-  #landing h1 span { color: var(--glow); }
-  #landing p { margin: 6px 0 18px; color: #d7e4e0; text-align: center; max-width: 420px; }
-  #landing .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-  #landing small { margin-top: 14px; color: #9fb3ad; text-align: center; max-width: 420px; }
+  /* The sky behind the showcase pet: dusk gradient, a warm spotlight, fireflies. */
+  #sky { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+    background:
+      radial-gradient(ellipse 55% 38% at 50% 34%, rgba(255,214,140,.22), rgba(255,214,140,0) 70%),
+      radial-gradient(ellipse 120% 80% at 50% 0%, #3b3f6e 0%, #252a4a 40%, #141a2c 75%, #0e121e 100%); }
+  #sky i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #ffe39a;
+    box-shadow: 0 0 10px 3px rgba(255,214,110,.55); opacity: 0; animation: firefly 9s ease-in-out infinite; }
+  @keyframes firefly {
+    0% { opacity: 0; transform: translate(0,0) scale(.6); }
+    20% { opacity: .9; }
+    50% { transform: translate(22px,-38px) scale(1); opacity: .55; }
+    80% { opacity: .85; }
+    100% { opacity: 0; transform: translate(-14px,-80px) scale(.5); }
+  }
+  @media (prefers-reduced-motion: reduce) { #sky i { animation: none; opacity: .5; } }
+  #landing .brand { text-align: center; margin-bottom: 4px; }
+  #landing h1 { margin: 0; font-weight: 700; font-size: clamp(46px, 13vw, 76px); line-height: 1; letter-spacing: 1px;
+    background: linear-gradient(180deg, #fff8e8 20%, #ffd56a 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 4px 18px rgba(255,200,90,.25)); }
+  #landing .tag { margin: 6px 0 0; color: #e6e9f5; font-size: 18px; font-weight: 500; text-align: center; }
+  #landing .steps { list-style: none; display: flex; gap: 8px; margin: 18px 0 20px; padding: 0; flex-wrap: wrap; justify-content: center; max-width: 460px; }
+  #landing .steps li { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 16px;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1); color: #dfe4f2; font-size: 14px; font-weight: 500;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  #landing .steps b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(255,213,106,.18); color: #ffd56a; font-size: 13px; font-weight: 700; }
+  #landing .cta { position: relative; padding: 17px 34px; font-size: 19px; font-weight: 600; border-radius: 999px; color: #10261d;
+    background: linear-gradient(180deg, #8ff0c3, #4cc995); box-shadow: 0 10px 30px rgba(76,201,149,.45), inset 0 1px 0 rgba(255,255,255,.6);
+    animation: breathe 2.8s ease-in-out infinite; font-family: inherit; }
+  #landing .cta:active { transform: scale(.97); }
+  @keyframes breathe { 50% { box-shadow: 0 10px 42px rgba(76,201,149,.7), inset 0 1px 0 rgba(255,255,255,.6); } }
+  @media (prefers-reduced-motion: reduce) { #landing .cta { animation: none; } }
+  #landing .alt { margin-top: 14px; background: none; color: #8f98b5; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; padding: 4px 8px; font-family: inherit; }
+  #landing small { margin-top: 10px; color: #a3abc4; text-align: center; max-width: 400px; font-size: 13px; line-height: 1.45; }
   .primary { background: var(--mint); color: #0d2a20; padding: 14px 22px; border-radius: 999px; font-weight: 700; box-shadow: var(--shadow); }
   .primary:disabled { background: #9db5ab; color: #33463f; cursor: default; }
   .secondary { background: var(--paper); color: var(--ink); padding: 14px 18px; border-radius: 999px; font-weight: 600; box-shadow: var(--shadow); }
@@ -54,13 +87,20 @@
 </style>
 </head>
 <body>
+<div id="sky" aria-hidden="true"></div>
 <div id="landing">
-  <h1>Hop<span>per</span></h1>
-  <p>A tiny creature moves into your room. It maps your furniture, then hides — under tables, behind the couch, inside baskets. Can you find it?</p>
-  <div class="row">
-    <button id="btn-ar" class="primary" style="display:none">Start in AR</button>
-    <button id="btn-sim" class="secondary">Play in a virtual room</button>
+  <div class="brand">
+    <h1>Hopper</h1>
+    <p class="tag">a tiny creature that plays hide &amp; seek in your room</p>
   </div>
+  <ol class="steps">
+    <li><b>1</b>Look around your room</li>
+    <li><b>2</b>Cover your eyes, count to ten</li>
+    <li><b>3</b>Find where Hopper hid</li>
+  </ol>
+  <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
+  <button id="btn-cam" class="cta" style="display:none">Start with camera</button>
+  <button id="btn-sim" class="alt">or play in a virtual room</button>
   <small id="support-note"></small>
 </div>
 <script type="module" src="./src/main.ts"></script>
