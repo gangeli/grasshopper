@@ -102,6 +102,12 @@ export class PoseGate {
   accepted = 0;
   constructor(readonly maxPosResidual = 0.04, readonly maxRotResidual = 0.05, readonly holdSeconds = 0.8) {}
 
+  /** Forget motion history (e.g. after the map frame was deliberately corrected). */
+  reset(): void {
+    this.last = null;
+    this.vel = { x: 0, y: 0, z: 0 };
+  }
+
   accept(eye: Vec3, forward: Vec3, t: number, emulated = false): boolean {
     let ok = true;
     if (emulated) {

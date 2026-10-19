@@ -1,5 +1,5 @@
 import type { Vec3 } from '../core/math';
-import { VoxelGrid } from './VoxelGrid';
+import { STRONG_OCC, VoxelGrid } from './VoxelGrid';
 import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 
 /**
@@ -91,6 +91,16 @@ export class WorldModel {
   /** Establish the floor height and an anchor point; allocates the grid. */
   setFloor(y: number, center: Vec3): void {
     if (this.grid) return;
+    if (!this.frameIsIdentity) {
+      const c = this.toMapPoint({ x: center.x, y, z: center.z });
+      center = c;
+      y = c.y;
+    }
+    this.allocateGrid(y, center);
+  }
+
+  /** Allocate the grid with the floor at y (map frame). */
+  private allocateGrid(y: number, center: Vec3): void {
     this.center = { ...center };
     const r = this.res;
     const n = Math.ceil((this.halfExtent * 2) / r);
@@ -118,10 +128,19 @@ export class WorldModel {
   /** A hit-test result on a surface, e.g. where the user tapped. */
   ingestHit(p: Vec3, normal?: Vec3): void {
     if (!this.grid) return;
+    if (!this.frameIsIdentity) {
+      p = this.toMapPoint(p);
+      if (normal) normal = this.toMapDir(normal);
+    }
     if ((!normal || normal.y > 0.8) && this.isFloorHeight(p.y)) this.grid.markObserved(p.x, p.z, 4);
   }
 
   ingestPlane(plane: PlaneInput): void {
+    if (!this.frameIsIdentity) plane = { ...plane, polygon: plane.polygon.map((q) => this.toMapPoint(q)), normal: this.toMapDir(plane.normal) };
+    this.ingestPlaneMap(plane);
+  }
+
+  private ingestPlaneMap(plane: PlaneInput): void {
     this.planeInputs.set(plane.id, plane);
     const g = this.grid;
     if (!g || plane.polygon.length < 3) return;
@@ -186,6 +205,20 @@ export class WorldModel {
   }
 
   ingestMesh(mesh: MeshInput): void {
+    if (!this.frameIsIdentity) {
+      const P = Array.from(mesh.positions);
+      for (let q = 0; q < P.length; q += 3) {
+        const m = this.toMapPoint({ x: P[q], y: P[q + 1], z: P[q + 2] });
+        P[q] = m.x;
+        P[q + 1] = m.y;
+        P[q + 2] = m.z;
+      }
+      mesh = { ...mesh, positions: P };
+    }
+    this.ingestMeshMap(mesh);
+  }
+
+  private ingestMeshMap(mesh: MeshInput): void {
     this.meshInputs.set(mesh.id, mesh);
     const g = this.grid;
     if (!g) return;
@@ -268,13 +301,18 @@ export class WorldModel {
   private floorWatchT = -Infinity;
   /**
    * Share of precise readings over the last few seconds that contradict the
-   * map: the ray carved through strongly occupied voxels, or the reading
-   * landed in space the map is confident is empty. A few % is normal
-   * (noise, people moving); a sustained high rate means the map and reality
-   * no longer line up.
+   * map: the reading lies *behind* surfaces the map is confident about (its
+   * ray passes through strongly occupied voxels). A few % is normal (noise,
+   * things moved); a sustained high rate means the map and reality no longer
+   * line up.
    */
   conflictRate = 0;
-  private conflictWin: { t: number; rays: number; bad: number }[] = [];
+  private conflictWin: { t: number; rays: number; bad: number; carve: number }[] = [];
+  /**
+   * Share of precise readings landing in space the map is confident is empty
+   * (same window). Noisy — grazing views, people walking — so diagnostic only.
+   */
+  surpriseRate = 0;
   /** Window (s) for conflictRate. */
   conflictWindow = 3;
   /** Depth frames rejected as garbage (covered camera, NaN poses). */
@@ -283,10 +321,82 @@ export class WorldModel {
   private replay: { eye: Vec3; pts: Float32Array; sig: Float32Array | null; t: number }[] = [];
   private replayPoints = 0;
   /** Max points kept for replay (≈ the last minute of phone depth). */
-  replayBudget = 300_000;
+  replayBudget = 600_000;
+  /** Periodic copies of the grid, so a late-detected misalignment can be undone (see realign). */
+  private snapshots: { t: number; data: Int8Array; observed: Uint8Array; underside: Uint8Array; topFrac: Uint8Array; floorY: number; epoch: number }[] = [];
+  snapshotEvery = 4;
   private replaying = false;
   /** Times the map was rebuilt or aged by a recovery (diagnostics). */
-  recoveries = { relevel: 0, soft: 0, hard: 0 };
+  recoveries = { relevel: 0, soft: 0, hard: 0, realign: 0 };
+
+  // --- Map frame vs tracking frame --------------------------------------------------
+  // Everything in the model (voxels, nav, the pet) lives in the *map frame*. The
+  // device reports poses in its *tracking frame*, which can drift or jump when
+  // tracking relocalises. trackingToMap = registration · anchor maps incoming
+  // data into the map frame; content is rendered with its inverse.
+  private anchorC: number[] = identity4();
+  private regC: number[] = identity4();
+  private t2m: number[] = identity4();
+  private m2t: number[] = identity4();
+  /** Increments whenever the frame correction changes. */
+  frameVersion = 0;
+  /** Time of the last tracking loss/recovery reported by the device (relocalisation jumps happen then). */
+  lastTrackingEvent = -Infinity;
+  /** Time of the most recent depth frame (device clock). */
+  now = 0;
+  /** The map as it was when tracking was last lost (before any jump could leak in). */
+  eventSnapshot: { t: number; data: Int8Array; epoch: number } | null = null;
+  noteTrackingEvent(t: number): void {
+    // Loss and recovery both report; snapshot at the first of a burst.
+    if (this.grid && !(t - this.lastTrackingEvent < 20 && this.eventSnapshot)) this.eventSnapshot = { t, data: this.grid.data.slice(), epoch: this.epoch };
+    this.lastTrackingEvent = t;
+  }
+
+  /** Correction from a world anchor (tracking → map), e.g. WebXR anchors that the platform keeps glued to the real world. */
+  setAnchorCorrection(m: ArrayLike<number> | null): void {
+    const next = m ? Array.from(m) : identity4();
+    if (!next.every(Number.isFinite)) return;
+    this.anchorC = next;
+    this.updateFrame();
+  }
+
+  /** Apply an extra map-frame correction on top of the current one (from self-registration). */
+  applyRegistration(delta: ArrayLike<number>): void {
+    if (!Array.from(delta).every(Number.isFinite)) return;
+    this.regC = mul4(delta, this.regC);
+    this.recoveries.realign++;
+    this.updateFrame();
+  }
+
+  private updateFrame(): void {
+    this.t2m = mul4(this.regC, this.anchorC);
+    this.m2t = invertRigid4(this.t2m);
+    this.frameVersion++;
+    // History kept in the old frame no longer lines up.
+    this.poseGate.reset();
+    this.multiView?.reset();
+    this.conflictWin = [];
+    this.conflictRate = 0;
+  }
+
+  trackingToMap(): number[] {
+    return this.t2m.slice();
+  }
+  mapToTracking(): number[] {
+    return this.m2t.slice();
+  }
+  toMapPoint(p: Vec3): Vec3 {
+    return xform(this.t2m, p, 1);
+  }
+  toMapDir(d: Vec3): Vec3 {
+    return xform(this.t2m, d, 0);
+  }
+  toTrackingPoint(p: Vec3): Vec3 {
+    return xform(this.m2t, p, 1);
+  }
+  private get frameIsIdentity(): boolean {
+    return this.frameVersion === 0;
+  }
 
   /**
    * Full depth front end, shared by the device and the simulator: gate frames
@@ -295,6 +405,8 @@ export class WorldModel {
    * was rejected.
    */
   ingestDepthImage(img: DepthImage, t: number, emulatedPose = false): boolean {
+    if (!this.frameIsIdentity) img = { ...img, camToWorld: mul4(this.t2m, img.camToWorld) };
+    this.now = t;
     const M = img.camToWorld;
     const eye = { x: M[12], y: M[13], z: M[14] };
     const fwd = { x: -M[8], y: -M[9], z: -M[10] };
@@ -317,6 +429,11 @@ export class WorldModel {
     if (valid > 20 && near > 0.5 * valid) {
       this.garbageFrames++;
       return false;
+    }
+    if (this.grid && !this.replaying && (!this.snapshots.length || t - this.snapshots[this.snapshots.length - 1].t >= this.snapshotEvery || t < this.snapshots[this.snapshots.length - 1].t)) {
+      const g = this.grid;
+      this.snapshots.push({ t, data: g.data.slice(), observed: g.observed.slice(), underside: g.underside.slice(), topFrac: g.topFrac.slice(), floorY: this.floorY, epoch: this.epoch });
+      if (this.snapshots.length > 3) this.snapshots.shift();
     }
     // Let old floor evidence fade (half-life ~7s).
     if (Number.isFinite(this.floorWatchT) && t > this.floorWatchT) {
@@ -345,7 +462,7 @@ export class WorldModel {
     if (!g) return;
     const r = g.res;
     if (!this.replaying) this.remember(eye, points, sigmas, t);
-    let rays = 0, conflicted = 0;
+    let rays = 0, conflicted = 0, carved = 0;
     for (let q = 0; q < points.length; q++) {
       const p = points[q];
       const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z);
@@ -412,18 +529,21 @@ export class WorldModel {
       const c = g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
       if (sigma < 0.04) {
         rays++;
-        if (c >= 2 || landedInFree) conflicted++;
+        if (c >= 2) conflicted++;
+        if (landedInFree) carved++;
       }
     }
     if (!this.replaying && rays > 0) {
       const w = this.conflictWin;
-      w.push({ t, rays, bad: conflicted });
+      w.push({ t, rays, bad: conflicted, carve: carved });
       while (w.length && w[0].t < t - this.conflictWindow) w.shift();
-      let R = 0, B = 0;
+      let R = 0, B = 0, C = 0;
       for (const e of w) {
         R += e.rays;
         B += e.bad;
+        C += e.carve;
       }
+      if (R >= 150) this.surpriseRate = C / R;
       // Too few precise readings (looking far away) says nothing either way.
       this.conflictRate = R >= 150 ? B / R : this.conflictRate * 0.9;
     }
@@ -435,6 +555,16 @@ export class WorldModel {
     this.replay.push({ eye: { ...eye }, pts, sig: sigmas ? Float32Array.from(sigmas) : null, t });
     this.replayPoints += points.length;
     while (this.replayPoints > this.replayBudget && this.replay.length > 1) this.replayPoints -= this.replay.shift()!.pts.length / 3;
+  }
+
+  /** Area-weighted height of detected floor planes, if there are enough of them. */
+  floorPlaneEstimate(minArea = 2): { y: number; area: number } | null {
+    let pa = 0, py = 0;
+    for (const fp of this.floorPlanes.values()) {
+      pa += fp.area;
+      py += fp.y * fp.area;
+    }
+    return pa >= minArea ? { y: py / pa, area: pa } : null;
   }
 
   /**
@@ -469,13 +599,191 @@ export class WorldModel {
   relevelFloor(y: number): void {
     if (!this.grid || !Number.isFinite(y)) return;
     this.recoveries.relevel++;
+    const old = this.grid;
     this.rebuildAtFloor(y);
+    // Keep what we know above the floor (the bulk of the map, including
+    // areas seen long ago that the replay buffer no longer covers): copy it
+    // across, aligned by height. The band just above the floor is exactly what
+    // the floor height changes the meaning of, so it's left to the replay.
+    const g = this.grid!;
+    const shift = Math.round((g.origin.y - old.origin.y) / g.res);
+    const layer = g.nx * g.nz;
+    for (let j = FLOOR_LAYERS_BELOW + 3; j < g.ny; j++) {
+      const jo = j + shift;
+      if (jo < FLOOR_LAYERS_BELOW || jo >= old.ny) continue;
+      g.data.set(old.data.subarray(jo * layer, (jo + 1) * layer), j * layer);
+      g.underside.set(old.underside.subarray(jo * layer, (jo + 1) * layer), j * layer);
+      g.topFrac.set(old.topFrac.subarray(jo * layer, (jo + 1) * layer), j * layer);
+    }
+    g.observed.set(old.observed);
+    g.version++;
     this.floorWatch.fill(0);
     this.conflictRate = 0;
     this.conflictWin = [];
+    this.snapshots = [];
+    this.replayFrames(() => true);
+  }
+
+  /** Recovery: age all evidence so new observations quickly override a map that drifted out of line. */
+  softReset(factor = 0.3): void {
+    if (!this.grid) return;
+    this.recoveries.soft++;
+    this.grid.ageEvidence(factor, FLOOR_LAYERS_BELOW);
+    this.snapshots = [];
+    this.replay = [];
+    this.replayPoints = 0;
+    this.conflictRate = 0;
+    this.multiView?.reset();
+    this.conflictWin = [];
+  }
+
+  /**
+   * Does recent depth line up with the map? Searches small rigid corrections
+   * (x/z shift, yaw about the camera) that maximise how many recent precise
+   * off-floor readings land on confidently occupied voxels. Returns the best
+   * correction and the support with and without it. Cheap enough to run every
+   * couple of seconds (coarse-to-fine, a few thousand points).
+   */
+  estimateMisalignment(opts: { frames?: number; maxShift?: number; maxYaw?: number; snapshot?: 'newest' | 'oldest' | 'event' } = {}): { dx: number; dz: number; dyaw: number; pivot: Vec3; base: number; best: number; n: number; degenerate: boolean; snapT: number } | null {
+    const g = this.grid;
+    if (!g || !this.replay.length) return null;
+    let frames = this.replay.slice(-(opts.frames ?? 10));
+    if (opts.snapshot === 'event' && this.eventSnapshot) frames = frames.filter((f) => f.t > this.eventSnapshot!.t);
+    if (!frames.length) return null;
+    // Score against the map as it was *before* these frames (the live grid
+    // already contains them, misplaced or not).
+    const t0 = frames[0].t;
+    const usable = this.snapshots.filter((sn) => sn.t <= t0 - 1 && sn.epoch === this.epoch);
+    const ev = this.eventSnapshot;
+    const snap =
+      opts.snapshot === 'event'
+        ? ev && ev.epoch === this.epoch && ev.t <= t0
+          ? ev
+          : undefined
+        : opts.snapshot === 'oldest'
+          ? usable[0]
+          : usable[usable.length - 1];
+    if (!snap) return null;
+    const data = snap.data;
+    const pivot = frames[frames.length - 1].eye;
+    const pts: number[] = [];
+    for (const f of frames)
+      for (let q = 0; q < f.pts.length; q += 3) {
+        const x = f.pts[q], y = f.pts[q + 1], z = f.pts[q + 2];
+        const d = Math.hypot(x - f.eye.x, y - f.eye.y, z - f.eye.z);
+        if (d > 2.5 || y < this.floorY + 0.06) continue;
+        if (f.sig && f.sig[q / 3] > 0.04) continue;
+        // Moving things (people) would "align" with where they were a moment ago.
+        const ti = g.cellX(x), tj = g.cellY(y), tk = g.cellZ(z);
+        if (g.inBounds(ti, tj, tk) && g.isTransient(g.idx(ti, tj, tk))) continue;
+        pts.push(x, y, z);
+      }
+    const n = pts.length / 3;
+    if (n < 60) return null;
+    // Subsample to keep it cheap.
+    const stride = Math.max(1, Math.floor(n / 1500));
+    const score = (dx: number, dz: number, yaw: number) => {
+      const c = Math.cos(yaw), s = Math.sin(yaw);
+      let sc = 0;
+      for (let q = 0; q < pts.length; q += 3 * stride) {
+        const rx = pts[q] - pivot.x, rz = pts[q + 2] - pivot.z;
+        const x = pivot.x + c * rx + s * rz + dx, z = pivot.z - s * rx + c * rz + dz;
+        const i = g.cellX(x), j = g.cellY(pts[q + 1]), k = g.cellZ(z);
+        if (i < 1 || k < 1 || j < 0 || i >= g.nx - 1 || k >= g.nz - 1 || j >= g.ny) continue;
+        const n0 = g.idx(i, j, k);
+        // Soft score: on a confident surface voxel, or right next to one (x/z).
+        if (data[n0] > STRONG_OCC) sc += 1;
+        else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - g.nx] > STRONG_OCC || data[n0 + g.nx] > STRONG_OCC) sc += 0.35;
+      }
+      return sc;
+    };
+    const maxShift = opts.maxShift ?? 0.5, maxYaw = opts.maxYaw ?? 0.1;
+    const used = Math.ceil(n / stride);
+    // Prefer small corrections among near-ties: a support penalty of 3% of the
+    // readings per 10cm of displacement (yaw counted at 1m from the camera).
+    const pen = (dx: number, dz: number, yaw: number) => (0.03 * used * (Math.hypot(dx, dz) + Math.abs(yaw))) / 0.1;
+    const base = score(0, 0, 0);
+    let best = { dx: 0, dz: 0, dyaw: 0, s: base, v: base };
+    const consider = (dx: number, dz: number, yaw: number) => {
+      const sc = score(dx, dz, yaw), v = sc - pen(dx, dz, yaw);
+      if (v > best.v) best = { dx, dz, dyaw: yaw, s: sc, v };
+    };
+    for (let yaw = -maxYaw; yaw <= maxYaw + 1e-9; yaw += 0.025)
+      for (let dx = -maxShift; dx <= maxShift + 1e-9; dx += 0.05)
+        for (let dz = -maxShift; dz <= maxShift + 1e-9; dz += 0.05) consider(dx, dz, yaw);
+    // Refine around the best.
+    const c0 = { ...best };
+    for (let yaw = c0.dyaw - 0.0125; yaw <= c0.dyaw + 0.0126; yaw += 0.00625)
+      for (let dx = c0.dx - 0.025; dx <= c0.dx + 0.026; dx += 0.0125)
+        for (let dz = c0.dz - 0.025; dz <= c0.dz + 0.026; dz += 0.0125) consider(dx, dz, yaw);
+    // Degenerate geometry (one long wall, a plain floor edge): the fit can
+    // slide without losing support, so the correction isn't really known.
+    // Require the support to drop when the correction is nudged every way.
+    // (Partly constrained fits are fine: the small-correction preference keeps
+    // the unconstrained part — sliding along a wall — near zero.)
+    const drop = 0.06 * used;
+    let flat = 0;
+    for (const [ddx, ddz, dyw] of [[0.1, 0, 0], [-0.1, 0, 0], [0, 0.1, 0], [0, -0.1, 0], [0, 0, 0.05], [0, 0, -0.05]])
+      if (score(best.dx + ddx, best.dz + ddz, best.dyaw + dyw) > best.s - drop) flat++;
+    const degenerate = flat >= 5;
+    return { dx: best.dx, dz: best.dz, dyaw: best.dyaw, pivot: { ...pivot }, base: Math.round(base), best: Math.round(best.s), n: used, degenerate, snapT: snap.t };
+  }
+
+  /**
+   * Recovery: the tracking frame moved against the map by the correction T
+   * (yaw about `pivot`, then shift) starting around time `since`. Undo the
+   * damage: restore the grid from a snapshot taken before `since`, replay the
+   * buffered frames after it (correcting the ones from `since` on), and route
+   * all future input through T.
+   */
+  realign(dx: number, dz: number, dyaw: number, pivot: Vec3, since: number): void {
+    if (!this.grid) return;
+    const c = Math.cos(dyaw), s = Math.sin(dyaw);
+    const fix = (p: { x: number; y: number; z: number }) => {
+      const rx = p.x - pivot.x, rz = p.z - pivot.z;
+      return { x: pivot.x + c * rx + s * rz + dx, y: p.y, z: pivot.z - s * rx + c * rz + dz };
+    };
+    // T as a matrix (map frame): x' = R(x - pivot) + pivot + d.
+    const T = [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1];
+    const tp = fix({ x: 0, y: 0, z: 0 });
+    T[12] = tp.x;
+    T[14] = tp.z;
+    const snap = [...this.snapshots].reverse().find((sn) => sn.t <= since && sn.epoch === this.epoch && sn.floorY === this.floorY);
+    this.eventSnapshot = null;
+    // Correct the buffered frames from `since` on.
+    for (const f of this.replay)
+      if (f.t >= since) {
+        f.eye = fix(f.eye);
+        for (let q = 0; q < f.pts.length; q += 3) {
+          const p = fix({ x: f.pts[q], y: f.pts[q + 1], z: f.pts[q + 2] });
+          f.pts[q] = p.x;
+          f.pts[q + 2] = p.z;
+        }
+      }
+    if (snap) {
+      const g = this.grid;
+      g.data.set(snap.data);
+      g.observed.set(snap.observed);
+      g.underside.set(snap.underside);
+      g.topFrac.set(snap.topFrac);
+      g.version++;
+      this.snapshots = this.snapshots.filter((sn) => sn.t <= snap.t);
+      this.replayFrames((f) => f.t > snap.t);
+    } else {
+      // No snapshot from before the jump: rebuild from what we have.
+      this.rebuildAtFloor(this.floorY);
+      this.floorRefinements--;
+      this.snapshots = [];
+      this.replayFrames(() => true);
+    }
+    this.applyRegistration(T);
+  }
+
+  private replayFrames(which: (f: { t: number }) => boolean): void {
     this.replaying = true;
     try {
       for (const f of this.replay) {
+        if (!which(f)) continue;
         const pts: Vec3[] = [];
         for (let q = 0; q < f.pts.length; q += 3) pts.push({ x: f.pts[q], y: f.pts[q + 1], z: f.pts[q + 2] });
         this.ingestDepth(f.eye, pts, 4.5, f.sig ? Array.from(f.sig) : undefined, f.t);
@@ -485,22 +793,11 @@ export class WorldModel {
     }
   }
 
-  /** Recovery: age all evidence so new observations quickly override a map that drifted out of line. */
-  softReset(factor = 0.3): void {
-    if (!this.grid) return;
-    this.recoveries.soft++;
-    this.grid.ageEvidence(factor, FLOOR_LAYERS_BELOW);
-    this.replay = [];
-    this.replayPoints = 0;
-    this.conflictRate = 0;
-    this.multiView?.reset();
-    this.conflictWin = [];
-  }
-
   /** Recovery of last resort: forget the depth map (keep the floor and planes) and start mapping afresh. */
   hardReset(): void {
     if (!this.grid) return;
     this.recoveries.hard++;
+    this.snapshots = [];
     this.replay = [];
     this.replayPoints = 0;
     this.rebuildAtFloor(this.floorY);
@@ -560,10 +857,10 @@ export class WorldModel {
     this.grid = null;
     this.planeVersions.clear();
     this.labels.clear();
-    this.setFloor(newY, this.center);
+    this.allocateGrid(newY, this.center);
     this.epoch++;
-    for (const pl of this.planeInputs.values()) this.ingestPlane(pl);
-    for (const m of this.meshInputs.values()) this.ingestMesh(m);
+    for (const pl of this.planeInputs.values()) this.ingestPlaneMap(pl);
+    for (const m of this.meshInputs.values()) this.ingestMeshMap(m);
     return true;
   }
 
@@ -645,3 +942,26 @@ function pointInPoly2(x: number, y: number, poly: [number, number][]): boolean {
 
 const dot = (a: Vec3, b: Vec3) => a.x * b.x + a.y * b.y + a.z * b.z;
 const cross = (a: Vec3, b: Vec3): Vec3 => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+
+function identity4(): number[] {
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+}
+/** A·B for column-major 4x4 matrices. */
+export function mul4(A: ArrayLike<number>, B: ArrayLike<number>): number[] {
+  const o = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += A[k * 4 + r] * B[c * 4 + k];
+  return o;
+}
+export function invertRigid4(M: ArrayLike<number>): number[] {
+  const o = identity4();
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[c * 4 + r] = M[r * 4 + c];
+  for (let r = 0; r < 3; r++) o[12 + r] = -(o[r] * M[12] + o[4 + r] * M[13] + o[8 + r] * M[14]);
+  return o;
+}
+function xform(M: ArrayLike<number>, p: Vec3, w: number): Vec3 {
+  return {
+    x: M[0] * p.x + M[4] * p.y + M[8] * p.z + M[12] * w,
+    y: M[1] * p.x + M[5] * p.y + M[9] * p.z + M[13] * w,
+    z: M[2] * p.x + M[6] * p.y + M[10] * p.z + M[14] * w,
+  };
+}

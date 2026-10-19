@@ -118,6 +118,12 @@ export function worldNoise(x: number, y: number, z: number): number {
   );
 }
 
+function mulCM(A: ArrayLike<number>, B: ArrayLike<number>): number[] {
+  const o = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += A[k * 4 + r] * B[c * 4 + k];
+  return o;
+}
+
 /** Camera-to-world (column-major) for a camera with a tracking error applied. */
 export function poseMatrix(cam: SimCamera, pose: { yaw: number; pitch: number; x: number; y: number; z: number }): number[] {
   const { forward, right, up } = cameraBasis(cam);
@@ -296,7 +302,7 @@ export class SimSensor {
         if (!(z > 0.2) || z > N.maxRange) continue; // no reading
         out[(h - 1 - py) * w + px] = z; // image row 0 = top
       }
-    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: poseMatrix(cam, this.withShift(pose)) };
+    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: this.withShift(poseMatrix(cam, pose)) };
   }
 
   /**
@@ -311,7 +317,7 @@ export class SimSensor {
     // the random-walk drift, keep relocalisation jumps instantaneous.
     const s = this.smoothErr, e = this.poseErr, a = 0.03;
     for (const k of ['yaw', 'pitch', 'x', 'y', 'z'] as const) s[k] += (e[k] - s[k]) * a;
-    return poseMatrix(cam, this.withShift({
+    return this.withShift(poseMatrix(cam, {
       yaw: s.yaw + (j.yaw - e.yaw),
       pitch: s.pitch + (j.pitch - e.pitch),
       x: s.x + (j.x - e.x),
@@ -328,13 +334,18 @@ export class SimSensor {
 
   /** The camera position the device *believes* it is at (true pose + tracking error). */
   estimatedEye(cam: SimCamera): Vec3 {
-    return applyPoseError(this.withShift(this.poseErr), cam.pos, cam.pos);
+    const p = applyPoseError(this.poseErr, cam.pos, cam.pos), J = this.jump;
+    return { x: J[0] * p.x + J[4] * p.y + J[8] * p.z + J[12], y: J[1] * p.x + J[5] * p.y + J[9] * p.z + J[13], z: J[2] * p.x + J[6] * p.y + J[10] * p.z + J[14] };
   }
 
   private poseErr = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
   private poseJit = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
   /** Mean-reverting random walk (tracking drifts, then relocalises) plus jitter. */
   private lossFrames = 0;
+  /** A real tracking-loss episode is in progress (not just a blurred frame). */
+  get trackingLost(): boolean {
+    return this.lossFrames > 0;
+  }
   /** Tracking state for this frame: false while tracking is lost or the frame is too blurred. */
   trackingOk(angVel = 0): boolean {
     const N = this.noise;
@@ -357,16 +368,15 @@ export class SimSensor {
    * longer lines up with what the camera sees now.
    */
   injectPoseJump(dx: number, dz: number, dyaw: number, dy = 0): void {
-    this.shift.x += dx;
-    this.shift.z += dz;
-    this.shift.y += dy;
-    this.shift.yaw += dyaw;
+    // Compose a rigid world-frame transform: yaw about the room origin, then shift.
+    const c = Math.cos(dyaw), sn = Math.sin(dyaw);
+    const J = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, dx, dy, dz, 1];
+    this.jump = mulCM(J, this.jump);
   }
-  /** Persistent world-frame offset (injected faults); unlike drift it doesn't revert. */
-  readonly shift = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
-  private withShift(p: { yaw: number; pitch: number; x: number; y: number; z: number }) {
-    const h = this.shift;
-    return { yaw: p.yaw + h.yaw, pitch: p.pitch, x: p.x + h.x, y: p.y + h.y, z: p.z + h.z };
+  /** Persistent rigid world-frame offset of the tracking frame (injected faults); unlike drift it doesn't revert. */
+  jump: number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  private withShift(M: number[]): number[] {
+    return mulCM(this.jump, M);
   }
 
   /** A sudden pose correction (loop closure / relocalisation). */

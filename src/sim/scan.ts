@@ -103,10 +103,15 @@ export function scanRoomHuman(
   world.setFloor(sensor.floorEstimate(), { x: 0, y: 0, z: 0 });
   const path = humanScanPath(room, opts.seed ?? 7, opts.seconds ?? 40);
   const eyes: Vec3[] = [];
-  let frames = 0, dropped = 0;
+  let frames = 0, dropped = 0, lost = false;
   for (const step of path) {
     room.time = step.t;
-    if (!sensor.trackingOk(step.angVel)) {
+    const ok = sensor.trackingOk(step.angVel);
+    if (sensor.trackingLost !== lost) {
+      lost = sensor.trackingLost;
+      world.noteTrackingEvent(step.t);
+    }
+    if (!ok) {
       dropped++;
       camera?.lost();
       continue;

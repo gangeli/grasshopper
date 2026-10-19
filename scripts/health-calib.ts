@@ -10,7 +10,7 @@ const CANON = ['living', 'bedroom', 'r3', 'r7', 'r11', 'r19', 'r23', 'r29', 'r31
 const name = process.argv[2] ?? 'living', jump = Number(process.argv[3] ?? 0), floorOff = Number(process.argv[4] ?? 0);
 const idx = CANON.indexOf(name);
 const room = dressRoom(roomFromName(name), idx + 1);
-const sensor = new SimSensor(room, { depth: true, planes: true, mesh: false }, idx + 3, 'real');
+const sensor = new SimSensor(room, { depth: true, planes: true, mesh: false }, idx + 3, (process.env.PROFILE ?? 'real') as 'real');
 const world = new WorldModel();
 world.setFloor(sensor.floorEstimate() + floorOff, { x: 0, y: 0, z: 0 });
 const JUMP_T = 30;
@@ -25,6 +25,8 @@ for (const step of humanScanPath(room, idx + 3, 60)) {
   senseFrame(world, sensor, step.cam);
   if (Math.round(step.t * 10) % 20 === 0) {
     const f = world.floorEvidence();
-    console.log(`${step.t.toFixed(0)} ${(world.conflictRate * 100).toFixed(1)} ${(f.offset * 100).toFixed(1)} ${(f.share * 100).toFixed(0)} ${f.mass.toFixed(0)}`);
+    const m = world.estimateMisalignment();
+    if (m && process.env.ALIGN) process.stdout.write(`align dx ${(m.dx * 100).toFixed(1)} dz ${(m.dz * 100).toFixed(1)} yaw ${(m.dyaw * 57.3).toFixed(1)}° base ${m.base} best ${m.best} n ${m.n} | `);
+    console.log(`${step.t.toFixed(0)} ${(world.conflictRate * 100).toFixed(1)} surprise${(world.surpriseRate * 100).toFixed(0)} ${(f.offset * 100).toFixed(1)} ${(f.share * 100).toFixed(0)} ${f.mass.toFixed(0)}`);
   }
 }

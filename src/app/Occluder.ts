@@ -89,6 +89,7 @@ export function buildOccluderGeometry(g: VoxelGrid, center: THREE.Vector3, radiu
 export class Occluder {
   readonly mesh: THREE.Mesh;
   private builtVersion = -1;
+  private builtGrid: VoxelGrid | null = null;
   private builtCenter = new THREE.Vector3(1e9, 0, 0);
   readonly material: THREE.MeshBasicMaterial;
   /** Visible (tinted) for debugging instead of depth-only. */
@@ -110,7 +111,9 @@ export class Occluder {
 
   /** Rebuild when the map changed or the pet moved far from the last build centre. */
   update(g: VoxelGrid, center: THREE.Vector3, minLayer: number, force = false): boolean {
-    if (!force && g.version === this.builtVersion && center.distanceTo(this.builtCenter) < 1.0) return false;
+    // A rebuilt map is a new grid object whose version restarts: compare identity too.
+    if (!force && g === this.builtGrid && g.version === this.builtVersion && center.distanceTo(this.builtCenter) < 1.0) return false;
+    this.builtGrid = g;
     this.mesh.geometry.dispose();
     this.mesh.geometry = buildOccluderGeometry(g, center, 3.5, minLayer);
     this.builtVersion = g.version;

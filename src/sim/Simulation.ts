@@ -55,12 +55,40 @@ export class Simulation {
     this.senseEvery = opts.senseEvery ?? 3;
   }
 
+  /** Injected faults (see sim/Faults.ts). */
+  readonly faults = { coveredUntil: -1, nanViewUntil: -1 };
+
   view(): ViewPose {
+    if (this.time < this.faults.nanViewUntil) return { pos: { x: NaN, y: NaN, z: NaN }, forward: { x: NaN, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 }, fovY: this.cam.fovY, aspect: this.cam.aspect };
     const { forward, up } = cameraBasis(this.cam);
     return { pos: { ...this.cam.pos }, forward, up, fovY: this.cam.fovY, aspect: this.cam.aspect };
   }
 
+  private trackingLost = false;
+  private lastCam: SimCamera | null = null;
   sense(): void {
+    // Tracking can drop out (fast turns, blur, featureless views); the device
+    // reports it, and re-localises afterwards (sometimes with a jump).
+    const prev = this.lastCam;
+    const dt = this.senseEvery / 30;
+    const angVel = prev ? Math.hypot(Math.atan2(Math.sin(this.cam.yaw - prev.yaw), Math.cos(this.cam.yaw - prev.yaw)), this.cam.pitch - prev.pitch) / dt : 0;
+    this.lastCam = { ...this.cam, pos: { ...this.cam.pos } };
+    const ok = this.sensor.trackingOk(angVel);
+    // Blurred frames just get dropped; a real loss (and the relocalisation
+    // after it) is what the device reports and what can move the world frame.
+    const lost = this.sensor.trackingLost;
+    if (lost !== this.trackingLost) {
+      this.trackingLost = lost;
+      this.world.noteTrackingEvent(this.room.time);
+    }
+    if (!ok) return;
+    if (this.time < this.faults.coveredUntil) {
+      // A hand over the lens / phone face down: everything ~15cm away.
+      const img = this.sensor.depthImage(this.cam);
+      img.depth.fill(0.15);
+      this.world.ingestDepthImage(img, this.room.time);
+      return;
+    }
     senseFrame(this.world, this.sensor, this.cam);
   }
 

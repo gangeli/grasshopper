@@ -28,6 +28,11 @@ export interface RoundReport {
   simSeconds: number;
   planMs: number;
   messages: string[];
+  /** Recoveries the health monitor took (a healthy session should need none or few). */
+  health: { t: number; issue: string; detail: string }[];
+  /** Floor height at the start and end (truth is 0 in the sim). */
+  floorStart: number;
+  floorEnd: number;
 }
 
 /** Play one full automated round: map, start, hide, seek, find. */
@@ -52,7 +57,11 @@ export function runRound(room: string, seed: number, opts: Partial<SimOptions> &
     simSeconds: 0,
     planMs: 0,
     messages: [],
+    health: [],
+    floorStart: 0,
+    floorEnd: 0,
   };
+  r.floorStart = sim.world.floorY;
   sim.game.events.onMessage = (m) => r.messages.push(m);
   sim.game.events.onPhase = (p) => {
     if (p === 'countdown') {
@@ -85,6 +94,8 @@ export function runRound(room: string, seed: number, opts: Partial<SimOptions> &
     }
   }
   r.jumps = sim.pet.jumpsMade;
+  r.health = sim.game.health.log.slice();
+  r.floorEnd = sim.world.floorY;
   r.simSeconds = sim.time;
   return r;
 }

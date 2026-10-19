@@ -186,7 +186,9 @@ export class VoxelGrid {
       // erode it only slowly, so small real objects survive many near-misses.
       const v = this.data[this.idx(i, j, k)];
       if (v > STRONG_OCC) conflicts++;
-      this.add(i, j, k, v > OCC_THRESHOLD && this.stickyOccupied ? Math.max(missDelta, -1) : missDelta);
+      // Precise rays (missDelta ≤ -3: close, sharp readings) erode a little faster, so stale obstacles
+      // left by a tracking jump don't linger; noisy ones barely touch confident voxels.
+      this.add(i, j, k, v > OCC_THRESHOLD && this.stickyOccupied ? Math.max(missDelta, missDelta <= -3 ? -2 : -1) : missDelta);
       return false;
     });
     if (hit) {

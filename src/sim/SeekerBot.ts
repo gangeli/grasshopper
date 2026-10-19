@@ -122,6 +122,11 @@ export class SeekerBot {
       }
       case 'counting': {
         // Eyes covered: don't move the camera.
+        // The round can end early (e.g. Hopper gave itself up after a tracking glitch).
+        if (game.phase === 'roam' || game.phase === 'found') {
+          this.phase = 'done';
+          break;
+        }
         if (game.phase === 'seek') {
           this.phase = 'searching';
           this.searchTime = 0;
@@ -167,10 +172,22 @@ export class SeekerBot {
         break;
       }
       case 'done':
+        // Keep playing (soak tests): once the game is back to roaming, go again.
+        if (this.continuous && game.phase === 'roam') {
+          this.phase = 'waiting';
+          this.t = 0;
+          this.tour = [];
+          this.tourIdx = 0;
+          this.rounds++;
+        }
         break;
     }
     sim.step(dt);
   }
+
+  /** Play round after round instead of stopping after the first. */
+  continuous = false;
+  rounds = 0;
 
   /** Seconds spent walking around mapping before the first round. */
   mapSeconds = 35;

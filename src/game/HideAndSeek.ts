@@ -12,6 +12,7 @@ import type { WorldModel } from '../world/WorldModel';
 import { describeSpot, findHideSpots, type HideSpot } from './HideSpots';
 import { petSamplePoints, petVisibility, type ViewPose } from './Visibility';
 import { measurePoseSamples } from '../pet/poseSamples';
+import { HealthMonitor, type HealthOptions } from './Health';
 
 /**
  * Game flow:
@@ -48,6 +49,7 @@ export interface GameOptions {
   difficulty: number;
   eyeHeight: number;
   seed: number;
+  health?: Partial<HealthOptions>;
 }
 
 const DEFAULTS: GameOptions = { countdown: 10, difficulty: 0.5, eyeHeight: 1.45, seed: 1 };
@@ -76,6 +78,7 @@ export class HideAndSeek {
   private foundTimer = 0;
   /** Game clock (s) and a cooldown after a failed start. */
   private clock = 0;
+  readonly health: HealthMonitor;
   private startBlockedUntil = 0;
   private hidden = false;
   private lastView: ViewPose | null = null;
@@ -92,6 +95,7 @@ export class HideAndSeek {
   ) {
     this.opts = { ...DEFAULTS, ...opts };
     this.rng = new Rng(this.opts.seed);
+    this.health = new HealthMonitor(this, this.world, this.opts.health);
   }
 
   private setPhase(p: Phase) {
@@ -99,12 +103,83 @@ export class HideAndSeek {
     this.events.onPhase?.(p);
   }
 
-  private say(msg: string) {
+  say(msg: string) {
     this.events.onMessage?.(msg);
+  }
+
+  /** The map was rebuilt, aged or moved: drop derived data so it's recomputed. */
+  mapChanged(): void {
+    this.refreshNav(true);
+    this.objects = [];
+  }
+
+  /**
+   * Recovery: put the pet somewhere believable. A short hop when the target is
+   * close (it looks like Hopper moving out of the way); otherwise it just
+   * reappears there, startled.
+   */
+  relocatePet(target: Vec3, teleport: boolean): void {
+    const pet = this.pet;
+    this.move = null;
+    if (teleport || !Number.isFinite(pet.pos.x + pet.pos.y + pet.pos.z)) {
+      pet.placeAt(new THREE.Vector3(target.x, target.y, target.z), Number.isFinite(pet.yaw) ? pet.yaw : 0);
+      pet.perform('surprised');
+    } else pet.follow([{ x: target.x, y: target.y, z: target.z, jump: true, lift: 0.08, node: -1 }], 0.8, this.phase === 'seek' || this.phase === 'countdown' ? 'hide' : 'idle', null);
+  }
+
+  /**
+   * Recovery: the pet's position can no longer be trusted (the world frame
+   * jumped). Mid-round, Hopper gives the game away rather than sitting inside
+   * something; otherwise hops back in front of the player.
+   */
+  reanchorPet(): void {
+    const view = this.lastView;
+    if (this.phase === 'countdown' || this.phase === 'seek') {
+      this.say('Oops — I lost track of where I was! Here I am.');
+      this.pet.stop('idle');
+      if (view) this.reveal(view);
+      else this.foundIt(true);
+    }
+    if (!view) return;
+    const nav = this.refreshNav(true);
+    const fx = view.forward.x, fz = view.forward.z, fl = Math.hypot(fx, fz) || 1;
+    const want = { x: view.pos.x + (fx / fl) * 1.0, y: this.world.floorY, z: view.pos.z + (fz / fl) * 1.0 };
+    let target: Vec3 = want;
+    if (nav && nav.count) {
+      const n = nav.nearest(want, 1.5);
+      if (n !== NAV_NONE) target = nav.pos(n);
+    }
+    this.relocatePet(target, true);
+  }
+
+  /** Recovery: a phase overstayed its welcome; move the game along. */
+  forceAdvance(): void {
+    switch (this.phase) {
+      case 'countdown':
+        this.pet.stop('hide');
+        this.hidden = true;
+        this.seekTime = 0;
+        this.nextHint = 22 - this.opts.difficulty * 8;
+        this.setPhase('seek');
+        this.say('Ready or not… come find me!');
+        break;
+      case 'seek':
+        this.pet.stop('idle');
+        if (this.lastView) this.reveal(this.lastView);
+        else this.foundIt(true);
+        break;
+      case 'found':
+        this.setPhase('roam');
+        this.roamTimer = 0;
+        break;
+    }
   }
 
   /** Put the pet in the world (e.g. where the user tapped). */
   spawn(at: THREE.Vector3, faceToward?: THREE.Vector3): void {
+    // Inputs come from the device (tracking frame); the game lives in the map frame.
+    at = toV3(this.world.toMapPoint(at));
+    if (faceToward) faceToward = toV3(this.world.toMapPoint(faceToward));
     const yaw = faceToward ? Math.atan2(faceToward.x - at.x, faceToward.z - at.z) : 0;
     this.pet.placeAt(at, yaw);
     this.pet.perform('wave');
@@ -115,7 +190,9 @@ export class HideAndSeek {
 
   refreshNav(force = false): NavGrid | null {
     if (!this.world.grid) return null;
-    if (!this.nav) this.nav = new NavGrid(this.world);
+    // The world replaces its grid when it rebuilds (floor correction, reset):
+    // a nav graph bound to the old grid would freeze on a stale map forever.
+    if (!this.nav || this.nav.g !== this.world.grid) this.nav = new NavGrid(this.world);
     else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh();
     return this.nav;
   }
@@ -275,6 +352,8 @@ export class HideAndSeek {
 
   /** Tap/select: if aimed at a visible pet, that counts as found. */
   tapAt(rayOrigin: THREE.Vector3, rayDir: THREE.Vector3): boolean {
+    rayOrigin = toV3(this.world.toMapPoint(rayOrigin));
+    rayDir = toV3(this.world.toMapDir(rayDir));
     const c = this.pet.pos.clone().add(new THREE.Vector3(0, 0.15, 0));
     const toC = c.clone().sub(rayOrigin);
     const t = toC.dot(rayDir);
@@ -295,7 +374,12 @@ export class HideAndSeek {
     return false;
   }
 
-  update(dt: number, view: ViewPose): void {
+  update(dt: number, viewTracking: ViewPose): void {
+    // Never let a bad frame poison the game: clamp time, reject broken poses.
+    if (!(dt >= 0)) dt = 0;
+    dt = Math.min(dt, 0.25);
+    const view = this.viewToMap(viewTracking) ?? this.lastView;
+    if (!view) return;
     this.clock += dt;
     this.lastView = view;
     this.anim.lookTarget = new THREE.Vector3(view.pos.x, view.pos.y, view.pos.z);
@@ -328,6 +412,15 @@ export class HideAndSeek {
     this.guardPath(dt);
     this.pet.update(dt);
     this.anim.update(dt);
+    this.health.update(dt, view);
+  }
+
+  /** Tracking-frame view → map frame; null if the pose is unusable. */
+  private viewToMap(v: ViewPose): ViewPose | null {
+    const ok = (p: Vec3) => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
+    if (!v || !ok(v.pos) || !ok(v.forward) || !ok(v.up) || Math.hypot(v.forward.x, v.forward.y, v.forward.z) < 0.5) return null;
+    if (this.world.frameVersion === 0) return v;
+    return { ...v, pos: this.world.toMapPoint(v.pos), forward: this.world.toMapDir(v.forward), up: this.world.toMapDir(v.up) };
   }
 
   private updateRoam(dt: number, view: ViewPose) {
@@ -395,7 +488,8 @@ export class HideAndSeek {
     }
     // Don't let a round drag on forever: eventually Hopper pops out.
     const patience = 50 + this.opts.difficulty * 50;
-    if (this.seekTime > patience && !this.pet.moving) {
+    if ((this.seekTime > patience && !this.pet.moving) || this.seekTime > patience + 15) {
+      this.pet.stop('idle');
       this.reveal(view);
       return;
     }
@@ -513,3 +607,5 @@ export class HideAndSeek {
     return this.lastView;
   }
 }
+
+const toV3 = (p: Vec3) => new THREE.Vector3(p.x, p.y, p.z);
