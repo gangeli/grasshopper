@@ -85,6 +85,11 @@ export function surfaceAt(x: number, y: number, z: number): { p: THREE.Vector3; 
   return { p: new THREE.Vector3(x, y, z), n };
 }
 
+/** Signed distance to the sculpted skin (m; negative inside). */
+export function skinDistance(x: number, y: number, z: number): number {
+  return getSculpt().d(x, y, z);
+}
+
 /** Fur length at a surface point (for lifting decals above the fur). */
 export function furLengthAt(x: number, y: number, z: number): number {
   let fl = 0;
@@ -326,9 +331,12 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const aoB = broadOcclusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
     const aoK = (0.5 + 0.5 * ao - 0.32 * paw * (1 - ao)) * (0.6 + 0.4 * aoB) * (0.86 + 0.14 * smooth(0.0, 0.07, y));
     c.multiplyScalar(aoK);
-    if (rim > 0) {
+    // With the eyes shut the hollow of the socket fills, so its baked shadow
+    // fades (over a wider ring than the liner) and the lids meet an evenly lit coat.
+    const hollow = 1 - smooth(1.0, 2.0, eyeD);
+    if (hollow > 0) {
       const lumOpen = (c.r * 0.3 + c.g * 0.59 + c.b * 0.11);
-      const lumClosed = lumBefore * THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.92), rim);
+      const lumClosed = (rim > 0 ? lumBefore : lumOpen / Math.max(1e-4, aoK)) * THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.95), hollow);
       socket[v * 3] = rim;
       socket[v * 3 + 1] = Math.min(3, lumClosed / Math.max(1e-4, lumOpen));
       // Only the brow side fills: the lash line along the bottom must stay visible.

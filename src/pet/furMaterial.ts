@@ -65,7 +65,7 @@ export function addSocketFade(
   shader.uniforms.uEyeSquint = eyeSquint;
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec3 socket;\nuniform float uEyeClosed;\nuniform float uEyeFill;\nuniform float uEyeSquint;\nvarying float vSocketK;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed * step(0.001, socket.x));\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.006 + max(0.0, socket.x * socket.x - socket.z) * uEyeSquint * 0.004);');
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed);\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.008 + max(0.0, socket.x * socket.x - socket.z) * uEyeSquint * 0.004);');
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', '#include <common>\nvarying float vSocketK;')
     .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vSocketK;');
