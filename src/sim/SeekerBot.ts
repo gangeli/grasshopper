@@ -20,6 +20,7 @@ export class SeekerBot {
   searchTime = 0;
 
   constructor(readonly sim: Simulation, readonly useHearing = true) {
+    if (sim.camera) this.armLength = 0.3;
     // Like a person, walk towards giggles (with some error in where we think they came from).
     const prev = sim.game.events.onGiggle;
     sim.game.events.onGiggle = (pos, loud) => {
@@ -89,7 +90,7 @@ export class SeekerBot {
         // behind and under furniture (crouching now and then), then come back.
         if (this.t > 1 && game.phase === 'waiting') sim.spawnPet();
         if (this.t < 1.5) {
-          cam.yaw += dt * 0.6;
+          this.turn(dt * 0.6);
           cam.pitch = -0.6;
           break;
         }
@@ -174,7 +175,7 @@ export class SeekerBot {
           cam.pitch = -0.5;
         } else {
           this.spin += dt;
-          cam.yaw += dt * 1.1;
+          this.turn(dt * 1.1);
           cam.pitch = -0.65 + 0.25 * Math.sin(this.spin * 2);
           if (this.spin > (Math.PI * 2) / 1.1) {
             this.spin = 0;
@@ -227,7 +228,7 @@ export class SeekerBot {
     if (d > 0.1) this.walkTowards(target.x, target.z, dt);
     else {
       this.spin += dt;
-      cam.yaw += dt * spinRate;
+      this.turn(dt * spinRate);
       cam.pitch = -0.65 + 0.3 * Math.sin(this.spin * 1.7);
       cam.pos.y = 1.45 - 0.6 * Math.max(0, Math.sin(this.spin * 0.9));
       if (this.spin > (Math.PI * 2) / spinRate) {
@@ -238,11 +239,30 @@ export class SeekerBot {
     }
   }
 
+  /**
+   * How far in front of the body the phone is held (m). Camera-only depth
+   * depends on the arc this sweeps when turning; the game tests were tuned
+   * with the phone turning about its lens, so that stays the default.
+   */
+  armLength = 0;
+  /**
+   * Turn on the spot like a person: the body rotates and the phone, held in
+   * front of it, sweeps an arc (which is what gives camera-only depth its
+   * parallax), rather than spinning about the lens.
+   */
+  private turn(dYaw: number) {
+    const cam = this.sim.cam, R = this.armLength;
+    const px = cam.pos.x + Math.sin(cam.yaw) * R, pz = cam.pos.z + Math.cos(cam.yaw) * R;
+    cam.yaw += dYaw;
+    cam.pos.x = px - Math.sin(cam.yaw) * R;
+    cam.pos.z = pz - Math.cos(cam.yaw) * R;
+  }
+
   private lookAt(x: number, y: number, z: number, dt: number) {
     const cam = this.sim.cam;
     const dx = x - cam.pos.x, dy = y - cam.pos.y, dz = z - cam.pos.z;
     const want = Math.atan2(-dx, -dz);
-    cam.yaw += clamp(wrapAngle(want - cam.yaw), -3 * dt, 3 * dt);
+    this.turn(clamp(wrapAngle(want - cam.yaw), -3 * dt, 3 * dt));
     cam.pitch = Math.atan2(dy, Math.hypot(dx, dz));
   }
 }

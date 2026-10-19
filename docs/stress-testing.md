@@ -113,14 +113,31 @@ WebXR hands the app that (densified) result. To test that regime honestly:
 
 | 12 dressed rooms, `real` profile | camera-only stereo | depth-sensor model |
 |---|---|---|
-| False-free (solid believed seen-empty) | **0.4%** | 1.1% |
-| Paths brushing furniture (max penetration) | 4.4% (5cm) | 5.8% (5cm) |
-| Jump landings on nothing | **0 / 645** | 1 / 877 |
+| False-free (solid believed seen-empty) | **0.6%** | 1.1% |
+| Paths brushing furniture (max penetration) | 4.0% (5cm) | 5.8% (5cm) |
+| Jump landings on nothing | **0 / 709** | 1 / 877 |
 | Walkable area (mean) | 6.8 m² | 12.0 m² |
 
 Camera depth is at least as safe but maps less: blank floors and walls give no matches. A fully
 textureless floor (room r29) is close to unplayable from the camera alone — the game tells the
 player to point at the floor in better light rather than inventing ground.
+
+**Whole games from the camera alone.** `Simulation` takes `depthFrom: 'camera'` (and the soak and
+round scripts `CAMERA=1`): every depth frame the game gets comes from rendered camera images through
+motion stereo, as on a phone without a depth sensor. The renderer was made ~9× faster for this
+(a box BVH, cached shadow rays, motion-blur samples only when there is blur) with unchanged mapping
+results. The simulated player now turns like a person, with the phone ~30cm in front of the body,
+so turning on the spot moves the camera along an arc (that, not rotation, is what gives
+depth-from-motion its parallax).
+
+The camera-only fault soak (12 rooms × 5 min, faults every 60–90 s) found three problems that the
+depth-sensor runs never showed, all fixed: the floor wasn't corrected after a floor fault because
+depth near the floor is sparse while the phone is held still (a large floor plane now decides when
+depth can't); one room never started a round in 262 s because a single unconfirmed jump vote kept
+the game "unsettled" while tracking kept dropping out (hold-offs now fade and are capped at 12 s);
+and after a loss, new territory was read as a contradiction. In the 3 of 12 soak rooms whose
+floor was dressed fully textureless, camera depth mapped under 1 m² of floor: the game keeps
+asking the player for more light / a textured floor rather than inventing ground.
 
 **Real camera images (TUM fr1/room colour frames, Kinect as reference)**, after undistortion: motion
 stereo has a median error of 4.3% (signed −1.2%), 6% of pixels off by >25%. Mapping from *dense*
@@ -147,16 +164,19 @@ two ways:
 
 | Fault soak: 12 rooms × 5 min, a random fault every 60–90 s, `real` sensing | Result |
 |---|---|
-| Rounds played | 59 |
-| Longest stretch with no round going anywhere | **41 s** (median 23 s) — never stuck |
+| Rounds played | 52 |
+| Longest stretch with no round going anywhere | **44 s** (median 29 s) — never stuck |
 | Crashes / exceptions | **0** |
 | Frames with a non-finite pet position (the injected `petNaN` fault, fixed the next frame) | 2 |
-| Time the pet was visibly inside real furniture | 16 s in total (one case: 6 cm into a textureless bookshelf that depth barely sees) |
-| Map precision at the end (mapped obstacles that are real, as the camera now sees the room) | median 64%, min 46% — faults every minute leave some ghosts that later views clear |
+| Time the pet was inside real furniture | 3 s in total, 1 s of it in view (longest stretch 1 s) |
+| Map precision at the end (mapped obstacles that are real, as the camera now sees the room) | median 57%, min 40% — injected jumps that can't be pinned down are handled by ageing or clearing the map, which leaves some ghosts until they're re-seen |
 
-Healthy sessions (24 rounds, no injected faults): every round finished, no false realignments, no
-false depth-only floor moves (plane-based refinements improved floor accuracy, e.g. 4.0→1.2cm);
-after the simulator's own tracking losses the map was aged a few times and reset twice.
+(Before the last round of drift fixes: worst stall 112 s and 23 s inside furniture, 14 s of it in
+view, mostly from a false 52 cm "correction" that slid the map along a wall.)
+
+Healthy sessions (12 rounds in 6 rooms, no injected faults): every round found, no realignments, no
+map ageing or resets, no depth-only floor moves; the only recoveries were two plane-based floor
+refinements in the first seconds.
 
 **Mechanisms** (and the bugs the fault tests found on the way):
 
@@ -177,6 +197,11 @@ after the simulator's own tracking losses the map was aged a few times and reset
   class — an earlier version scaled log-odds and made obstacles vanish, so a hidden pet was "found"
   through a box) and, if the world clearly moved a lot, the map is cleared and the pet re-anchored in
   front of the player. No new rounds start while the map is suspicious.
+- **No waiting forever.** "Unsettled" (no new rounds while a jump is being checked) fades within
+  6 s unless new evidence keeps coming and never lasts more than 12 s at a stretch. After a loss, a
+  run of looks in which the map as it stands fits nothing settles the question early (the map is
+  cleared and the pet brought back ~8 s sooner); looks that match nothing at any shift (new
+  territory) don't count as contradictions.
 - **Floor.** Floor planes and depth near the floor must agree (or depth alone must show an error
   ≥5cm, beyond its own few-cm bias) before the floor moves; the move keeps the rest of the map (voxels
   shifted, only the near-floor band re-learned) and is undone if fresh evidence points back.
@@ -212,6 +237,12 @@ Ordered roughly by impact:
 8. **Runtime safety.** A dynamic-obstacle layer reacts to readings inside space the map is sure is empty (the column down to the floor and 20cm behind the seen face become temporary obstacles). The path ahead is re-checked 3×/s, and Hopper stops and replans if it's blocked.
 
 ## Known limitations (honest list)
+
+- **Camera-only phones need texture.** With no depth sensor, a plain, featureless floor gives no
+  depth at all; in such rooms the map stays under ~1 m² and the game asks for better conditions.
+  The simulator still detects floor *planes* there, which is more generous than ARCore. And a
+  big tracking jump in a room the camera can barely see can't be detected; the pet is brought back
+  into view after such losses, but may cross stale floor until the room is re-seen.
 
 - **Tracking error blurs the map.** With 1–2° of yaw drift, a ray that grazes a box corner is placed through it, so ~4% of paths can brush furniture by a few cm, and rarely up to ~13cm at a corner. An occupancy map can't fully undo pose error. Better relocalisation (anchors) and pose-graph-aware maps would help.
 - **Small things under ~4cm** (cables, flat toys) are below what phone depth separates from the floor. Hopper walks over them, which is mostly fine visually.
