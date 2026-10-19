@@ -566,7 +566,10 @@ export class Animator {
       set(`ear${side}` as BoneName, 0, 0, s * (-P.earLift * 0.5 + ear * 0.05));
       // Wings: fold back, spread out, flap.
       const flap = P.wingFlap * Math.sin(this.time * 55) * 0.6;
-      set(`wing${side}` as BoneName, 0.1 - P.wingSpread * 0.3, s * (P.wingSpread * 0.9 + flap), s * (P.wingSpread * 0.4 + flap * 0.5));
+      // At rest the wings lie folded back along the shoulders. Spreading raises
+      // them in the plane of the back (so they stay face-on and peek above the
+      // shoulders) with a little outward swing.
+      set(`wing${side}` as BoneName, 0.1 - P.wingSpread * 0.3, -s * (P.wingSpread * 0.35 + flap * 0.3), s * (P.wingSpread * 0.6 + flap * 0.7));
     }
     // Tail chain: curl, lift and sway distributed along the bones, with spring lag.
     for (let q = 0; q < 6; q++) {

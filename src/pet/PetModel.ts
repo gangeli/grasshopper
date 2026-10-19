@@ -34,7 +34,7 @@ export interface PetPalette {
 export const PALETTES: Record<string, PetPalette> = {
   mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0x9ff3ff },
   plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0 },
-  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x7a3a12, wing: 0xffe39a },
+  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffe39a },
 };
 
 export interface PetRig {
@@ -150,9 +150,9 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const blushMat = new THREE.MeshBasicMaterial({ color: pal.blush, map: radialTexture(), transparent: true, opacity: 0.55, depthWrite: false });
   const wingMat = new THREE.MeshPhysicalMaterial({
     color: pal.wing,
-    map: wingTexture(),
+    map: wingTexture(new THREE.Color(pal.bodyDark)),
     transparent: true,
-    opacity: 0.6,
+    opacity: 0.95,
     roughness: 0.15,
     side: THREE.DoubleSide,
     iridescence: 1,
@@ -242,13 +242,13 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     bulb.add(halo);
   }
 
-  // Wings.
+  // Wings: folded back along the shoulders at rest, outside the fur.
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
-    const wing = new THREE.Mesh(wingGeometry(), wingMat);
+    const wing = new THREE.Mesh(wingGeometry(s), wingMat);
     wing.name = `wingMesh${side}`;
-    wing.scale.x = s;
-    attach(`wing${side}`, wing, abs[`wing${side}`]);
+    wing.renderOrder = 20;
+    attach(`wing${side}`, wing, abs[`wing${side}`].clone().add(new THREE.Vector3(0.006 * s, 0.006, -0.018)));
   }
 
   // Tiny claws peeking out of the toe fur.
@@ -300,7 +300,8 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     headBone.add(eye);
     // Everything inside the eye is spherical; the group's scale makes it a
     // tall oval, so the iris can rotate without poking through the white.
-    eye.scale.set(1, 1.08, 0.92);
+    // Shallow in depth, so in profile it doesn't bulge out of the face.
+    eye.scale.set(1, 1.08, 0.82);
     const ball = new THREE.Mesh(new THREE.SphereGeometry(R, 32, 24), m.sclera);
     eye.add(ball);
     const iris = new THREE.Group();
@@ -356,7 +357,11 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
       lash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(base.x, -0.55 * R, base.z).normalize());
       up.add(lash);
     }
-    const lo = furryLid(lid.lower, 0.38);
+    const LO_ARCH = 0.38;
+    const lo = furryLid(lid.lower, LO_ARCH);
+    // A softer lash line defines the lower lid when it rises into a happy squint.
+    const loPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * 1.072, LO_ARCH, -Math.PI * 0.42 + (q / 24) * Math.PI * 0.84));
+    lo.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(loPts), 40, 0.0007, 5), m.lashMat));
     lo.scale.set(0.99, -1, 0.99);
     eye.add(lo);
     return { eye, iris, up, lo };
@@ -563,8 +568,8 @@ function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferG
   const col = new Float32Array(pos.count * 3), fl = new Float32Array(pos.count);
   const c = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
-    const k = smooth((1 - rimT[i]) / 0.45); // 1 on top of the lid, 0 at the lash line
-    c.copy(color).multiplyScalar(0.5 + 0.5 * k);
+    const k = smooth((1 - rimT[i]) / 0.35); // 1 on top of the lid, 0 at the lash line
+    c.copy(color).multiplyScalar(0.72 + 0.28 * k);
     col.set([c.r, c.g, c.b], i * 3);
     fl[i] = 0.0028 * (0.3 + 0.7 * k);
   }
@@ -669,12 +674,21 @@ function radialTexture(): THREE.DataTexture {
   });
 }
 
-/** Translucent wing membrane with darker veins. */
-function wingTexture(): THREE.DataTexture {
+/** Wing membrane: translucent, with veins radiating from the root, a crossing vein and a darker rim (alpha in A). */
+function wingTexture(vein: THREE.Color): THREE.DataTexture {
+  const c = new THREE.Color();
+  const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.25);
   return dataTexture(128, (u, v) => {
-    const a = Math.atan2(v - 0.5, u);
-    const vein = Math.abs(Math.sin(a * 9)) < 0.12 || Math.abs(Math.sin((u + v) * 40)) < 0.04 ? 0.55 : 1;
-    return [vein, vein, vein, 1];
+    const a = Math.atan2(v - 0.5, u + 0.02);
+    const d = Math.hypot(u, v - 0.5);
+    // Radial veins fade out towards the tip; one curved cross vein.
+    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.12), 1.5) * smooth((0.95 - d) / 0.4);
+    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.018);
+    const k = Math.min(1, radial + cross);
+    // Membrane is lighter (and more see-through) away from the root.
+    c.setRGB(0.85, 0.85, 0.85).multiplyScalar(0.9 + 0.1 * smooth(d / 0.8));
+    c.lerp(veinC, k * 0.85);
+    return [c.r, c.g, c.b, 0.42 + 0.5 * k + 0.25 * (1 - smooth(d / 0.35))];
   });
 }
 
@@ -761,21 +775,35 @@ function tubeGeometry(
   return geo;
 }
 
-/** Two-lobed insect wing, root at origin, extending back (-Z) and out (+X). */
-function wingGeometry(): THREE.BufferGeometry {
+/**
+ * Two-lobed wing (a big fore-lobe and a smaller hind-lobe), root at the
+ * origin. At rest it lies folded back along the shoulders: spanning out, up
+ * and back, with the membrane roughly parallel to the back. s = +1 left, -1 right.
+ */
+function wingGeometry(s: number): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   shape.moveTo(0, 0);
-  shape.bezierCurveTo(0.03, 0.025, 0.075, 0.03, 0.09, 0.008);
-  shape.bezierCurveTo(0.095, -0.004, 0.07, -0.012, 0.045, -0.008);
-  shape.bezierCurveTo(0.065, -0.02, 0.06, -0.04, 0.035, -0.032);
-  shape.bezierCurveTo(0.02, -0.025, 0.008, -0.012, 0, 0);
-  const geo = new THREE.ShapeGeometry(shape, 12);
+  shape.bezierCurveTo(0.03, 0.028, 0.08, 0.034, 0.096, 0.01);
+  shape.bezierCurveTo(0.102, -0.004, 0.075, -0.012, 0.05, -0.008);
+  shape.bezierCurveTo(0.068, -0.022, 0.062, -0.044, 0.036, -0.035);
+  shape.bezierCurveTo(0.02, -0.027, 0.008, -0.013, 0, 0);
+  const geo = new THREE.ShapeGeometry(shape, 16);
   // Shape UVs are in metres; stretch them over the vein texture.
   const uv = geo.attributes.uv;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.095, uv.getY(i) / 0.08 + 0.5);
-  // Lay the wing back along the body: shape X → back/out, shape Y → up.
-  geo.rotateZ(0.9); // sweep the wing up
-  geo.rotateY(-Math.PI / 2 + 0.45); // and back/out from the shoulders
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.1, uv.getY(i) / 0.08 + 0.5);
+  // A gentle camber so the membrane catches light like a real wing.
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    pos.setZ(i, 0.06 * x * x + 0.04 * y * y);
+  }
+  const X = new THREE.Vector3(0.62 * s, 0.5, -0.6).normalize();
+  const N = new THREE.Vector3(0.35 * s, 0.15, -1);
+  N.addScaledVector(X, -N.dot(X)).normalize();
+  const Y = new THREE.Vector3().crossVectors(N, X);
+  if (s < 0) Y.negate();
+  geo.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, N));
+  geo.computeVertexNormals();
   return geo;
 }
 

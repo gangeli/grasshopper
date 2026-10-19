@@ -71,7 +71,15 @@ export function buildCreatureSculpt(): Sculpt {
   ] as const) {
     const base = P[`ear${side}`];
     const dir: V = [0.8 * s, 0.42, -0.42];
-    S.add(ellipsoid('ear', add(base, [0.022 * s, 0.012, -0.012]), [0.036, 0.0075, 0.017], `ear${side}`, 0.014, alignX(dir, [0, 1, 0.3])));
+    const rot = alignX(dir, [0, 1, 0.3]);
+    const c = add(base, [0.022 * s, 0.012, -0.012]);
+    // Leaf-shaped fin: a broad blade plus a narrower one reaching to a soft point.
+    S.add(ellipsoid('ear', c, [0.036, 0.0075, 0.017], `ear${side}`, 0.014, rot));
+    const X: V = [rot[0], rot[1], rot[2]], Y: V = [rot[3], rot[4], rot[5]];
+    const at = (x: number, y: number): V => [c[0] + X[0] * x + Y[0] * y, c[1] + X[1] * x + Y[1] * y, c[2] + X[2] * x + Y[2] * y];
+    S.add(ellipsoid('ear', at(0.02, -0.0005), [0.026, 0.0055, 0.0095], `ear${side}`, 0.008, rot));
+    // Cupped inner face, leaving a soft rim (the pink side faces up and forward).
+    S.add(carve(ellipsoid('ear', at(0.008, 0.0068), [0.028, 0.0042, 0.0112], `ear${side}`, 0, rot), 0.004));
   }
   // ---- Neck & torso -------------------------------------------------------------------------------
   S.add(
@@ -132,7 +140,7 @@ export const FUR_LENGTH: Record<Region, number> = {
   cheek: 0.0075,
   muzzle: 0.0011,
   brow: 0.003,
-  ear: 0.0018,
+  ear: 0.0028,
   neck: 0.007,
   body: 0.006,
   belly: 0.0065,

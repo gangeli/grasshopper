@@ -98,6 +98,8 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     ) / EYE_RADIUS;
     const rim = 1 - smooth(1.0, 1.42, eyeD);
     furLen[v] = fl * (1 - 0.85 * rim);
+    // Wispy fluff inside the ear cups.
+    if (att.region === 'ear') furLen[v] *= 1 + 0.9 * smooth(0.2, 0.7, 0.6 * ny + 0.6 * nz);
     // --- colour ---
     c.copy(cBody);
     // Subtle mottling so it never looks like flat plastic.
@@ -123,11 +125,15 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     if (att.region === 'ear') {
       const inner = 0.6 * ny + 0.6 * nz;
       c.lerp(cDark, 0.5 * smooth(-0.1, -0.6, inner));
-      c.lerp(cEar, 0.9 * smooth(0.15, 0.55, inner));
+      c.lerp(cEar, 0.85 * smooth(0.15, 0.55, inner));
+      // Deeper, warmer pink down in the cup.
+      c.lerp(cBlush, 0.3 * smooth(0.5, 0.9, inner));
     }
     // Paws: cream soles, pink beans.
     if (att.region === 'foot' && ny < -0.4) c.lerp(cBelly, 0.85);
-    if ((att.region === 'toe' || att.region === 'finger') && ny < 0.1) c.lerp(cPink, 0.7);
+    // Pink beans only underneath (seen when it lifts a paw), not as painted tips.
+    if (att.region === 'toe' || att.region === 'finger') c.lerp(cPink, 0.75 * smooth(-0.2, -0.6, ny));
+    if (att.region === 'hand') c.lerp(cPink, 0.45 * smooth(-0.45, -0.8, ny));
     if (att.region === 'hand' && nz > 0.4) c.lerp(cBelly, 0.4);
     // Tail stripes and a dark tuft.
     if (att.region === 'tail') {
