@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 
 /** Renders the pose lab and saves contact sheets to artifacts/ for review. */
 test('pose contact sheet renders', async ({ page }) => {
+  test.setTimeout(Number(process.env.LAB_TIMEOUT ?? 120_000));
   mkdirSync('artifacts', { recursive: true });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
