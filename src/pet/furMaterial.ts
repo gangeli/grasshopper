@@ -128,7 +128,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #endif
         vFurLen = fLen;
         // Strands leave the skin, then lay over along the groom; tips droop a little.
-        transformed += normal * fLen * sh + comb * fLen * (0.3 * sh + 0.65 * sh * sh);
+        transformed += normal * fLen * sh * 0.8 + comb * fLen * (0.35 * sh + 0.8 * sh * sh);
         transformed.y -= fLen * uGravity * sh * sh;
         vec3 strandObj = normal + comb * (0.3 + 1.3 * sh) - vec3(0.0, 2.0 * uGravity * sh, 0.0);
         #ifdef USE_SKINNING
@@ -172,7 +172,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         // Locks vary in length, so the outline breaks into wisps.
         float hh = uShellH / mix(0.55, 1.0, lockRnd.x);
         if (hh > 1.0) discard;
-        float lockR = 0.62 * pow(1.0 - hh, 0.85);
+        float lockR = 0.62 * pow(1.0 - hh, 0.6);
         // Fine strands: round, tapering columns kept inside their cells.
         vec3 q = vRest * uDensity;
         float best = 9.0;
@@ -182,13 +182,15 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
           best = min(best, length(fract(c) - r));
         }
         bool strand = best < 0.38 * pow(1.0 - hh, 0.6);
+        // Short fur (face, paws) is a fine even velvet; locks form where the coat is long.
+        float lockAmt = smoothstep(0.003, 0.01, vFurLen);
         // Solid lock cores, strand-y lock edges, and a dense undercoat near the skin.
-        if (!(dc < lockR * 0.58 || (dc < lockR && strand) || (hh < 0.28 && strand))) discard;
+        if (!(dc < lockR * 0.58 * lockAmt || (dc < mix(9.0, lockR, lockAmt) && strand) || (hh < 0.28 && strand))) discard;
         // Deep in the coat between locks it is dark; each lock is a slightly different tone.
-        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05));
-        diffuseColor.rgb *= mix(0.5, 1.08, pow(uShellH, 0.8)) * (1.0 - 0.22 * gap * (1.0 - hh)) * (0.9 + 0.2 * lockRnd.y);
+        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * lockAmt;
+        diffuseColor.rgb *= mix(0.5, 1.08, pow(uShellH, 0.8)) * (1.0 - 0.22 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
         // Tips a little paler, as if lightly sun-bleached.
-        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.3, hh * hh);`,
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh);`,
       )
       .replace(
         '#include <opaque_fragment>',
