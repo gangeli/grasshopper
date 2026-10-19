@@ -14,6 +14,11 @@
  *   --stereo      build the map from motion stereo on the real colour images
  *                 (prep with --rgb) instead of the Kinect depth; held-out
  *                 frames still use the Kinect for evaluation
+ *   --all-frames  with --stereo: also use the held-out frames' colour images as
+ *                 stereo sources (camera at 10Hz instead of 5Hz)
+ *   --navdiag     why Kinect-walkable floor isn't walkable in this map
+ * Env: STEREO / MULTIVIEW / WORLD / NAV (JSON options), FLOORDIAG=1 (stereo
+ * outcome on the Kinect's floor pixels).
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { WorldModel } from '../src/world/WorldModel';
@@ -22,6 +27,7 @@ import { DepthConsistency, depthImageToPoints, type DepthImage } from '../src/wo
 import { Rng } from '../src/core/rng';
 import { MotionStereo, type StereoOptions } from '../src/world/StereoDepth';
 import type { Vec3 } from '../src/core/math';
+import { whyNotWalkable } from './nav-why';
 
 const args = process.argv.slice(2);
 const prefix = args[0] ?? 'data/tum/fr1_room';
@@ -119,6 +125,22 @@ function corruptSmooth(M: number[]): number[] {
   return out;
 }
 
+/** The current smooth (VIO-like) pose error, applied without advancing it. */
+function applyErrS(M: number[]): number[] {
+  const c = Math.cos(errS.yaw), s = Math.sin(errS.yaw);
+  const out = M.slice();
+  for (const col of [0, 4, 8]) {
+    const x = M[col], z = M[col + 2];
+    out[col] = c * x + s * z;
+    out[col + 2] = -s * x + c * z;
+  }
+  const px = M[12], pz = M[14];
+  out[12] = c * px + s * pz + errS.x;
+  out[13] = M[13] + errS.y;
+  out[14] = -s * px + c * pz + errS.z;
+  return out;
+}
+
 // --- Build the map from even frames -----------------------------------------------------------
 const world = new WorldModel();
 Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
@@ -151,18 +173,31 @@ const stereo = new MotionStereo(JSON.parse(process.env.STEREO ?? '{}') as Partia
 const gray = stereoMode ? readFileSync(`${prefix}.gray`) : null;
 const d160 = stereoMode ? (() => { const b = readFileSync(`${prefix}.d160`); return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4); })() : null;
 const stereoErr: number[] = [];
-let stereoPx = 0, stereoFrames = 0, stereoCand = 0;
+let stereoPx = 0, stereoFrames = 0, stereoCand = 0, stereoFloor = 0;
+const floorReasons = [0, 0, 0, 0, 0, 0, 0];
+// --all-frames: the camera runs at the full 10Hz for stereo (sources), while depth is
+// still computed and mapped on the even frames only (odd frames stay held out for the
+// Kinect evaluation; only their colour images are used, as stereo sources).
+const allFrames = args.includes('--all-frames');
 for (const i of mapIdx) {
+  if (stereoMode && allFrames && i > 0) {
+    const R = meta.rgb!;
+    const j = i - 1;
+    const pose = poseNoise ? applyErrS(Array.from(R.poses[j])) : R.poses[j];
+    stereo.push({ w: R.w, h: R.h, gray: new Uint8Array(gray!.buffer, gray!.byteOffset + j * R.w * R.h, R.w * R.h), fx: R.fx, fy: R.fy, cx: R.cx, cy: R.cy, camToWorld: pose, t: R.t[j] });
+  }
   if (stereoMode) {
     const R = meta.rgb!;
     const truePose = R.poses[i];
     const pose = poseNoise ? corruptSmooth(Array.from(truePose)) : truePose;
     stereo.push({ w: R.w, h: R.h, gray: new Uint8Array(gray!.buffer, gray!.byteOffset + i * R.w * R.h, R.w * R.h), fx: R.fx, fy: R.fy, cx: R.cx, cy: R.cy, camToWorld: pose, t: R.t[i] });
+    stereo.floorY = world.floorY;
     const res = stereo.compute();
     if (process.env.DUMP && i % 40 === 0) dumpStereo(i, res?.image.depth ?? null, res?.image.w ?? 0);
     if (!res) continue;
     stereoFrames++;
     stereoCand += res.stats.candidates;
+    stereoFloor += res.stats.floor;
     // Accuracy against the Kinect: lift each stereo pixel with the true colour pose,
     // project it into the depth frame (true pose) and compare depths there.
     const pts = depthImageToPoints({ ...res.image, camToWorld: truePose });
@@ -175,6 +210,24 @@ for (const i of mapIdx) {
       if (u < 0 || v < 0 || u >= R.w || v >= R.h) continue;
       const k = d160![i * R.w * R.h + v * R.w + u];
       if (k > 0.3 && k < 4.5) stereoErr.push((-cz - k) / k);
+    }
+    if (process.env.FLOORDIAG) {
+      // Stereo outcome at pixels whose Kinect reading is on the floor (±3cm) within 3m.
+      const Tinv = invRigid(truePose), st = stereo.opts.step;
+      for (let v = 1; v < R.h; v += 3)
+        for (let u = 1; u < R.w; u += 3) {
+          const k = d160![i * R.w * R.h + v * R.w + u];
+          if (!(k > 0.3 && k < 3)) continue;
+          const cx0 = ((u + 0.5 - R.cx) / R.fx) * k, cy0 = (-(v + 0.5 - R.cy) / R.fy) * k, cz0 = -k;
+          const Dm = meta.frames[i].camToWorld;
+          const p = { x: Dm[0] * cx0 + Dm[4] * cy0 + Dm[8] * cz0 + Dm[12], y: Dm[1] * cx0 + Dm[5] * cy0 + Dm[9] * cz0 + Dm[13], z: Dm[2] * cx0 + Dm[6] * cy0 + Dm[10] * cz0 + Dm[14] };
+          if (Math.abs(p.y - world.floorY) > 0.03) continue;
+          const qx = Tinv[0] * p.x + Tinv[4] * p.y + Tinv[8] * p.z + Tinv[12], qy = Tinv[1] * p.x + Tinv[5] * p.y + Tinv[9] * p.z + Tinv[13], qz = Tinv[2] * p.x + Tinv[6] * p.y + Tinv[10] * p.z + Tinv[14];
+          if (qz > -0.1) continue;
+          const gx = Math.floor(((R.fx * qx) / -qz + R.cx) / st), gy = Math.floor(((-R.fy * qy) / -qz + R.cy) / st);
+          if (gx < 0 || gy < 0 || gx >= res.image.w || gy >= res.image.h) continue;
+          floorReasons[res.reason[gy * res.image.w + gx]]++;
+        }
     }
     if (!world.ingestDepthImage(res.image, R.t[i])) rejected++;
     world.refineFloor();
@@ -208,7 +261,11 @@ function invRigid(M: ArrayLike<number>): number[] {
 if (stereoMode) {
   const a = stereoErr.map(Math.abs).sort((x, y) => x - y), sg = stereoErr.slice().sort((x, y) => x - y);
   const q = (arr: number[], f: number) => (arr[Math.floor(arr.length * f)] * 100).toFixed(1) + '%';
-  console.log(`  motion stereo on real RGB: ${stereoFrames}/${mapIdx.length} frames with depth, density ${((stereoPx / Math.max(1, stereoCand)) * 100).toFixed(1)}%, vs Kinect (${a.length} px): |err| median ${q(a, 0.5)} p90 ${q(a, 0.9)}, signed median ${q(sg, 0.5)}, >10% ${((a.filter((e) => e > 0.1).length / a.length) * 100).toFixed(1)}%, >25% ${((a.filter((e) => e > 0.25).length / a.length) * 100).toFixed(1)}%`);
+  console.log(`  motion stereo on real RGB: ${stereoFrames}/${mapIdx.length} frames with depth (skipped ${stereo.skipped.blur} blur, ${stereo.skipped.sources} sources), density ${((stereoPx / Math.max(1, stereoCand)) * 100).toFixed(1)}% (floor hypothesis ${((stereoFloor / Math.max(1, stereoCand)) * 100).toFixed(1)}%), vs Kinect (${a.length} px): |err| median ${q(a, 0.5)} p90 ${q(a, 0.9)}, signed median ${q(sg, 0.5)}, >10% ${((a.filter((e) => e > 0.1).length / a.length) * 100).toFixed(1)}%, >25% ${((a.filter((e) => e > 0.25).length / a.length) * 100).toFixed(1)}%`);
+}
+if (process.env.FLOORDIAG) {
+  const n = floorReasons.reduce((a, b) => a + b, 0);
+  console.log(`  stereo on Kinect floor pixels (n=${n}): ` + ['ok', 'texture', 'cost', 'unique', 'geom', 'aperture', 'floorOk'].map((k, q) => `${k} ${((floorReasons[q] / n) * 100).toFixed(0)}%`).join(' '));
 }
 const mapMs = performance.now() - t0;
 const g = world.grid!;
@@ -319,7 +376,7 @@ for (let a = 0; a < nav.count; a += 7) {
 
 const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(1) + '%' : 'n/a');
 console.log(`TUM replay ${prefix}${poseNoise ? ' +pose-noise' : ''}${phone ? ' +phone-res' : ''}${stereoMode ? ' +STEREO-from-RGB' : ''}: ${mapIdx.length} mapping frames (${rejected} gated), ${heldIdx.length} held-out, map ${(mapIdx.length / (mapMs / 1000)).toFixed(0)} fps`);
-console.log(`  floor ${world.floorY.toFixed(3)} (refined ${world.floorRefinements}x), walkable ${(nav.count * g.res * g.res).toFixed(1)} m², nodes ${nav.count}`);
+console.log(`  floor ${world.floorY.toFixed(3)} (refined ${world.floorRefinements}x), walkable ${(nav.count * g.res * g.res).toFixed(1)} m², nodes ${nav.count}${world.multiView ? `, multi-view kept ${pct(world.multiView.kept, world.multiView.kept + world.multiView.dropped)}` : ""}`);
 console.log(`  held-out surface consistency ${pct(surfHit, surfPts)} | rays through phantoms ${pct(raysPhantom, rays)} | false-free strict(4cm) ${pct(ffBad, ffPts)} robust(8cm,<2m) ${pct(ffBad8, ffPts8)}`);
 console.log(`  pet-body intrusions: strict ${pct(bodyHits.size, nav.count)} | ≥3pts/2frames ${pct(bodyHitsRobust.size, nav.count)} | real object (≥25% of footprint readings 8-22cm up) ${pct(bodyHitsObject.size, nav.count)}`);
 console.log(`  standing-height error |real surface - node| median ${(nodeHeightErr[nodeHeightErr.length >> 1] * 100).toFixed(1)}cm p90 ${(nodeHeightErr[Math.floor(nodeHeightErr.length * 0.9)] * 100).toFixed(1)}cm | jump landings without real support: any ${landingsBad}/${landings}, among observed landings ${landingsObsBad}/${landingsObs}`);
@@ -362,6 +419,29 @@ function writeTopDown(path: string) {
   }
   writeFileSync(path + '.rgb', img);
   writeFileSync(path + '.json', JSON.stringify({ w: nx * S, h: nz * S }));
+}
+
+if (args.includes('--navdiag')) {
+  // Reference: the same mapping frames with the Kinect depth (true poses). For every
+  // floor node walkable there, why isn't this map's column walkable?
+  const ref = new WorldModel();
+  ref.setFloor(tapFloor, { x: first[12], y: tapFloor, z: first[14] });
+  for (const i of mapIdx) {
+    ref.ingestDepthImage(frame(i), meta.frames[i].t);
+    ref.refineFloor();
+  }
+  const rnav = new NavGrid(ref, JSON.parse(process.env.NAV ?? '{}'));
+  const r = g.res;
+  const why: Record<string, number> = {};
+  let n = 0;
+  for (let a = 0; a < rnav.count; a++) {
+    const q = rnav.pos(a);
+    if (q.y > ref.floorY + 0.05) continue;
+    n++;
+    const c = whyNotWalkable(world, nav, g.cellX(q.x), g.cellZ(q.z));
+    why[c] = (why[c] ?? 0) + 1;
+  }
+  console.log(`  nav diag vs Kinect map: ${(n * r * r).toFixed(1)} m² of Kinect-walkable floor; here: ${Object.entries(why).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${((v / n) * 100).toFixed(0)}%`).join(', ')}`);
 }
 
 if (args.includes('--diag')) {

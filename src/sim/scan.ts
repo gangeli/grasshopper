@@ -34,6 +34,13 @@ export class CameraDepthSource {
     if (this.tick++ % this.every) return;
     this.stereo.push(this.camera.render(cam, pose));
     this.frames++;
+    this.stereo.floorY = world.grid ? world.floorY : null;
+    // Floor hypotheses only where a detected floor plane says there is floor.
+    if (this.sensor.caps.planes)
+      this.stereo.floorRegion = this.sensor
+        .planes(cam)
+        .filter((p) => p.normal.y > 0.85 && Math.abs(p.polygon[0].y - world.floorY) < 0.1)
+        .map((p) => p.polygon);
     const res = this.stereo.compute();
     this.last = res;
     if (!res) return;
