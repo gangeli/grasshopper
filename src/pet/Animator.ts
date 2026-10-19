@@ -445,7 +445,11 @@ const ACTIONS: Record<ActionName, ActionFn> = {
     p.happy = 0.4;
     p.smile = 0.6;
     p.mouthOpen = 0.05 * br * deep;
-    p.antLift = -0.4 - 0.5 * sink + 0.12 * br * deep;
+    // Antennae flop out to the sides (drooping forward they'd hang over the face).
+    p.antLift = -0.3 - 0.25 * sink + 0.12 * br * deep;
+    p.antSpread = 0.1 + 0.45 * sink;
+    // Chin resting a little higher than a hiding crouch, so the face still shows.
+    p.headPitch -= 0.12 * sink;
     p.earLift = -0.6 * sink - 0.1 * br * deep;
     p.tailSide = 0.04 * Math.sin(t * 0.4);
     p.lookWeight = 0.4 * (1 - sink);
@@ -846,7 +850,9 @@ export class Animator {
     // up over the raised lower lid.
     const o = clamp(open, 0, 1);
     let up = THREE.MathUtils.lerp(0.42, -1.65, o) - (open > 1 ? (open - 1) * 0.6 : 0);
-    up = Math.max(up, THREE.MathUtils.lerp(-1.65, -0.1, happy * happy));
+    // (Cubed: coming out of a smile the upper lid lifts away first, so the eyes
+    // don't pass through a heavy-lidded, grumpy look on the way.)
+    up = Math.max(up, THREE.MathUtils.lerp(-1.65, -0.1, happy * happy * happy));
     const lo = Math.min(THREE.MathUtils.lerp(0.95, 1.65, o), THREE.MathUtils.lerp(1.65, 0.02, happy));
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
