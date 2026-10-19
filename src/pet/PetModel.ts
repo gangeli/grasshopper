@@ -235,6 +235,8 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const furOpts: FurOptions = { ...DEFAULT_FUR, ...opts.fur };
   const urlFur = url?.get('fur') ?? null;
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
+  // With few shells long fur shows as stacked layers; keep it a little shorter there.
+  furOpts.lengthScale ??= THREE.MathUtils.clamp(0.45 + shells * 0.05, 0.6, 1);
   for (let q = 1; q <= shells; q++) {
     const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill, squint: eyeSquint });
     materials.push(mat);
@@ -601,8 +603,8 @@ function noseGeometry(): THREE.BufferGeometry {
 function pebbleTexture(): THREE.DataTexture {
   return cachedTexture('pebble', () => {
     rng = 11;
-    const pts = Array.from({ length: 90 }, () => [rand(), rand()]);
-    const t = dataTexture(128, (u, v) => {
+    const pts = Array.from({ length: 40 }, () => [rand(), rand()]);
+    const t = dataTexture(64, (u, v) => {
       // Cell noise: bright plateaus with dark grooves between neighbouring cells.
       let d1 = 9, d2 = 9;
       for (const [px, py] of pts)
@@ -612,7 +614,7 @@ function pebbleTexture(): THREE.DataTexture {
             if (d < d1) [d1, d2] = [d, d1];
             else if (d < d2) d2 = d;
           }
-      const k = smooth((d2 - d1) / 0.05);
+      const k = smooth((d2 - d1) / 0.07);
       return [k, k, k, 1];
     });
     t.colorSpace = THREE.NoColorSpace;
@@ -911,21 +913,38 @@ function wingTexture(vein: THREE.Color): THREE.DataTexture {
 }
 
 function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
+  rng = 5;
   const c = new THREE.Color();
   const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.1);
-  return dataTexture(128, (u, v) => {
+  const white = new THREE.Color(1, 1, 1);
+  // Jittered cell centres for the fine venation between the main veins.
+  const cells = Array.from({ length: 90 }, () => [rand(), rand()]);
+  return dataTexture(256, (u, v) => {
     const a = Math.atan2(v - 0.5, u + 0.02);
     const d = Math.hypot(u, v - 0.5);
-    // Radial veins fade out towards the tip; one curved cross vein.
-    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.12), 1.5) * smooth((0.95 - d) / 0.4);
-    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.018);
+    // Main veins radiate from the root and fade towards the tip; one curved cross vein.
+    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.09), 1.5) * smooth((0.95 - d) / 0.4);
+    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.014);
+    // Fine venation: the edges of a cell network, like a dragonfly's wing.
+    let d1 = 9, d2 = 9;
+    for (const [px, py] of cells) {
+      const dd = Math.hypot(u - px, (v - py) * 1.2);
+      if (dd < d1) [d1, d2] = [dd, d1];
+      else if (dd < d2) d2 = dd;
+    }
+    const fine = (1 - smooth((d2 - d1) / 0.018)) * smooth((d - 0.12) / 0.2);
     const k = Math.min(1, radial + cross);
     // Membrane: richer colour at the root, lighter and more see-through towards
     // the edge, with a darker rim so the outline reads against any background.
-    c.setRGB(0.72, 0.72, 0.72).lerp(new THREE.Color(1, 1, 1), smooth(d / 0.9));
+    c.setRGB(0.72, 0.72, 0.72).lerp(white, smooth(d / 0.9));
+    // Each cell is a slightly different thickness, so the membrane shimmers unevenly.
+    c.multiplyScalar(0.94 + 0.08 * ((d1 * 37.1) % 1));
     const rim = smooth((d - 0.78) / 0.2);
-    c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35));
-    return [c.r, c.g, c.b, Math.min(1, 0.46 + 0.45 * k + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim)];
+    c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35 + fine * 0.45));
+    // A small dark pterostigma near the tip of the fore-lobe.
+    const ptero = 1 - smooth((Math.hypot((u - 0.82) / 1.8, v - 0.66) - 0.03) / 0.015);
+    c.lerp(veinC.clone().multiplyScalar(0.7), 0.85 * ptero);
+    return [c.r, c.g, c.b, Math.min(1, 0.4 + 0.45 * k + 0.22 * fine + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim + 0.5 * ptero)];
   });
 }
 
