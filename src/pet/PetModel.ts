@@ -155,13 +155,26 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     depthWrite: false,
     envMapIntensity: 2.2,
   });
-  const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff, map: catchlightTexture(), transparent: true, depthWrite: false });
   // Lids are vertex-coloured (darker towards the lash line) and get their own fur shells.
   const lidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
   const lowerLidMat = lidMat;
   const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.04);
   const lashMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(pal.bodyDark).multiplyScalar(0.35), roughness: 0.7 });
-  const noseMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(pal.bodyDark).lerp(new THREE.Color(0x5c2a36), 0.88), roughness: 0.32, clearcoat: 0.5 });
+  // Moist, pebbled nose leather: a glossy wet film (clearcoat) over a matte, bumpy skin.
+  const pebble = pebbleTexture();
+  const noseMat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(pal.bodyDark).lerp(new THREE.Color(0x52222f), 0.9),
+    vertexColors: true,
+    roughness: 0.55,
+    clearcoat: 0.55,
+    clearcoatRoughness: 0.28,
+    bumpMap: pebble,
+    bumpScale: 0.6,
+    envMapIntensity: 0.6,
+  });
+  pebble.repeat.set(3, 3);
+  const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, transparent: true, opacity: 0.85 });
   const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1420, roughness: 0.6 });
   // The open mouth is a painted cavity (dark palate, tongue, little fangs, lip rim).
   const tongueMat = new THREE.MeshStandardMaterial({ map: mouthTexture(), roughness: 0.45 });
@@ -198,7 +211,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   wingGhostMat.customProgramCacheKey = wingMat.customProgramCacheKey;
   wingGhostMat.opacity = 0;
   const clawMat = new THREE.MeshStandardMaterial({ color: pal.belly, roughness: 0.4 });
-  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, wingGhostMat, clawMat, hornMat];
+  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, wingGhostMat, clawMat, hornMat, whiskerMat];
 
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark);
 
@@ -222,6 +235,8 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const furOpts: FurOptions = { ...DEFAULT_FUR, ...opts.fur };
   const urlFur = url?.get('fur') ?? null;
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
+  // With few shells long fur shows as stacked layers; keep it a little shorter there.
+  furOpts.lengthScale ??= THREE.MathUtils.clamp(0.45 + shells * 0.05, 0.6, 1);
   for (let q = 1; q <= shells; q++) {
     const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill, squint: eyeSquint });
     materials.push(mat);
@@ -326,7 +341,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const face = buildFace(
     bones,
     abs,
-    { sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lowerLidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat },
+    { sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lowerLidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, whiskerMat },
     { upper: lidColor, lower: lowerLidColor, fur: lidFur, shells: lidShells },
   );
 
@@ -336,7 +351,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   return { group, bones, rest, skeleton, scaler, face, materials, glowMaterial, palette: pal };
 }
 
-type FaceMats = Record<'sclera' | 'irisMat' | 'pupilMat' | 'corneaMat' | 'shineMat' | 'lidMat' | 'lowerLidMat' | 'lashMat' | 'noseMat' | 'mouthMat' | 'tongueMat' | 'toothMat', THREE.Material> & {
+type FaceMats = Record<'sclera' | 'irisMat' | 'pupilMat' | 'corneaMat' | 'shineMat' | 'lidMat' | 'lowerLidMat' | 'lashMat' | 'noseMat' | 'mouthMat' | 'tongueMat' | 'toothMat' | 'whiskerMat', THREE.Material> & {
   blushMat: THREE.MeshBasicMaterial;
 };
 
@@ -371,7 +386,7 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     eye.add(iris);
     // Lifted just enough off the eyeball not to z-fight at its rim (a polygon
     // offset would push it through closed lids at grazing angles).
-    const irisCap = new THREE.Mesh(capGeometry(R * 1.006, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial));
+    const irisCap = new THREE.Mesh(capGeometry(R * 1.006, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial, 0.085));
     iris.add(irisCap);
     // The pupil is painted by the iris shader; this node only carries its size
     // (the Animator scales it), read back just before the iris draws.
@@ -387,10 +402,10 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     eye.add(cornea);
     // Painted catchlights don't rotate with the iris: that's what makes eyes read as wet.
     for (const [x, y, r] of [
-      [-0.32, 0.36, 0.19],
-      [0.28, -0.3, 0.08],
+      [-0.32, 0.36, 0.23],
+      [0.3, -0.32, 0.09],
     ]) {
-      const shine = new THREE.Mesh(new THREE.CircleGeometry(R * r, 16), m.shineMat);
+      const shine = new THREE.Mesh(new THREE.PlaneGeometry(R * r * 2, R * r * 2), m.shineMat);
       const dir = new THREE.Vector3(x * s, y, Math.sqrt(Math.max(0, 1 - x * x - y * y)));
       shine.position.copy(dir).multiplyScalar(R * 1.035);
       shine.lookAt(shine.position.clone().multiplyScalar(2));
@@ -437,10 +452,21 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
   {
     const { p, n } = surfaceAt(...NOSE);
     const nose = new THREE.Mesh(noseGeometry(), m.noseMat);
-    nose.scale.set(0.0074, 0.005, 0.0048);
+    nose.scale.set(0.0078, 0.0054, 0.005);
     nose.position.copy(toHead(p.clone().addScaledVector(n, 0.0018)));
     nose.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
     headBone.add(nose);
+  }
+
+  // Whiskers from the whisker pads.
+  for (const s of [1, -1]) {
+    const roots = [0.2165, 0.2125, 0.2085].map((y, q) => {
+      const { p } = surfaceAt((0.017 + q * 0.002) * s, y, 0.095);
+      return toHead(p);
+    });
+    const wh = new THREE.Mesh(whiskerGeometry(roots, s, new THREE.Color(0xfffaf0)), m.whiskerMat);
+    wh.name = `whiskers${s > 0 ? 'L' : 'R'}`;
+    headBone.add(wh);
   }
 
   // Mouth: a "ω" smile with a tiny fang, and an open mouth for squeals.
@@ -539,34 +565,117 @@ function capGeometry(r: number, frac: number, uv: boolean): THREE.BufferGeometry
   return g;
 }
 
-/** Soft rounded inverted triangle (unit size), facing +Z. */
+/**
+ * Nose leather (unit size), facing +Z: a soft rounded triangle, broad on top,
+ * with two comma-shaped nostrils curling out at the lower sides and a little
+ * groove down the middle into the philtrum. Vertex colours darken the nostrils
+ * and the groove.
+ */
 function noseGeometry(): THREE.BufferGeometry {
-  const g = new THREE.SphereGeometry(1, 24, 16);
+  const g = new THREE.SphereGeometry(1, 56, 36);
   const pos = g.attributes.position;
+  const col = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-    // Narrower towards the bottom, a slightly flat top, and a little bulge forward.
-    pos.setXYZ(i, x * (0.72 + 0.38 * smooth((y + 1) / 2)), y > 0 ? y * 0.8 : y, z * (1 + 0.25 * Math.max(0, -y)));
+    let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const front = smooth(z / 0.6);
+    // Nostrils: an indent at the lower sides, curving up and outwards like a comma.
+    let nost = 0;
+    for (const sx of [-1, 1]) {
+      const dx = x - sx * 0.4, dy = y + 0.42 - 0.45 * Math.max(0, x * sx - 0.4);
+      nost = Math.max(nost, Math.exp(-(dx * dx) / 0.035 - (dy * dy) / 0.014) * front);
+    }
+    const groove = Math.exp(-(x * x) / 0.006) * smooth((-0.3 - y) / 0.4) * front;
+    // Narrower towards the bottom, a slightly flat top, a little bulge forward.
+    x *= 0.72 + 0.38 * smooth((y + 1) / 2);
+    y = y > 0 ? y * 0.8 : y;
+    z *= (1 + 0.25 * Math.max(0, -y)) * (1 - 0.5 * nost - 0.15 * groove);
+    pos.setXYZ(i, x, y, z);
+    // Darker in the nostrils and groove, slightly lighter and pinker on the bridge.
+    const k = (1 - 0.9 * smooth(nost / 0.45)) * (1 - 0.35 * groove) * (1 + 0.18 * smooth((y - 0.1) / 0.6) * front);
+    col.set([k, k * (1 - 0.03 * smooth(y)), k], i * 3);
   }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.computeVertexNormals();
   return g;
 }
 
+/** Fine pebbled bump texture for the nose leather. */
+function pebbleTexture(): THREE.DataTexture {
+  return cachedTexture('pebble', () => {
+    rng = 11;
+    const pts = Array.from({ length: 40 }, () => [rand(), rand()]);
+    const t = dataTexture(64, (u, v) => {
+      // Cell noise: bright plateaus with dark grooves between neighbouring cells.
+      let d1 = 9, d2 = 9;
+      for (const [px, py] of pts)
+        for (const ox of [-1, 0, 1])
+          for (const oy of [-1, 0, 1]) {
+            const d = Math.hypot(u - px - ox, (v - py - oy) * 1.3);
+            if (d < d1) [d1, d2] = [d, d1];
+            else if (d < d2) d2 = d;
+          }
+      const k = smooth((d2 - d1) / 0.07);
+      return [k, k, k, 1];
+    });
+    t.colorSpace = THREE.NoColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    return t;
+  });
+}
+
+/** A soft-edged window-shaped catchlight (white, alpha = shape). */
+function catchlightTexture(): THREE.DataTexture {
+  return cachedTexture('catch', () =>
+    dataTexture(64, (u, v) => {
+      // A rounded rectangle: the reflection of a bright window.
+      const x = Math.abs(u * 2 - 1) / 0.82, y = Math.abs(v * 2 - 1) / 0.66;
+      const d = Math.pow(Math.pow(x, 4) + Math.pow(y, 4), 0.25);
+      return [1, 1, 1, 1 - smooth((d - 0.82) / 0.2)];
+    }),
+  );
+}
+
+/**
+ * Whiskers: thin tapered hairs fanning out of the whisker pads, curving
+ * gently down at the tips. Returns one merged geometry per side (pet space).
+ */
+function whiskerGeometry(roots: THREE.Vector3[], s: number, color: THREE.Color): THREE.BufferGeometry {
+  const parts = roots.map((p0, q) => {
+    const fan = 0.22 - q * 0.2;
+    const L = [0.046, 0.054, 0.044][q % 3];
+    const dir = new THREE.Vector3(s, fan, 0.42 - q * 0.08).normalize();
+    const pts = [p0, p0.clone().addScaledVector(dir, L * 0.5).add(new THREE.Vector3(0, 0.003, 0)), p0.clone().addScaledVector(dir, L).add(new THREE.Vector3(0, -0.004, -0.004 * q))];
+    return tubeGeometry(pts, [0, 0, 0], (t) => THREE.MathUtils.lerp(0.0005, 0.00012, t), (t) => color.clone().multiplyScalar(0.85 + 0.15 * t), 5, 24);
+  });
+  return mergeGeometries(parts);
+}
+
 /** Per-eye iris material that paints a round pupil of adjustable size. */
-function pupilIrisMaterial(base: THREE.MeshStandardMaterial): THREE.MeshStandardMaterial {
+function pupilIrisMaterial(base: THREE.MeshStandardMaterial, depth: number): THREE.MeshStandardMaterial {
   const mat = base.clone();
   const uPupil = { value: 0.37 };
   mat.userData.pupil = uPupil;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPupil = uPupil;
-    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uPupil;').replace(
+    shader.uniforms.uIrisDepth = { value: depth };
+    // Parallax: the iris is painted on the cap but looked up as if it sat
+    // deeper in the eye, so it shifts under the cornea and its highlights as
+    // the view changes, the way a real iris does.
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vIrisView;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvIrisView = position - (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;');
+    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uPupil;\nuniform float uIrisDepth;\nvarying vec3 vIrisView;').replace(
       '#include <map_fragment>',
-      `#include <map_fragment>
-      float pr = length(vMapUv * 2.0 - 1.0);
-      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.01, 0.012, 0.018), 1.0 - smoothstep(uPupil - 0.025, uPupil + 0.01, pr));`,
+      `vec3 ivd = normalize(vIrisView);
+      vec2 iuv = vMapUv + ivd.xy / max(0.35, -ivd.z) * uIrisDepth;
+      diffuseColor *= texture2D(map, iuv);
+      float pr = length(iuv * 2.0 - 1.0);
+      // Pupil with a soft, slightly darker-than-iris rim.
+      diffuseColor.rgb *= 1.0 - 0.35 * smoothstep(uPupil + 0.09, uPupil, pr);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.01, 0.012, 0.018), 1.0 - smoothstep(uPupil - 0.02, uPupil + 0.012, pr));`,
     );
   };
-  mat.customProgramCacheKey = () => 'iris-pupil';
+  mat.customProgramCacheKey = () => 'iris-pupil-parallax';
   return mat;
 }
 
@@ -586,7 +695,8 @@ function dataTexture(size: number, fn: (u: number, v: number) => [number, number
   for (let j = 0; j < size; j++)
     for (let i = 0; i < size; i++) {
       const c = fn((i + 0.5) / size, (j + 0.5) / size);
-      data.set(c.map((x) => Math.max(0, Math.min(255, Math.round(x * 255)))), (j * size + i) * 4);
+      const o = (j * size + i) * 4;
+      for (let q = 0; q < 4; q++) data[o + q] = Math.max(0, Math.min(255, Math.round(c[q] * 255)));
     }
   const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   t.colorSpace = THREE.SRGBColorSpace;
@@ -606,24 +716,51 @@ function makeIrisTexture(hex: number): THREE.DataTexture {
   rng = 7;
   // Vivid, light irises read as friendly; the dark eye colour only tints them.
   const hsl = new THREE.Color(hex).getHSL({ h: 0, s: 0, l: 0 });
-  const base = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 1.4), 0.3);
-  const light = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 1.3), 0.62);
-  const warm = base.clone().lerp(new THREE.Color(0xffc060), 0.6);
-  const streaks = Array.from({ length: 64 }, () => rand());
+  const deep = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 1.2), 0.2);
+  const base = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 1.05), 0.38);
+  const light = new THREE.Color().setHSL(hsl.h - 0.02, Math.min(1, hsl.s * 1.1), 0.66);
+  // Warm amber pupillary zone (like a hazel eye) behind the collarette.
+  const warm = base.clone().lerp(new THREE.Color(0xe0a548), 0.7);
+  const ring = light.clone().lerp(warm, 0.4);
+  const limbal = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 0.8), 0.07);
+  const A = Array.from({ length: 96 }, () => rand()), B = Array.from({ length: 240 }, () => rand());
+  const wob = Array.from({ length: 12 }, () => rand());
+  const crypts = Array.from({ length: 14 }, () => [rand(), 0.6 + rand() * 0.22, 0.02 + rand() * 0.03]);
+  const ang = (arr: number[], a: number) => {
+    const k = a * arr.length, k0 = Math.floor(k) % arr.length, k1 = (k0 + 1) % arr.length;
+    return arr[k0] + (arr[k1] - arr[k0]) * smooth(k - Math.floor(k));
+  };
   const c = new THREE.Color();
-  return dataTexture(128, (u, v) => {
+  return dataTexture(160, (u, v) => {
     const x = u * 2 - 1, y = v * 2 - 1;
     const r = Math.hypot(x, y);
     const a = (Math.atan2(y, x) / (Math.PI * 2) + 1) % 1;
-    const k = a * 64, k0 = Math.floor(k) % 64, k1 = (k0 + 1) % 64;
-    const st = streaks[k0] + (streaks[k1] - streaks[k0]) * smooth(k - Math.floor(k));
-    // Gradient: lighter towards the bottom (light enters the eye from above and pools low).
-    c.copy(base).lerp(light, 0.1 + 0.55 * smooth((0.35 - y) / 1.3) + 0.3 * st * smooth((r - 0.3) / 0.5));
+    // Fibres wander a little as they run outwards.
+    const aw = (a + 0.012 * Math.sin(r * 17 + a * 40) + 1) % 1;
+    const fib = 0.6 * ang(A, aw) + 0.4 * ang(B, (aw + 0.13 * r) % 1);
+    // Collarette: a bright zig-zag ring a little outside the pupil.
+    const rc = 0.5 + 0.035 * Math.sin(a * Math.PI * 2 * 11 + ang(wob, a) * 6);
+    c.copy(deep).lerp(base, 0.55 + 0.45 * fib);
+    // Lighter fibres catch the light, most of all low in the iris where light pools.
+    c.lerp(light, Math.pow(fib, 2.2) * (0.35 + 0.5 * smooth((0.25 - y) / 1.2)) * smooth((r - 0.45) / 0.2));
+    // Pupillary zone.
+    c.lerp(warm, 0.8 * (1 - smooth((r - rc + 0.05) / 0.09)) * (0.7 + 0.3 * fib));
+    c.lerp(ring, 0.45 * Math.exp(-Math.pow((r - rc) / 0.025, 2)));
+    // Crypts: small dark pits in the ciliary zone.
+    if (r > 0.45 && r < 0.95)
+    for (const [ca, cr, cs] of crypts) {
+      let da = Math.abs(a - ca);
+      da = Math.min(da, 1 - da) * Math.PI * 2 * r;
+      if (da > cs * 3 || Math.abs(r - cr) > cs * 5) continue;
+      const k = Math.exp(-(da * da) / (cs * cs * 0.6) - Math.pow((r - cr) / (cs * 1.6), 2));
+      c.multiplyScalar(1 - 0.45 * k);
+    }
+    // Furrows: faint concentric rings in the outer iris.
+    c.multiplyScalar(1 - 0.12 * Math.pow(Math.max(0, Math.sin(r * 55)), 8) * smooth((r - 0.62) / 0.1));
     // The upper lid shades the top of the iris.
-    c.multiplyScalar(0.6 + 0.4 * smooth((0.75 - y) / 0.7));
-    if (r < 0.48) c.lerp(warm, 0.55 * smooth((0.48 - r) / 0.2));
-    // Limbal ring.
-    c.multiplyScalar(1 - 0.62 * smooth((r - 0.8) / 0.16));
+    c.multiplyScalar(0.62 + 0.38 * smooth((0.8 - y) / 0.75));
+    // Dark limbal ring, soft on the inside, and dark beyond the rim (seen through the parallax).
+    c.lerp(limbal, Math.min(1, smooth((r - 0.8) / 0.17)));
     return [c.r, c.g, c.b, 1];
   });
 }
@@ -780,21 +917,44 @@ function wingTexture(vein: THREE.Color): THREE.DataTexture {
 }
 
 function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
+  rng = 5;
   const c = new THREE.Color();
   const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.1);
-  return dataTexture(128, (u, v) => {
+  const white = new THREE.Color(1, 1, 1);
+  const stigma = veinC.clone().multiplyScalar(0.7);
+  // Jittered grid of cell centres for the fine venation between the main veins.
+  const G = 10;
+  const cells = Array.from({ length: G * G }, () => [rand(), rand()]);
+  return dataTexture(160, (u, v) => {
     const a = Math.atan2(v - 0.5, u + 0.02);
     const d = Math.hypot(u, v - 0.5);
-    // Radial veins fade out towards the tip; one curved cross vein.
-    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.12), 1.5) * smooth((0.95 - d) / 0.4);
-    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.018);
+    // Main veins radiate from the root and fade towards the tip; one curved cross vein.
+    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.09), 1.5) * smooth((0.95 - d) / 0.4);
+    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.014);
+    // Fine venation: the edges of a cell network, like a dragonfly's wing.
+    let d1 = 9, d2 = 9;
+    const gi = Math.floor(u * G), gj = Math.floor(v * G);
+    for (let oi = -1; oi <= 1; oi++)
+      for (let oj = -1; oj <= 1; oj++) {
+        const ci = gi + oi, cj = gj + oj;
+        const cell = cells[(((cj % G) + G) % G) * G + (((ci % G) + G) % G)];
+        const dd = Math.hypot(u - (ci + 0.15 + 0.7 * cell[0]) / G, (v - (cj + 0.15 + 0.7 * cell[1]) / G) * 1.2);
+        if (dd < d1) [d1, d2] = [dd, d1];
+        else if (dd < d2) d2 = dd;
+      }
+    const fine = (1 - smooth((d2 - d1) / 0.018)) * smooth((d - 0.12) / 0.2);
     const k = Math.min(1, radial + cross);
     // Membrane: richer colour at the root, lighter and more see-through towards
     // the edge, with a darker rim so the outline reads against any background.
-    c.setRGB(0.72, 0.72, 0.72).lerp(new THREE.Color(1, 1, 1), smooth(d / 0.9));
+    c.setRGB(0.72, 0.72, 0.72).lerp(white, smooth(d / 0.9));
+    // Each cell is a slightly different thickness, so the membrane shimmers unevenly.
+    c.multiplyScalar(0.94 + 0.08 * ((d1 * 37.1) % 1));
     const rim = smooth((d - 0.78) / 0.2);
-    c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35));
-    return [c.r, c.g, c.b, Math.min(1, 0.46 + 0.45 * k + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim)];
+    c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35 + fine * 0.45));
+    // A small dark pterostigma near the tip of the fore-lobe.
+    const ptero = 1 - smooth((Math.hypot((u - 0.82) / 1.8, v - 0.66) - 0.03) / 0.015);
+    c.lerp(stigma, 0.85 * ptero);
+    return [c.r, c.g, c.b, Math.min(1, 0.4 + 0.45 * k + 0.22 * fine + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim + 0.5 * ptero)];
   });
 }
 

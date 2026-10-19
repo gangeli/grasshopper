@@ -51,6 +51,16 @@ function occlusion(S: { d(x: number, y: number, z: number): number }, x: number,
   return Math.max(0, Math.min(1, 1 - 1.6 * (occ / wsum)));
 }
 
+/** Broad occlusion (a few cm out): under the head, between the legs, behind the arms. */
+function broadOcclusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+  let occ = 0;
+  for (let h = 0.016; h < 0.04; h += 0.016) {
+    const d = S.d(x + nx * h, y + ny * h, z + nz * h);
+    occ += Math.max(0, Math.min(1, (h - d) / h));
+  }
+  return Math.max(0, 1 - 0.75 * (occ / 2));
+}
+
 const boneIndex = new Map(BONES.map(([n], i) => [n as string, i]));
 
 const cache = new Map<string, THREE.BufferGeometry>();
@@ -98,6 +108,22 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   // Eye-socket rim (0..1), the brightness ratio that removes the socket liner when the
   // eyes are closed, and how much the hollow above the eye fills in then.
   const socket = new Float32Array(n * 3);
+  // Groom direction per vertex (the fur shader lays the strands along its tangential part).
+  const flow = new Float32Array(n * 3);
+  const tailPts = (['hips', 'tail0', 'tail1', 'tail2', 'tail3', 'tail4', 'tail5'] as BoneName[]).map((b) => BONES.find(([nm]) => nm === b)![2] as V);
+  tailPts[0] = [0, 0.082, -0.025];
+  const bonePos = (b: BoneName) => BONES.find(([nm]) => nm === b)![2] as V;
+  const F = [0, 0, 0];
+  const armDir = (['L', 'R'] as const).map((sd) => {
+    const a = bonePos(`shoulder${sd}`), b = bonePos(`hand${sd}`);
+    return [b[0] - a[0], b[1] - a[1] - 0.02, b[2] - a[2]];
+  });
+  const addF = (w: number, ax: number, ay: number, az: number) => {
+    const l = Math.hypot(ax, ay, az) || 1;
+    F[0] += (w * ax) / l;
+    F[1] += (w * ay) / l;
+    F[2] += (w * az) / l;
+  };
   const mk = pal.markings ?? 1;
   const cSpot = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.55 + 0.45 * mk);
   // Ear frames (same as the sculpt's fins): along the fin, and across it in its plane.
@@ -129,27 +155,115 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     ) / EYE_RADIUS;
     const rim = 1 - smooth(1.0, 1.42, eyeD);
     furLen[v] = fl * (1 - 0.85 * rim);
+    // Tufty, not uniform: low-frequency length variation.
+    furLen[v] *= 0.78 + 0.44 * vnoise(x * 38 + 3, y * 38, z * 38);
     // Wispy fluff inside the ear cups.
     if (att.region === 'ear') furLen[v] *= 1 + 0.9 * smooth(0.2, 0.7, 0.6 * ny + 0.6 * nz);
+    // --- groom direction ---
+    {
+      const nx = mesh.normals[v * 3];
+      F[0] = F[1] = F[2] = 0;
+      const sx = x >= 0 ? 1 : -1;
+      for (const [r, w] of att.regionWeights) {
+        switch (r) {
+          case 'head':
+          case 'brow':
+          case 'muzzle':
+            // Away from the nose: back over the crown, out across the face.
+            addF(w, x, y - 0.228, z - 0.11);
+            break;
+          case 'cheek':
+            addF(w, sx * 0.9, -0.5, -0.45);
+            break;
+          case 'ear': {
+            const f = earFrame[x > 0 ? 0 : 1];
+            addF(w, f.X[0], f.X[1], f.X[2]);
+            break;
+          }
+          case 'neck':
+          case 'chest':
+          case 'belly':
+            addF(w, sx * 0.15 * Math.abs(nx), -1, 0.1);
+            break;
+          case 'body':
+            addF(w, sx * 0.2 * Math.abs(nx), -0.75, -0.65);
+            break;
+          case 'thigh':
+            addF(w, sx * 0.1, -0.6, -0.8);
+            break;
+          case 'shin':
+            addF(w, 0, -1, -0.25);
+            break;
+          case 'foot':
+          case 'toe':
+          case 'hand':
+          case 'finger':
+            addF(w, 0, -0.3, 1);
+            break;
+          case 'arm': {
+            const d = armDir[sx > 0 ? 0 : 1];
+            addF(w, d[0], d[1], d[2]);
+            break;
+          }
+          case 'tail': {
+            // Along the nearest tail segment, towards the tip.
+            let best = Infinity, dx = 0, dy = 0, dz = -1;
+            for (let q = 0; q < tailPts.length - 1; q++) {
+              const A = tailPts[q], B = tailPts[q + 1];
+              const ex = B[0] - A[0], ey = B[1] - A[1], ez = B[2] - A[2];
+              const t = Math.max(0, Math.min(1, ((x - A[0]) * ex + (y - A[1]) * ey + (z - A[2]) * ez) / (ex * ex + ey * ey + ez * ez)));
+              const dd = Math.hypot(x - A[0] - ex * t, y - A[1] - ey * t, z - A[2] - ez * t);
+              if (dd < best) {
+                best = dd;
+                dx = ex;
+                dy = ey;
+                dz = ez;
+              }
+            }
+            addF(w, dx, dy, dz);
+            break;
+          }
+          case 'tuft':
+            addF(w, 0, 0.9, 0.35);
+            break;
+        }
+      }
+      // Gentle swirls so it never looks machine-combed.
+      const fx = F[0] + 0.17 * Math.sin(y * 140 + z * 60);
+      const fy = F[1] + 0.17 * Math.sin(z * 130 + x * 70);
+      const fz = F[2] + 0.17 * Math.sin(x * 150 + y * 50);
+      // How flat the coat lies: the tail brush stands out from the tail like a bottlebrush.
+      const lay = 1 - 0.55 * rw('tuft') - 0.2 * rw('tail');
+      const fl2 = (Math.hypot(fx, fy, fz) || 1) / lay;
+      flow[v * 3] = fx / fl2;
+      flow[v * 3 + 1] = fy / fl2;
+      flow[v * 3 + 2] = fz / fl2;
+    }
     // --- colour ---
     c.copy(cBody);
     // Subtle mottling so it never looks like flat plastic.
     const mott = fbm(x * 60, y * 60, z * 60);
     c.lerp(cDark, 0.12 * mott);
+    // Broad, gentle hue and value drift across the body (no animal is one flat colour).
+    const hv = vnoise(x * 14 + 20, y * 14, z * 14) - 0.5;
+    c.offsetHSL(hv * 0.06, -0.04, hv * 0.05);
     // Darker crown and back.
     if (ny > 0.45 && (att.region === 'head' || att.region === 'brow')) c.lerp(cDark, 0.45 * smooth(0.45, 1, ny));
     if (nz < -0.25 && y > 0.08) c.lerp(cDark, (0.12 + 0.16 * mk) * smooth(-0.25, -0.8, nz));
+    // Countershading: a darker stripe down the spine, from the crown to the tail.
+    if (y > 0.06 && z < 0.03 && (ny > 0.2 || nz < -0.2)) c.lerp(cDark, 0.38 * (1 - smooth(0.004, 0.022, Math.abs(x))) * smooth(0.2, 0.7, Math.max(ny, -nz)) * (att.region === 'tail' || att.region === 'tuft' ? 0 : 1));
     // Soft dapples on the back and haunches: domain-warped so they're rounded,
     // irregular and feathered at the edges (not hard blotches), fading in
     // towards the spine.
     const backM = Math.max(smooth(-0.05, -0.4, nz), att.region === 'thigh' ? smooth(-0.3, 0.2, -nz) : 0);
     if (backM > 0) {
-      const wx = vnoise(x * 30 + 5, y * 30, z * 30) - 0.5, wy = vnoise(x * 30, y * 30 + 7, z * 30) - 0.5;
-      const sp = vnoise(x * 78 + 11 + wx * 1.6, y * 78 + wy * 1.6, z * 78);
-      c.lerp(cSpot, smooth(0.57, 0.77, sp) * (0.5 + 0.35 * mk) * backM);
+      const wx = vnoise(x * 22 + 5, y * 22, z * 22) - 0.5, wy = vnoise(x * 22, y * 22 + 7, z * 22) - 0.5;
+      const sp = vnoise(x * 52 + 11 + wx * 1.6, y * 52 + wy * 1.6, z * 52);
+      c.lerp(cSpot, smooth(0.55, 0.75, sp) * (0.62 + 0.38 * mk) * backM);
     }
     // Cream belly / chest / muzzle / cheeks.
-    const front = smooth(0.15, 0.6, nz);
+    // Feathered, irregular edge where the cream front meets the coat.
+    const front = smooth(0.15, 0.6, nz + 0.3 * (vnoise(x * 42, y * 42 + 3, z * 42) - 0.5));
     const bellyMask = (rw('belly') + rw('chest') + rw('neck') * 0.6) * front * smooth(0.205, 0.15, y);
     c.lerp(cBelly, Math.min(1, bellyMask * 1.1 + (rw('belly') + rw('chest')) * front * 0.6));
     c.lerp(cBelly, Math.min(1, rw('muzzle') * 1.0 + rw('cheek') * smooth(0.0, 0.7, nz) * smooth(0.25, -0.2, ny) * 0.85));
@@ -176,9 +290,13 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
         c.lerp(cBlush, 0.3 * smooth(0.5, 0.9, inner) * (1 - smooth(0.6, 1.0, u)));
         // Faint rosy veins on the pink side.
         c.lerp(cVein, 0.6 * vein * smooth(0.1, 0.5, inner));
+        // Pale furnishings (the fluff inside the ear) low in the cup.
+        c.lerp(cBelly, 0.4 * smooth(0.45, 0.85, inner) * (1 - smooth(0.15, 0.45, u)));
       }
       // Thin towards the tip and rim; veins block a little of the glow.
       thin[v] = rw('ear') * smooth(0.05, 0.45, u) * (1 - 0.45 * vein);
+      // A little lynx tuft at the tip.
+      furLen[v] *= 1 + 2.2 * smooth(0.78, 0.98, u) * rw('ear');
     }
     // Paws: cream soles, pink beans.
     if (att.region === 'foot' && ny < -0.4) c.lerp(cBelly, 0.85);
@@ -194,7 +312,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
       const st = Math.sin(z * 140 - y * 60);
       if (st > 0.35 && ny + -nz > -0.2) c.lerp(cDark, 0.6);
     }
-    if (att.region === 'tuft') c.lerp(cDark, 0.7);
+    if (att.region === 'tuft') c.lerp(cDark, 0.45);
     // Socket liner (the shader fades it out while the eyes are closed, so a
     // closed lid melts into the face instead of sitting in a dark goggle ring).
     const lumBefore = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
@@ -204,7 +322,9 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const ao = occlusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
     // Paws get deeper creases so the toes read as separate beans.
     const paw = rw('toe') + rw('foot') * 0.6 + rw('finger');
-    const aoK = 0.5 + 0.5 * ao - 0.32 * paw * (1 - ao);
+    // Broad occlusion and a gentle darkening towards the ground give the body form.
+    const aoB = broadOcclusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
+    const aoK = (0.5 + 0.5 * ao - 0.32 * paw * (1 - ao)) * (0.6 + 0.4 * aoB) * (0.86 + 0.14 * smooth(0.0, 0.07, y));
     c.multiplyScalar(aoK);
     if (rim > 0) {
       const lumOpen = (c.r * 0.3 + c.g * 0.59 + c.b * 0.11);
@@ -252,6 +372,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   geo.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeight, 4));
   geo.setAttribute('furLen', new THREE.BufferAttribute(furLen, 1));
   geo.setAttribute('thin', new THREE.BufferAttribute(thin, 1));
+  geo.setAttribute('flow', new THREE.BufferAttribute(flow, 3));
   geo.setAttribute('socket', new THREE.BufferAttribute(socket, 3));
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   geo.computeBoundingSphere();

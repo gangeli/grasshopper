@@ -66,6 +66,18 @@ export function buildCreatureSculpt(): Sculpt {
     ellipsoid('muzzle', [0, 0.219, 0.079], [0.027, 0.019, 0.019], 'head', 0.02),
     ellipsoid('muzzle', [0, 0.2, 0.06], [0.019, 0.012, 0.016], 'head', 0.018),
   );
+  for (const s of [1, -1]) {
+    // Whisker pads either side of the nose give the muzzle a cat-like "W".
+    S.add(ellipsoid('muzzle', [0.0115 * s, 0.2135, 0.088], [0.0115, 0.0085, 0.0085], 'head', 0.007));
+    // Cheek ruff: soft pointed tufts sweeping out and back break the round
+    // outline of the head (a touch longer on the left, nothing is perfectly symmetric).
+    const a = s > 0 ? 1.0 : 0.92;
+    S.add(
+      roundCone('cheek', [0.055 * s, 0.214, 0.03], [(0.055 + 0.034 * a) * s, 0.196, 0.004], 0.016, 0.005, 'head', 'head', 0.014),
+      roundCone('cheek', [0.058 * s, 0.234, 0.016], [(0.058 + 0.03 * a) * s, 0.238, -0.012], 0.013, 0.0045, 'head', 'head', 0.012),
+      roundCone('cheek', [0.046 * s, 0.198, 0.036], [(0.046 + 0.024 * a) * s, 0.178, 0.022], 0.012, 0.0045, 'head', 'head', 0.012),
+    );
+  }
   // ---- Ears: soft leaf-shaped fins sweeping out and back ---------------------------------------
   for (const [s, side] of [
     [1, 'L'],
@@ -92,6 +104,13 @@ export function buildCreatureSculpt(): Sculpt {
     // Fluffy chest.
     ellipsoid('chest', [0, 0.163, 0.034], [0.034, 0.024, 0.02], 'chest', 0.022),
   );
+  // Neck ruff: a bib of fluff tufts hanging over the chest.
+  for (const [dx, len] of [
+    [-0.022, 0.026],
+    [0, 0.032],
+    [0.021, 0.028],
+  ] as const)
+    S.add(roundCone('chest', [dx, 0.18, 0.04], [dx * 1.25, 0.18 - len, 0.052], 0.014, 0.004, 'chest', 'chest', 0.014));
   // ---- Hind legs: chunky haunches, short shins, long padded feet ------------------------------------
   for (const [s, side] of [
     [1, 'L'],
@@ -99,6 +118,8 @@ export function buildCreatureSculpt(): Sculpt {
   ] as const) {
     const thigh = P[`thigh${side}`], shin = P[`shin${side}`], ankle = P[`ankle${side}`];
     S.add(
+      // Rounded haunch behind the thigh, so the hind leg reads as a strong hopping leg.
+      ellipsoid('thigh', add(thigh, [0.006 * s, -0.008, -0.012]), [0.028, 0.034, 0.036], `thigh${side}`, 0.02),
       roundCone('thigh', add(thigh, [0.004 * s, 0, -0.006]), shin, 0.035, 0.022, `thigh${side}`, `shin${side}`, 0.024),
       roundCone('shin', shin, ankle, 0.018, 0.0115, `shin${side}`, `ankle${side}`, 0.01),
       ellipsoid('foot', add(ankle, [0, -0.005, 0.014]), [0.0185, 0.0105, 0.028], `ankle${side}`, 0.012),
@@ -118,11 +139,15 @@ export function buildCreatureSculpt(): Sculpt {
   }
   // ---- Tail: curls back and up, ending in a plush leaf tuft -----------------------------------------------
   const tail: V[] = [[0, 0.082, -0.025], P.tail0, P.tail1, P.tail2, P.tail3, P.tail4, P.tail5];
-  const radii = [0.03, 0.026, 0.021, 0.016, 0.0125, 0.0095, 0.0075];
+  const radii = [0.026, 0.02, 0.0155, 0.012, 0.0095, 0.0078, 0.0068];
   const tb: BoneName[] = ['hips', 'tail0', 'tail1', 'tail2', 'tail3', 'tail4', 'tail5'];
   for (let q = 0; q < tail.length - 1; q++) S.add(roundCone('tail', tail[q], tail[q + 1], radii[q], radii[q + 1], tb[q], tb[q + 1], q === 0 ? 0.025 : 0.006));
   const tip = P.tail5, dirTip: V = [0, 0.024, 0.01];
-  S.add(ellipsoid('tuft', add(tip, [0, 0.016, 0.006]), [0.024, 0.009, 0.016], 'tail5', 0.012, alignX(dirTip, [1, 0, 0])));
+  // A brush of long fur at the tip, tapering to a soft point.
+  S.add(
+    ellipsoid('tuft', add(tip, [0, 0.012, 0.004]), [0.02, 0.0125, 0.0135], 'tail5', 0.012, alignX(dirTip, [1, 0, 0])),
+    roundCone('tuft', add(tip, [0, 0.018, 0.007]), add(tip, [0, 0.04, 0.014]), 0.011, 0.003, 'tail5', 'tail5', 0.01),
+  );
   // ---- Eye sockets (carved), so the eyes sit *in* the face -------------------------------------------------
   for (const side of ['L', 'R'] as const) {
     const e = EYE[side];
@@ -141,24 +166,24 @@ export function buildCreatureSculpt(): Sculpt {
 
 /** Fur length (m) per region: short on face and paws, fluffy cheeks/chest/tail tip. */
 export const FUR_LENGTH: Record<Region, number> = {
-  head: 0.0045,
-  cheek: 0.0075,
-  muzzle: 0.0011,
-  brow: 0.003,
-  ear: 0.0028,
-  neck: 0.007,
-  body: 0.006,
-  belly: 0.0065,
-  chest: 0.009,
-  thigh: 0.0055,
-  shin: 0.0035,
-  foot: 0.0022,
-  toe: 0.0015,
-  arm: 0.0035,
-  hand: 0.0016,
-  finger: 0.0008,
-  tail: 0.005,
-  tuft: 0.011,
+  head: 0.006,
+  cheek: 0.012,
+  muzzle: 0.0013,
+  brow: 0.004,
+  ear: 0.003,
+  neck: 0.011,
+  body: 0.008,
+  belly: 0.009,
+  chest: 0.013,
+  thigh: 0.008,
+  shin: 0.005,
+  foot: 0.0028,
+  toe: 0.0016,
+  arm: 0.0065,
+  hand: 0.002,
+  finger: 0.0009,
+  tail: 0.008,
+  tuft: 0.016,
 };
 
 export { mirror };

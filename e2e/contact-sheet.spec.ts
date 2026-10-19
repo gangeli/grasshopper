@@ -6,7 +6,7 @@ test('pose contact sheet renders', async ({ page }) => {
   mkdirSync('artifacts', { recursive: true });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  page.on('console', (m) => (m.type() === 'error' ? errors.push(m.text()) : m.text().startsWith('lab: ') && console.log(m.text())));
   const params = process.env.LAB_PARAMS ?? '';
   await page.setViewportSize({ width: 1400, height: 1000 });
   await page.goto(`/lab.html?${params}`);
