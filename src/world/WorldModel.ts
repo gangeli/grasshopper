@@ -905,7 +905,9 @@ export class WorldModel {
     }
     if (pa >= 2) {
       const off = py / pa - this.floorY;
-      if (Math.abs(off) < 0.02) return false;
+      // A small correction of the hit-test height only: a plane far from our
+      // floor is another surface (the player chose to play on a table).
+      if (Math.abs(off) < 0.02 || Math.abs(off) > 0.15) return false;
       this.relevelFloor(this.floorY + off);
       return true;
     }

@@ -254,7 +254,9 @@ export class HealthMonitor {
     // Depth too sparse to say anything (camera-only depth while the phone is
     // held still, or only glancing at the floor): a big detected floor plane
     // that clearly disagrees with our floor decides on its own, more slowly.
-    const planeOnly = !!plane && f.mass < O.floorMinMass && plane.area >= 3 && Math.abs(plane.y - w.floorY) >= 0.05;
+    // (Only for plausible estimate errors: a plane far from our floor is a
+    // different surface, e.g. the player chose to play on a table.)
+    const planeOnly = !!plane && f.mass < O.floorMinMass && plane.area >= 3 && Math.abs(plane.y - w.floorY) >= 0.05 && Math.abs(plane.y - w.floorY) <= 0.15;
     if (!planeOnly && (f.mass < O.floorMinMass || (Math.abs(f.offset) < O.floorMinOffset && Math.abs(f.kernelMode) < O.floorMinOffset))) {
       this.floorCand = null;
       return;
