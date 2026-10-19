@@ -34,13 +34,19 @@ export class CameraDepthSource {
     if (this.tick++ % this.every) return;
     this.stereo.push(this.camera.render(cam, pose));
     this.frames++;
-    this.stereo.floorY = world.grid ? world.floorY : null;
-    // Floor hypotheses only where a detected floor plane says there is floor.
-    if (this.sensor.caps.planes)
-      this.stereo.floorRegion = this.sensor
-        .planes(cam)
-        .filter((p) => p.normal.y > 0.85 && Math.abs(p.polygon[0].y - world.floorY) < 0.1)
-        .map((p) => p.polygon);
+    // Floor hypotheses at the detected floor plane's height, only where it
+    // says there is floor. (Anchored to the plane, not to the game's floor
+    // estimate: if that is wrong, depth "found" at the wrong height would
+    // seem to confirm it and block the floor from ever being corrected.)
+    const horiz = this.sensor.caps.planes ? this.sensor.planes(cam).filter((p) => p.normal.y > 0.85) : [];
+    if (horiz.length) {
+      const fy = Math.min(...horiz.map((p) => p.polygon[0].y));
+      this.stereo.floorY = fy;
+      this.stereo.floorRegion = horiz.filter((p) => Math.abs(p.polygon[0].y - fy) < 0.05).map((p) => p.polygon);
+    } else {
+      this.stereo.floorY = world.grid ? world.toTrackingPoint({ x: 0, y: world.floorY, z: 0 }).y : null;
+      this.stereo.floorRegion = null;
+    }
     const res = this.stereo.compute();
     this.last = res;
     if (!res) return;
