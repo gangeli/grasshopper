@@ -259,6 +259,35 @@ export class WorldModel {
   /** Max height above the floor at which a noisy reading still counts as floor. */
   floorTolCap = 0.06;
 
+  // --- Health telemetry (see game/Health.ts) ---------------------------------------
+  /**
+   * Rolling histogram (1cm bins, −25..+25cm around floorY) of close, steeply
+   * downward readings: where the floor *really* is, decaying over ~10s.
+   */
+  private floorWatch = new Float32Array(51);
+  private floorWatchT = -Infinity;
+  /**
+   * Share of precise readings over the last few seconds that contradict the
+   * map: the ray carved through strongly occupied voxels, or the reading
+   * landed in space the map is confident is empty. A few % is normal
+   * (noise, people moving); a sustained high rate means the map and reality
+   * no longer line up.
+   */
+  conflictRate = 0;
+  private conflictWin: { t: number; rays: number; bad: number }[] = [];
+  /** Window (s) for conflictRate. */
+  conflictWindow = 3;
+  /** Depth frames rejected as garbage (covered camera, NaN poses). */
+  garbageFrames = 0;
+  /** Recent depth frames, re-integrated after a floor correction so the map survives it. */
+  private replay: { eye: Vec3; pts: Float32Array; sig: Float32Array | null; t: number }[] = [];
+  private replayPoints = 0;
+  /** Max points kept for replay (≈ the last minute of phone depth). */
+  replayBudget = 300_000;
+  private replaying = false;
+  /** Times the map was rebuilt or aged by a recovery (diagnostics). */
+  recoveries = { relevel: 0, soft: 0, hard: 0 };
+
   /**
    * Full depth front end, shared by the device and the simulator: gate frames
    * taken under bad tracking, drop discontinuity ("flying") pixels, lift to
@@ -269,6 +298,32 @@ export class WorldModel {
     const M = img.camToWorld;
     const eye = { x: M[12], y: M[13], z: M[14] };
     const fwd = { x: -M[8], y: -M[9], z: -M[10] };
+    // Garbage in: a broken pose, or a covered / face-down camera (almost
+    // everything within a hand's breadth). Integrating it would paint
+    // obstacles in mid-air or carve nonsense.
+    for (let q = 0; q < 16; q++)
+      if (!Number.isFinite(M[q])) {
+        this.garbageFrames++;
+        return false;
+      }
+    let valid = 0, near = 0;
+    for (let q = 0; q < img.depth.length; q++) {
+      const d = img.depth[q];
+      if (d > 0.05 && Number.isFinite(d)) {
+        valid++;
+        if (d < 0.3) near++;
+      }
+    }
+    if (valid > 20 && near > 0.5 * valid) {
+      this.garbageFrames++;
+      return false;
+    }
+    // Let old floor evidence fade (half-life ~7s).
+    if (Number.isFinite(this.floorWatchT) && t > this.floorWatchT) {
+      const k = Math.exp(-(t - this.floorWatchT) / 10);
+      for (let b = 0; b < this.floorWatch.length; b++) this.floorWatch[b] *= k;
+    }
+    this.floorWatchT = t;
     if (this.grid) {
       this.grid.now = t;
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
@@ -277,7 +332,7 @@ export class WorldModel {
     const sig: number[] | undefined = img.sigma ? [] : undefined;
     let depth = this.filterEdges ? filterDiscontinuities(img) : img.depth;
     if (this.multiView) depth = this.multiView.filter(img, depth, t);
-    this.ingestDepth(eye, depthImageToPoints(img, depth, sig), 4.5, sig);
+    this.ingestDepth(eye, depthImageToPoints(img, depth, sig), 4.5, sig, t);
     return true;
   }
 
@@ -285,10 +340,12 @@ export class WorldModel {
    * Integrate a set of depth samples taken from `eye`. Points near the floor
    * mark the floor as observed; others mark occupancy and carve free space.
    */
-  ingestDepth(eye: Vec3, points: Vec3[], maxRange = 4.5, sigmas?: number[]): void {
+  ingestDepth(eye: Vec3, points: Vec3[], maxRange = 4.5, sigmas?: number[], t = 0): void {
     const g = this.grid;
     if (!g) return;
     const r = g.res;
+    if (!this.replaying) this.remember(eye, points, sigmas, t);
+    let rays = 0, conflicted = 0;
     for (let q = 0; q < points.length; q++) {
       const p = points[q];
       const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z);
@@ -303,6 +360,7 @@ export class WorldModel {
         this.floorHist[Math.round((p.y - this.floorY) * 100) + 15]++;
         this.floorSamples++;
       }
+      if (!this.replaying && d < 1.8 && dirY < -0.5 && Math.abs(p.y - this.floorY) < 0.25) this.floorWatch[Math.round((p.y - this.floorY) * 100) + 25]++;
       // Vertical uncertainty of this point.
       const sy = sigma * Math.abs(dirY);
       // Floor only if close to it given the noise, capped so a small toy
@@ -346,8 +404,111 @@ export class WorldModel {
         continue;
       }
       const hitDelta = Math.round(14 * Math.min(1, Math.max(0.4, 0.025 / sigma)));
-      g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
+      let landedInFree = false;
+      if (sigma < 0.04) {
+        const i = g.cellX(p.x), j = g.cellY(p.y), k = g.cellZ(p.z);
+        landedInFree = g.inBounds(i, j, k) && g.data[g.idx(i, j, k)] <= -20;
+      }
+      const c = g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
+      if (sigma < 0.04) {
+        rays++;
+        if (c >= 2 || landedInFree) conflicted++;
+      }
     }
+    if (!this.replaying && rays > 0) {
+      const w = this.conflictWin;
+      w.push({ t, rays, bad: conflicted });
+      while (w.length && w[0].t < t - this.conflictWindow) w.shift();
+      let R = 0, B = 0;
+      for (const e of w) {
+        R += e.rays;
+        B += e.bad;
+      }
+      // Too few precise readings (looking far away) says nothing either way.
+      this.conflictRate = R >= 150 ? B / R : this.conflictRate * 0.9;
+    }
+  }
+
+  private remember(eye: Vec3, points: Vec3[], sigmas: number[] | undefined, t: number): void {
+    const pts = new Float32Array(points.length * 3);
+    points.forEach((p, q) => pts.set([p.x, p.y, p.z], q * 3));
+    this.replay.push({ eye: { ...eye }, pts, sig: sigmas ? Float32Array.from(sigmas) : null, t });
+    this.replayPoints += points.length;
+    while (this.replayPoints > this.replayBudget && this.replay.length > 1) this.replayPoints -= this.replay.shift()!.pts.length / 3;
+  }
+
+  /**
+   * Where recent close, downward readings say the floor is, relative to the
+   * current estimate: the dominant 1cm height bin (smoothed), its share of all
+   * such readings, and their (decayed) count.
+   */
+  floorEvidence(): { offset: number; share: number; mass: number } {
+    const h = this.floorWatch;
+    let total = 0, best = 0, bestB = 25;
+    for (let b = 0; b < h.length; b++) {
+      total += h[b];
+      const s3 = (h[b - 1] ?? 0) + h[b] + (h[b + 1] ?? 0);
+      if (s3 > best) {
+        best = s3;
+        bestB = b;
+      }
+    }
+    let sw = 0, sy = 0;
+    for (let b = Math.max(0, bestB - 2); b <= Math.min(h.length - 1, bestB + 2); b++) {
+      sw += h[b];
+      sy += h[b] * (b - 25);
+    }
+    return { offset: sw ? sy / sw / 100 : 0, share: total ? sw / total : 0, mass: total };
+  }
+
+  /**
+   * Recovery: move the floor to `y` and rebuild the map, re-integrating the
+   * recent depth frames so the room isn't forgotten. Use when the floor is
+   * known to be wrong (e.g. the floor itself shows up as an obstacle).
+   */
+  relevelFloor(y: number): void {
+    if (!this.grid || !Number.isFinite(y)) return;
+    this.recoveries.relevel++;
+    this.rebuildAtFloor(y);
+    this.floorWatch.fill(0);
+    this.conflictRate = 0;
+    this.conflictWin = [];
+    this.replaying = true;
+    try {
+      for (const f of this.replay) {
+        const pts: Vec3[] = [];
+        for (let q = 0; q < f.pts.length; q += 3) pts.push({ x: f.pts[q], y: f.pts[q + 1], z: f.pts[q + 2] });
+        this.ingestDepth(f.eye, pts, 4.5, f.sig ? Array.from(f.sig) : undefined, f.t);
+      }
+    } finally {
+      this.replaying = false;
+    }
+  }
+
+  /** Recovery: age all evidence so new observations quickly override a map that drifted out of line. */
+  softReset(factor = 0.3): void {
+    if (!this.grid) return;
+    this.recoveries.soft++;
+    this.grid.ageEvidence(factor, FLOOR_LAYERS_BELOW);
+    this.replay = [];
+    this.replayPoints = 0;
+    this.conflictRate = 0;
+    this.multiView?.reset();
+    this.conflictWin = [];
+  }
+
+  /** Recovery of last resort: forget the depth map (keep the floor and planes) and start mapping afresh. */
+  hardReset(): void {
+    if (!this.grid) return;
+    this.recoveries.hard++;
+    this.replay = [];
+    this.replayPoints = 0;
+    this.rebuildAtFloor(this.floorY);
+    this.floorRefinements--; // not a refinement
+    this.floorWatch.fill(0);
+    this.conflictRate = 0;
+    this.conflictWin = [];
+    this.multiView?.reset();
   }
 
   /**

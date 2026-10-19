@@ -25,6 +25,8 @@ export const OCC_THRESHOLD = 20;
  * visible reason.
  */
 export const SOFT_SOLID = 10;
+/** Occupancy confident enough that a ray passing through it is a contradiction. */
+export const STRONG_OCC = 45;
 const MAX_LO = 120;
 const MIN_LO = -60;
 
@@ -167,10 +169,13 @@ export class VoxelGrid {
    * Integrate a depth observation: the ray from `from` to `to` is free space and
    * `to` itself is occupied (unless `hit` is false, e.g. max-range readings).
    */
-  integrateRay(from: Vec3, to: Vec3, hit: boolean, hitDelta = 14, missDelta = -3, carveShort = this.res * 1.5): void {
+  integrateRay(from: Vec3, to: Vec3, hit: boolean, hitDelta = 14, missDelta = -3, carveShort = this.res * 1.5): number {
     const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
     const len = Math.hypot(dx, dy, dz);
-    if (len < 1e-4) return;
+    if (len < 1e-4) return 0;
+    // Strongly occupied voxels this ray says are empty: evidence that the map
+    // and the current view disagree (drift, relocalisation, things moved).
+    let conflicts = 0;
     const ti = this.cellX(to.x), tj = this.cellY(to.y), tk = this.cellZ(to.z);
     // Stop carving short of the endpoint (by more for noisier readings) so a
     // reading that lands behind a surface doesn't carve into the object.
@@ -180,6 +185,7 @@ export class VoxelGrid {
       // Asymmetric update: rays grazing past a confidently occupied voxel
       // erode it only slowly, so small real objects survive many near-misses.
       const v = this.data[this.idx(i, j, k)];
+      if (v > STRONG_OCC) conflicts++;
       this.add(i, j, k, v > OCC_THRESHOLD && this.stickyOccupied ? Math.max(missDelta, -1) : missDelta);
       return false;
     });
@@ -187,6 +193,19 @@ export class VoxelGrid {
       this.add(ti, tj, tk, hitDelta);
       this.noteHeight(ti, tj, tk, to.y);
     }
+    return conflicts;
+  }
+
+  /**
+   * Shrink all evidence towards "unknown" (keeps its sign): after the map and
+   * reality have drifted apart, fresh observations then win quickly instead of
+   * fighting with stale, confident ones. The solid below-floor layers stay.
+   */
+  ageEvidence(factor: number, fromLayer: number): void {
+    const layer = this.nx * this.nz;
+    for (let n = fromLayer * layer; n < this.data.length; n++) this.data[n] = Math.round(this.data[n] * factor);
+    this.transient.clear();
+    this.version++;
   }
 
   /**

@@ -296,7 +296,7 @@ export class SimSensor {
         if (!(z > 0.2) || z > N.maxRange) continue; // no reading
         out[(h - 1 - py) * w + px] = z; // image row 0 = top
       }
-    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: poseMatrix(cam, pose) };
+    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: poseMatrix(cam, this.withShift(pose)) };
   }
 
   /**
@@ -311,13 +311,13 @@ export class SimSensor {
     // the random-walk drift, keep relocalisation jumps instantaneous.
     const s = this.smoothErr, e = this.poseErr, a = 0.03;
     for (const k of ['yaw', 'pitch', 'x', 'y', 'z'] as const) s[k] += (e[k] - s[k]) * a;
-    return poseMatrix(cam, {
+    return poseMatrix(cam, this.withShift({
       yaw: s.yaw + (j.yaw - e.yaw),
       pitch: s.pitch + (j.pitch - e.pitch),
       x: s.x + (j.x - e.x),
       y: s.y + (j.y - e.y),
       z: s.z + (j.z - e.z),
-    });
+    }));
   }
   private smoothErr = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
 
@@ -328,7 +328,7 @@ export class SimSensor {
 
   /** The camera position the device *believes* it is at (true pose + tracking error). */
   estimatedEye(cam: SimCamera): Vec3 {
-    return applyPoseError(this.poseErr, cam.pos, cam.pos);
+    return applyPoseError(this.withShift(this.poseErr), cam.pos, cam.pos);
   }
 
   private poseErr = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
@@ -351,6 +351,24 @@ export class SimSensor {
     if (N.blurAngVel && angVel > N.blurAngVel) return false;
     return true;
   }
+  /**
+   * Fault injection: the tracker's world frame jumps by (dx, dz, dyaw) and
+   * stays there, like a bad relocalisation. Everything mapped before no
+   * longer lines up with what the camera sees now.
+   */
+  injectPoseJump(dx: number, dz: number, dyaw: number, dy = 0): void {
+    this.shift.x += dx;
+    this.shift.z += dz;
+    this.shift.y += dy;
+    this.shift.yaw += dyaw;
+  }
+  /** Persistent world-frame offset (injected faults); unlike drift it doesn't revert. */
+  readonly shift = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
+  private withShift(p: { yaw: number; pitch: number; x: number; y: number; z: number }) {
+    const h = this.shift;
+    return { yaw: p.yaw + h.yaw, pitch: p.pitch, x: p.x + h.x, y: p.y + h.y, z: p.z + h.z };
+  }
+
   /** A sudden pose correction (loop closure / relocalisation). */
   private relocalise() {
     const N = this.noise, e = this.poseErr;

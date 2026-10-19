@@ -68,7 +68,7 @@ export function depthImageToPoints(img: DepthImage, depth: Float32Array = img.de
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
       const d = depth[y * w + x];
-      if (!(d > 0.05)) continue;
+      if (!(d > 0.05 && d < 50)) continue; // also rejects NaN and Infinity
       const nx = ((x + 0.5) / w) * 2 - 1, ny = 1 - ((y + 0.5) / h) * 2;
       // Unproject the near-plane point (nx, ny, -1) to view space.
       const vx = P[0] * nx + P[4] * ny - P[8] + P[12];
@@ -184,7 +184,7 @@ export class DepthConsistency {
     // depthImageToPoints skips invalid pixels; walk pixels in the same order.
     let q = 0;
     for (let i = 0; i < depth.length; i++) {
-      if (!(depth[i] > 0.05)) continue;
+      if (!(depth[i] > 0.05 && depth[i] < 50)) continue; // same test as depthImageToPoints
       const p = pts[q++];
       let support = 0, contra = false;
       for (const f of others) {
