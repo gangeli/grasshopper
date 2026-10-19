@@ -59,22 +59,31 @@ export class DriftMonitor {
     // (for or against a jump) describe the frame before it.
     const newEvent = this.world.lastTrackingEvent !== this.seenEvent;
     this.seenEvent = this.world.lastTrackingEvent;
-    if (inEvent && (!this.inEvent || newEvent)) {
+    if (inEvent && (!this.inWindow || newEvent)) {
+      this.contra = 0;
+      this.contraMag = 0;
+      this.contradicted = false;
       this.votes = [];
       this.against = 0;
       this.eventSeen = [];
     }
-    this.inEvent = inEvent;
+    this.inWindow = inEvent;
+    this.inEvent = inEvent && !this.contradicted;
     if (this.inEvent) return this.afterEvent(t);
+    if (inEvent) return false; // contradicted: waiting for the verdict to be taken
     return this.drifting(t);
   }
   private seenEvent = -Infinity;
+  /** Inside the post-loss window (even if the event was already settled early). */
+  private inWindow = false;
   /** Currently checking for a jump after a tracking loss. */
   inEvent = false;
   /** Just after a loss, or a jump looks likely and nothing says the map still fits. */
   get suspicious(): boolean {
     if (!this.inEvent) return false;
-    return this.world.now - this.world.lastTrackingEvent < 4 || (this.votes.length > 0 && this.against === 0);
+    // A jump vote keeps it suspicious only while votes keep coming.
+    const lastVote = this.votes.length ? this.votes[this.votes.length - 1].t : -Infinity;
+    return this.world.now - this.world.lastTrackingEvent < 4 || (this.votes.length > 0 && this.against === 0 && this.lastT - lastVote < 6);
   }
 
   /**
@@ -91,7 +100,23 @@ export class DriftMonitor {
       this.note('event: no estimate yet');
       return false;
     }
-    this.eventSeen.push(m.n ? m.base / m.n : 0);
+    // Only looks that line up with known structure somehow say anything:
+    // nothing matching at any shift is new territory, not a contradiction.
+    if (m.n && m.best >= 0.2 * m.n) this.eventSeen.push(m.base / m.n);
+    // Look after look, the map as it stands fits nothing while a shifted map
+    // fits clearly: no need to wait out the window to know the map is off.
+    // (Readings landing in space the old map saw clearly empty count even when
+    // the right correction can't be pinned down.)
+    const intoFree = m.n >= 100 && m.base <= -0.12 * m.n;
+    if (intoFree || (!m.degenerate && m.n >= 100 && m.best >= 0.2 * m.n && m.base <= 0.05 * m.n && displacement(m, null) >= O.minCorrection)) {
+      this.contra++;
+      this.contraMag = Math.max(this.contraMag, displacement(m, null));
+    } else if (m.n >= 100 && m.base >= 0.3 * m.n) this.contra = 0;
+    if (this.contra >= 6 && this.world.now - this.world.lastTrackingEvent >= 4) {
+      this.contradicted = true;
+      this.note(`event: map contradicted by ${this.contra} looks in a row (~${(this.contraMag * 100).toFixed(0)}cm)`);
+      return false;
+    }
     const mag = displacement(m, null);
     const ok = !m.degenerate && m.n >= O.minPoints && m.best >= O.minSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n);
     // A confident "nothing moved" (most readings on known surfaces as they are) votes against a jump.
@@ -100,7 +125,7 @@ export class DriftMonitor {
     // fit shifted: a weaker vote, so it takes more of them agreeing.
     const weak = !ok && !m.degenerate && m.n >= 150 && m.best >= 0.3 * m.n && m.best >= 4 * Math.max(m.base, 0.05 * m.n);
     if ((!ok && !weak) || mag < O.minCorrection) {
-      this.note(`event: ${ok ? 'aligned' : 'unsure'} n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm`);
+      this.note(`event: ${ok ? "aligned" : "unsure"}${m.degenerate ? " (degenerate)" : ""} contra ${this.contra} n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm`);
       return false;
     }
     // Votes: estimates from different moments that agree on the same correction.
@@ -122,6 +147,9 @@ export class DriftMonitor {
     return false;
   }
   private votes: { m: Est; t: number; weak: boolean }[] = [];
+  private contra = 0;
+  private contraMag = 0;
+  private contradicted = false;
   private against = 0;
 
   /** Share of post-event readings that matched the pre-event map without correction (per check). */
@@ -137,12 +165,16 @@ export class DriftMonitor {
     this.eventSeen = [];
     this.votes = [];
     this.against = 0;
+    const contradicted = this.contradicted, contraMag = this.contraMag;
+    this.contra = 0;
+    this.contraMag = 0;
     const sure = votes.filter((x) => !x.weak);
     // Size of the likely jump (weak looks count here: they pick how hard to reset, not whether to).
     const mag = votes.length ? Math.max(...votes.map((x) => displacement(x.m, null))) : 0;
     // Repeated confident jump estimates that never agreed enough to fix, with
     // nothing confidently saying the map still fits: stop trusting the old map.
     if (sure.length >= 2 && against === 0) return { verdict: 'unresolved', mag };
+    if (contradicted) return { verdict: 'unresolved', mag: Math.max(mag, contraMag) };
     if (v.length < 4) return { verdict: 'unknown', mag };
     const sorted = v.slice().sort((a, b) => a - b);
     return { verdict: sorted[sorted.length >> 1] < 0.2 ? 'unresolved' : 'fine', mag };
