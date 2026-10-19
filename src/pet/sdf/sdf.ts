@@ -105,6 +105,35 @@ export function roundCone(region: Region, a: V3, b: V3, ra: number, rb: number, 
   };
 }
 
+/**
+ * Torus ring around `axis` through centre c (major radius R, tube radius r);
+ * `squash` stretches the ring along the frame's up direction (for oval eyes).
+ */
+export function ring(region: Region, c: V3, axis: V3, R: number, r: number, bone: string, k = 0.01, squash = 1): Prim {
+  const al = Math.hypot(...axis);
+  const ax = axis.map((v) => v / al) as V3;
+  // Frame: u = up × axis, v = axis × u.
+  let ux = ax[2], uy = 0, uz = -ax[0];
+  const ul = Math.hypot(ux, uy, uz);
+  ux /= ul;
+  uz /= ul;
+  const vx = ax[1] * uz - ax[2] * uy, vy = ax[2] * ux - ax[0] * uz, vz = ax[0] * uy - ax[1] * ux;
+  const pad = R * squash + r + k;
+  return {
+    region,
+    k,
+    min: [c[0] - pad, c[1] - pad, c[2] - pad],
+    max: [c[0] + pad, c[1] + pad, c[2] + pad],
+    d(x, y, z) {
+      const px = x - c[0], py = y - c[1], pz = z - c[2];
+      const h = px * ax[0] + py * ax[1] + pz * ax[2];
+      const a = px * ux + py * uy + pz * uz, b = (px * vx + py * vy + pz * vz) / squash;
+      return Math.hypot(Math.hypot(a, b) - R, h) - r;
+    },
+    bones: () => [{ bone, w: 1 }],
+  };
+}
+
 export function carve(p: Prim, k = 0.006): Prim {
   return { ...p, carve: true, k };
 }

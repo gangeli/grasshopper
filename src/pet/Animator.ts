@@ -585,7 +585,7 @@ export class Animator {
     // Upper lid: a hemispherical shell that rotates from tucked back (open)
     // to covering the front of the eye (closed). Lower lid rises for squints.
     const up = THREE.MathUtils.lerp(1.5, -1.65, clamp(open + happy * 0.5, 0, 1)) - (open > 1 ? (open - 1) * 0.6 : 0);
-    const lo = THREE.MathUtils.lerp(1.65, 0.15, happy);
+    const lo = THREE.MathUtils.lerp(1.65, 0.62, happy);
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
     const ps = clamp(P.pupilSize, 0.5, 1.5);

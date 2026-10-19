@@ -1,5 +1,5 @@
 import { BONES, type BoneName, type V } from '../skeleton';
-import { alignX, carve, ellipsoid, roundCone, Sculpt, type BoneWeight, type Region } from './sdf';
+import { alignX, carve, ellipsoid, ring, roundCone, Sculpt, type BoneWeight, type Region } from './sdf';
 
 /**
  * Hopper's sculpt: one continuous body built from smoothly blended shapes on
@@ -14,6 +14,8 @@ export const EYE: Record<'L' | 'R', V> = { L: [0.03, 0.247, 0.066], R: [-0.03, 0
 export const EYE_RADIUS = 0.0235;
 export const NOSE: V = [0, 0.228, 0.097];
 export const MOUTH: V = [0, 0.213, 0.093];
+/** Lid fold ring around each eye, in eye radii: offset along the eye axis, ring radius, tube radius. */
+export const LID_FOLD = { offset: 0.4, R: 1.03, r: 0.25 };
 
 /** Torso weights blend hips → spine → chest → neck by height. */
 function torsoBones(_x: number, y: number): BoneWeight[] {
@@ -112,6 +114,14 @@ export function buildCreatureSculpt(): Sculpt {
   for (const side of ['L', 'R'] as const) {
     const e = EYE[side];
     S.add(carve(ellipsoid('head', add(e, [0, 0, 0.004]), [0.0215, 0.0235, 0.017], 'head', 0), 0.007));
+  }
+  // Soft lid folds wrapping the eyeballs, so from the side the eye sits in the
+  // face rather than bulging out of it like a ball.
+  for (const side of ['L', 'R'] as const) {
+    const s = side === 'L' ? 1 : -1;
+    const ax: V = [0.2955 * s, 0.0763, 0.9522];
+    const o = EYE_RADIUS * LID_FOLD.offset;
+    S.add(ring('brow', add(EYE[side], [ax[0] * o, ax[1] * o, ax[2] * o]), ax, EYE_RADIUS * LID_FOLD.R, EYE_RADIUS * LID_FOLD.r, 'head', 0.006, 1.08));
   }
   return S;
 }

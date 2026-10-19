@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BONES } from '../skeleton';
-import { buildCreatureSculpt, FUR_LENGTH } from './creature';
+import { buildCreatureSculpt, EYE, EYE_RADIUS, FUR_LENGTH } from './creature';
 import type { Region } from './sdf';
 import { surfaceNets } from './surfaceNets';
 
@@ -90,7 +90,14 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const rw = (r: Region) => att.regionWeights.get(r) ?? 0;
     let fl = 0;
     for (const [r, w] of att.regionWeights) fl += FUR_LENGTH[r] * w;
-    furLen[v] = fl;
+    // Around the eye sockets the fur gets short and the skin a little darker:
+    // a clean soft "eyeliner" instead of hairs stabbing into the eyeball.
+    const eyeD = Math.min(
+      Math.hypot(x - EYE.L[0], (y - EYE.L[1]) / 1.08, z - EYE.L[2]),
+      Math.hypot(x - EYE.R[0], (y - EYE.R[1]) / 1.08, z - EYE.R[2]),
+    ) / EYE_RADIUS;
+    const rim = 1 - smooth(1.0, 1.42, eyeD);
+    furLen[v] = fl * (1 - 0.85 * rim);
     // --- colour ---
     c.copy(cBody);
     // Subtle mottling so it never looks like flat plastic.
@@ -128,6 +135,8 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
       if (st > 0.35 && ny + -nz > -0.2) c.lerp(cDark, 0.6);
     }
     if (att.region === 'tuft') c.lerp(cDark, 0.7);
+    // Socket liner.
+    c.lerp(cDark, 0.35 * rim).multiplyScalar(1 - 0.3 * rim);
     // Tiny brightness variation.
     const varn = 0.94 + 0.12 * vnoise(x * 300, y * 300, z * 300);
     color[v * 3] = c.r * varn;
