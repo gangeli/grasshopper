@@ -48,7 +48,7 @@ const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', {
   ...(q.has('res') ? { meshResolution: Number(q.get('res')) } : {}),
 });
 scene.add(rig.group);
-console.log(`pet build ${(performance.now() - tBuild).toFixed(0)} ms`);
+console.log(`lab: pet build ${(performance.now() - tBuild).toFixed(0)} ms`);
 applyPetEnvironment(renderer, rig);
 if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
 if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshNormalMaterial()));
@@ -101,4 +101,17 @@ actions.forEach((a, i) => {
   overlay.appendChild(d);
 });
 document.body.appendChild(overlay);
+// ?bench=N: re-render the last cell N times and log the average frame time
+// (relative numbers only: software GL in tests is far slower than a phone GPU).
+if (q.has('bench')) {
+  const n = Number(q.get('bench'));
+  const gl = renderer.getContext();
+  const px = new Uint8Array(4);
+  renderer.render(scene, camera);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const t0 = performance.now();
+  for (let i = 0; i < n; i++) renderer.render(scene, camera);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  console.log(`lab: bench ${((performance.now() - t0) / n).toFixed(1)} ms/frame`);
+}
 (window as unknown as { __labReady: boolean }).__labReady = true;

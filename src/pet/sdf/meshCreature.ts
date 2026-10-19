@@ -54,11 +54,11 @@ function occlusion(S: { d(x: number, y: number, z: number): number }, x: number,
 /** Broad occlusion (a few cm out): under the head, between the legs, behind the arms. */
 function broadOcclusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
   let occ = 0;
-  for (const h of [0.012, 0.022, 0.034]) {
+  for (let h = 0.016; h < 0.04; h += 0.016) {
     const d = S.d(x + nx * h, y + ny * h, z + nz * h);
     occ += Math.max(0, Math.min(1, (h - d) / h));
   }
-  return Math.max(0, 1 - 0.75 * (occ / 3));
+  return Math.max(0, 1 - 0.75 * (occ / 2));
 }
 
 const boneIndex = new Map(BONES.map(([n], i) => [n as string, i]));
@@ -114,6 +114,10 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   tailPts[0] = [0, 0.082, -0.025];
   const bonePos = (b: BoneName) => BONES.find(([nm]) => nm === b)![2] as V;
   const F = [0, 0, 0];
+  const armDir = (['L', 'R'] as const).map((sd) => {
+    const a = bonePos(`shoulder${sd}`), b = bonePos(`hand${sd}`);
+    return [b[0] - a[0], b[1] - a[1] - 0.02, b[2] - a[2]];
+  });
   const addF = (w: number, ax: number, ay: number, az: number) => {
     const l = Math.hypot(ax, ay, az) || 1;
     F[0] += (w * ax) / l;
@@ -152,7 +156,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const rim = 1 - smooth(1.0, 1.42, eyeD);
     furLen[v] = fl * (1 - 0.85 * rim);
     // Tufty, not uniform: low-frequency length variation.
-    furLen[v] *= 0.78 + 0.44 * fbm(x * 38 + 3, y * 38, z * 38);
+    furLen[v] *= 0.78 + 0.44 * vnoise(x * 38 + 3, y * 38, z * 38);
     // Wispy fluff inside the ear cups.
     if (att.region === 'ear') furLen[v] *= 1 + 0.9 * smooth(0.2, 0.7, 0.6 * ny + 0.6 * nz);
     // --- groom direction ---
@@ -197,8 +201,8 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
             addF(w, 0, -0.3, 1);
             break;
           case 'arm': {
-            const a = bonePos(sx > 0 ? 'shoulderL' : 'shoulderR'), b = bonePos(sx > 0 ? 'handL' : 'handR');
-            addF(w, b[0] - a[0], b[1] - a[1] - 0.02, b[2] - a[2]);
+            const d = armDir[sx > 0 ? 0 : 1];
+            addF(w, d[0], d[1], d[2]);
             break;
           }
           case 'tail': {
@@ -225,9 +229,9 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
         }
       }
       // Gentle swirls so it never looks machine-combed.
-      const fx = F[0] + 0.35 * (vnoise(x * 45, y * 45, z * 45) - 0.5);
-      const fy = F[1] + 0.35 * (vnoise(x * 45 + 9, y * 45, z * 45) - 0.5);
-      const fz = F[2] + 0.35 * (vnoise(x * 45, y * 45 + 4, z * 45) - 0.5);
+      const fx = F[0] + 0.17 * Math.sin(y * 140 + z * 60);
+      const fy = F[1] + 0.17 * Math.sin(z * 130 + x * 70);
+      const fz = F[2] + 0.17 * Math.sin(x * 150 + y * 50);
       // How flat the coat lies: the tail brush stands out from the tail like a bottlebrush.
       const lay = 1 - 0.55 * rw('tuft') - 0.2 * rw('tail');
       const fl2 = (Math.hypot(fx, fy, fz) || 1) / lay;
@@ -241,7 +245,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const mott = fbm(x * 60, y * 60, z * 60);
     c.lerp(cDark, 0.12 * mott);
     // Broad, gentle hue and value drift across the body (no animal is one flat colour).
-    const hv = fbm(x * 14 + 20, y * 14, z * 14) - 0.5;
+    const hv = vnoise(x * 14 + 20, y * 14, z * 14) - 0.5;
     c.offsetHSL(hv * 0.06, -0.04, hv * 0.05);
     // Darker crown and back.
     if (ny > 0.45 && (att.region === 'head' || att.region === 'brow')) c.lerp(cDark, 0.45 * smooth(0.45, 1, ny));
@@ -259,7 +263,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     }
     // Cream belly / chest / muzzle / cheeks.
     // Feathered, irregular edge where the cream front meets the coat.
-    const front = smooth(0.15, 0.6, nz + 0.3 * (fbm(x * 42, y * 42 + 3, z * 42) - 0.5));
+    const front = smooth(0.15, 0.6, nz + 0.3 * (vnoise(x * 42, y * 42 + 3, z * 42) - 0.5));
     const bellyMask = (rw('belly') + rw('chest') + rw('neck') * 0.6) * front * smooth(0.205, 0.15, y);
     c.lerp(cBelly, Math.min(1, bellyMask * 1.1 + (rw('belly') + rw('chest')) * front * 0.6));
     c.lerp(cBelly, Math.min(1, rw('muzzle') * 1.0 + rw('cheek') * smooth(0.0, 0.7, nz) * smooth(0.25, -0.2, ny) * 0.85));

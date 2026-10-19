@@ -695,7 +695,8 @@ function dataTexture(size: number, fn: (u: number, v: number) => [number, number
   for (let j = 0; j < size; j++)
     for (let i = 0; i < size; i++) {
       const c = fn((i + 0.5) / size, (j + 0.5) / size);
-      data.set(c.map((x) => Math.max(0, Math.min(255, Math.round(x * 255)))), (j * size + i) * 4);
+      const o = (j * size + i) * 4;
+      for (let q = 0; q < 4; q++) data[o + q] = Math.max(0, Math.min(255, Math.round(c[q] * 255)));
     }
   const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   t.colorSpace = THREE.SRGBColorSpace;
@@ -720,6 +721,7 @@ function makeIrisTexture(hex: number): THREE.DataTexture {
   const light = new THREE.Color().setHSL(hsl.h - 0.02, Math.min(1, hsl.s * 1.1), 0.66);
   // Warm amber pupillary zone (like a hazel eye) behind the collarette.
   const warm = base.clone().lerp(new THREE.Color(0xe0a548), 0.7);
+  const ring = light.clone().lerp(warm, 0.4);
   const limbal = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 0.8), 0.07);
   const A = Array.from({ length: 96 }, () => rand()), B = Array.from({ length: 240 }, () => rand());
   const wob = Array.from({ length: 12 }, () => rand());
@@ -729,7 +731,7 @@ function makeIrisTexture(hex: number): THREE.DataTexture {
     return arr[k0] + (arr[k1] - arr[k0]) * smooth(k - Math.floor(k));
   };
   const c = new THREE.Color();
-  return dataTexture(256, (u, v) => {
+  return dataTexture(160, (u, v) => {
     const x = u * 2 - 1, y = v * 2 - 1;
     const r = Math.hypot(x, y);
     const a = (Math.atan2(y, x) / (Math.PI * 2) + 1) % 1;
@@ -743,11 +745,13 @@ function makeIrisTexture(hex: number): THREE.DataTexture {
     c.lerp(light, Math.pow(fib, 2.2) * (0.35 + 0.5 * smooth((0.25 - y) / 1.2)) * smooth((r - 0.45) / 0.2));
     // Pupillary zone.
     c.lerp(warm, 0.8 * (1 - smooth((r - rc + 0.05) / 0.09)) * (0.7 + 0.3 * fib));
-    c.lerp(light.clone().lerp(warm, 0.4), 0.45 * Math.exp(-Math.pow((r - rc) / 0.025, 2)));
+    c.lerp(ring, 0.45 * Math.exp(-Math.pow((r - rc) / 0.025, 2)));
     // Crypts: small dark pits in the ciliary zone.
+    if (r > 0.45 && r < 0.95)
     for (const [ca, cr, cs] of crypts) {
       let da = Math.abs(a - ca);
       da = Math.min(da, 1 - da) * Math.PI * 2 * r;
+      if (da > cs * 3 || Math.abs(r - cr) > cs * 5) continue;
       const k = Math.exp(-(da * da) / (cs * cs * 0.6) - Math.pow((r - cr) / (cs * 1.6), 2));
       c.multiplyScalar(1 - 0.45 * k);
     }
@@ -917,9 +921,11 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
   const c = new THREE.Color();
   const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.1);
   const white = new THREE.Color(1, 1, 1);
-  // Jittered cell centres for the fine venation between the main veins.
-  const cells = Array.from({ length: 90 }, () => [rand(), rand()]);
-  return dataTexture(256, (u, v) => {
+  const stigma = veinC.clone().multiplyScalar(0.7);
+  // Jittered grid of cell centres for the fine venation between the main veins.
+  const G = 10;
+  const cells = Array.from({ length: G * G }, () => [rand(), rand()]);
+  return dataTexture(160, (u, v) => {
     const a = Math.atan2(v - 0.5, u + 0.02);
     const d = Math.hypot(u, v - 0.5);
     // Main veins radiate from the root and fade towards the tip; one curved cross vein.
@@ -927,11 +933,15 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
     const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.014);
     // Fine venation: the edges of a cell network, like a dragonfly's wing.
     let d1 = 9, d2 = 9;
-    for (const [px, py] of cells) {
-      const dd = Math.hypot(u - px, (v - py) * 1.2);
-      if (dd < d1) [d1, d2] = [dd, d1];
-      else if (dd < d2) d2 = dd;
-    }
+    const gi = Math.floor(u * G), gj = Math.floor(v * G);
+    for (let oi = -1; oi <= 1; oi++)
+      for (let oj = -1; oj <= 1; oj++) {
+        const ci = gi + oi, cj = gj + oj;
+        const cell = cells[(((cj % G) + G) % G) * G + (((ci % G) + G) % G)];
+        const dd = Math.hypot(u - (ci + 0.15 + 0.7 * cell[0]) / G, (v - (cj + 0.15 + 0.7 * cell[1]) / G) * 1.2);
+        if (dd < d1) [d1, d2] = [dd, d1];
+        else if (dd < d2) d2 = dd;
+      }
     const fine = (1 - smooth((d2 - d1) / 0.018)) * smooth((d - 0.12) / 0.2);
     const k = Math.min(1, radial + cross);
     // Membrane: richer colour at the root, lighter and more see-through towards
@@ -943,7 +953,7 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
     c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35 + fine * 0.45));
     // A small dark pterostigma near the tip of the fore-lobe.
     const ptero = 1 - smooth((Math.hypot((u - 0.82) / 1.8, v - 0.66) - 0.03) / 0.015);
-    c.lerp(veinC.clone().multiplyScalar(0.7), 0.85 * ptero);
+    c.lerp(stigma, 0.85 * ptero);
     return [c.r, c.g, c.b, Math.min(1, 0.4 + 0.45 * k + 0.22 * fine + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim + 0.5 * ptero)];
   });
 }
