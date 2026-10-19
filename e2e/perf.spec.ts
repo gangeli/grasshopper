@@ -24,6 +24,8 @@ const perfSummary = (page: Page) => ev(page, () => (window.__hopper?.stage as { 
 const perfText = (page: Page) => ev(page, () => { const p = (window.__hopper?.stage as { perf: Perf }).perf; return p.format(p.summary()); });
 
 test.use({
+  // Camera mode gets Chromium's fake camera stream behind the transparent canvas.
+  launchOptions: { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] },
   // A mid-range Android phone: mobile UA (phone mesh + shell count), phone viewport.
   userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36',
 });
@@ -100,6 +102,31 @@ test('AR frame-time breakdown (emulated phone)', async ({ page }) => {
   }
   out.seek = await perfSummary(page);
   console.log(`--- ${label}: seek ---\n${await perfText(page)}`);
+  console.log('quality log', JSON.stringify(await ev(page, () => (window.__hopper?.stage as { quality: { log: string[] } }).quality.log)));
   writeFileSync(`artifacts/perf-${label}.json`, JSON.stringify(out, null, 2));
   expect(errors).toEqual([]);
+});
+
+test.describe('camera mode', () => {
+  test('camera-mode frame-time breakdown', async ({ page }) => {
+    test.setTimeout(240_000);
+    mkdirSync('artifacts', { recursive: true });
+    const label = process.env.PERF_LABEL ?? 'ar';
+    const qs = process.env.PERF_QS ?? '';
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.setViewportSize({ width: 412, height: 860 });
+    await page.goto(`/?camera=1&seed=3&perf=1${qs}`);
+    await expect(page.locator('#btn-cam')).toBeVisible({ timeout: 20_000 });
+    await page.locator('#btn-cam').click();
+    await expect.poll(() => ev(page, () => (window.__hopper?.game as { phase?: string } | undefined)?.phase ?? ''), { timeout: 90_000 }).toBe('roam');
+    await page.waitForTimeout(3000);
+    await perfReset(page);
+    await page.waitForTimeout(12_000);
+    const out = { camera: await perfSummary(page) };
+    console.log(`--- ${label}: camera mode ---\n${await perfText(page)}`);
+    console.log('quality log', JSON.stringify(await ev(page, () => (window.__hopper?.stage as { quality: { log: string[] } }).quality.log)));
+    writeFileSync(`artifacts/perf-${label}-camera.json`, JSON.stringify(out, null, 2));
+    expect(errors).toEqual([]);
+  });
 });

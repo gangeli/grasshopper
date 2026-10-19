@@ -4,6 +4,7 @@ import type { GameStack } from '../game/stack';
 import { Occluder, OCCLUDER_RADIUS } from './Occluder';
 import { activeNavWorker } from '../world/NavWorkerClient';
 import { PerfMonitor, petScreenCoverage } from './Perf';
+import { QualityGovernor } from './Quality';
 
 /**
  * Renderer, scene and the always-present scene furniture for the pet:
@@ -33,11 +34,16 @@ export class Stage {
   debug = false;
   /** Frame profiler (?perf=1: detailed sections, overlay and console log). */
   readonly perf: PerfMonitor;
+  /** Frame-time governor: fur shells, resolution and shadow vs the display's frame rate. */
+  readonly quality: QualityGovernor;
+  private lastRenderT = 0;
   private petRig: GameStack['rig'] | null = null;
   private readonly _c = new THREE.Vector3();
 
   constructor(container: HTMLElement, opts: { ar: boolean }) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: opts.ar, preserveDrawingBuffer: true });
+    // No preserveDrawingBuffer: keeping the buffer forces an extra full-screen
+    // copy per frame on mobile GPUs (nothing reads the canvas back).
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: opts.ar });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
@@ -47,7 +53,8 @@ export class Stage {
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
     this.perf = PerfMonitor.fromUrl(container);
-    this.perf.enableGpuTimer(this.renderer.getContext());
+    // GPU timer queries only when profiling: reading their state costs a GPU round trip.
+    if (this.perf.detailed && new URLSearchParams(location.search).get("gputimer") !== "0") this.perf.enableGpuTimer(this.renderer.getContext());
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.02, 40);
 
     this.hemi = new THREE.HemisphereLight(0xfffaf0, 0x8d8475, 0.9);
@@ -63,6 +70,7 @@ export class Stage {
     this.sun.shadow.bias = -0.0008;
     this.sun.shadow.radius = 4;
     this.scene.add(this.sun, this.sun.target);
+    this.quality = new QualityGovernor({ renderer: this.renderer, sun: this.sun, basePixelRatio: Math.min(window.devicePixelRatio, 2) });
 
     this.shadowCatcher = new THREE.Mesh(new THREE.CircleGeometry(0.7, 40), new THREE.ShadowMaterial({ opacity: 0.32 }));
     this.shadowCatcher.rotation.x = -Math.PI / 2;
@@ -94,7 +102,7 @@ export class Stage {
   }
 
   addPet(stack: GameStack) {
-    this.petRig = stack.rig;
+    this.setPetRig(stack.rig);
     this.mapRoot.add(stack.rig.group);
     applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
   }
@@ -195,15 +203,28 @@ export class Stage {
   /** The pet rig whose fragment load the profiler estimates (SimMode adds its own). */
   setPetRig(rig: GameStack['rig']) {
     this.petRig = rig;
+    this.quality.attachPet(rig.group);
   }
 
   render() {
     const p = this.perf;
+    const now = performance.now();
+    this.quality.update(now, this.lastRenderT ? now - this.lastRenderT : 0);
+    this.lastRenderT = now;
+    if (p.detailed) p.quality = this.quality.describe();
+    p.add('quality', performance.now() - now);
+    // The pet's meshes are skinned and never frustum-culled by three.js (their
+    // bind-pose bounds don't follow the animation), and every fur shell redraws
+    // the body: skip the whole pet while it is off screen (hide and seek: often).
+    const rig = this.petRig;
+    const wasVisible = rig ? rig.group.visible : false;
+    if (rig && wasVisible && !this.petOnScreen(rig)) rig.group.visible = false;
     p.gpuBegin();
     const t0 = performance.now();
     this.renderer.render(this.scene, this.camera);
     p.add('render', performance.now() - t0);
     p.gpuEnd();
+    if (rig) rig.group.visible = wasVisible;
     const info = this.renderer.info;
     const ri = p.renderInfo;
     ri.calls = info.render.calls;
@@ -211,7 +232,29 @@ export class Stage {
     ri.programs = info.programs?.length ?? 0;
     ri.geometries = info.memory.geometries;
     ri.textures = info.memory.textures;
-    if (p.detailed && this.petRig) this.estimateFragments(this.petRig);
+    if (p.detailed && this.petRig) {
+      const t1 = performance.now();
+      this.estimateFragments(this.petRig);
+      p.add('perf.estimate', performance.now() - t1);
+    }
+  }
+
+  private readonly _frustum = new THREE.Frustum();
+  private readonly _m = new THREE.Matrix4();
+  private readonly _sphere = new THREE.Sphere();
+  /** Is the pet (a generous sphere around it, incl. its shadow) inside the view? */
+  private petOnScreen(rig: GameStack['rig']): boolean {
+    const r = this.renderer;
+    const cam: THREE.Camera = r.xr.isPresenting ? r.xr.getCamera() : this.camera;
+    // XR: the camera from the previous frame (three updates it inside render); the margin covers a frame of motion.
+    const e = cam.projectionMatrix.elements;
+    if (!Number.isFinite(e[0]) || e[0] === 0) return true;
+    rig.group.updateWorldMatrix(true, false);
+    rig.bones.chest.getWorldPosition(this._sphere.center);
+    this._sphere.radius = 0.45 * Math.max(rig.group.scale.x, rig.group.scale.y, rig.group.scale.z, 1);
+    this._m.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    this._frustum.setFromProjectionMatrix(this._m);
+    return this._frustum.intersectsSphere(this._sphere);
   }
 
   /** Profiler: drawing-buffer pixels, the pet's screen coverage and how many layers shade it. */

@@ -121,6 +121,7 @@ export class WorldModel {
     const g = this.grid;
     for (let j = 0; j < FLOOR_LAYERS_BELOW; j++)
       for (let k = 0; k < g.nz; k++) for (let i = 0; i < g.nx; i++) g.data[g.idx(i, j, k)] = 127;
+    g.touchAll();
   }
 
   isFloorHeight(y: number, tol = 0.06): boolean {
@@ -253,7 +254,10 @@ export class WorldModel {
             const i = g.cellX(x), j = g.cellY(y), k = g.cellZ(z);
             if (g.get(i, j, k) < 100) g.set(i, j, k, 100);
             if (up) g.noteHeight(i, j, k, y);
-            if (g.inBounds(i, j, k)) g.underside[g.idx(i, j, k)] |= down ? 1 : up ? 2 : 0;
+            if (g.inBounds(i, j, k)) {
+              g.underside[g.idx(i, j, k)] |= down ? 1 : up ? 2 : 0;
+              g.touchColumn(i, k);
+            }
           }
           if (mesh.label) pts.push({ x, y, z });
         }
@@ -731,6 +735,7 @@ export class WorldModel {
       g.topFrac.set(old.topFrac.subarray(jo * layer, (jo + 1) * layer), j * layer);
     }
     g.observed.set(old.observed);
+    g.touchAll();
     g.version++;
     this.floorWatch.fill(0);
     this.conflictRate = 0;
@@ -973,6 +978,7 @@ export class WorldModel {
     if (snap) {
       const g = this.grid;
       g.data.set(snap.data);
+      g.touchAll();
       g.observed.set(snap.observed);
       g.underside.set(snap.underside);
       g.topFrac.set(snap.topFrac);

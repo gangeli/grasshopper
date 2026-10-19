@@ -46,4 +46,28 @@ describe('VoxelGrid', () => {
     expect(g.segmentClear({ x: -0.5, y: 1.05, z: 0.05 }, { x: 0.55, y: 1.05, z: 0.05 })).toBe(false);
     expect(g.segmentClear({ x: -0.5, y: 1.05, z: 0.05 }, { x: 0.55, y: 1.05, z: 0.05 }, 0.2)).toBe(true);
   });
+
+  it('the incrementally updated shadow mask equals a full recompute', () => {
+    const g = mk();
+    const rng = new Rng(11);
+    const full = () => {
+      const h = new VoxelGrid({ origin: g.origin, res: g.res, nx: g.nx, ny: g.ny, nz: g.nz }, { data: g.data.slice(), observed: g.observed.slice(), underside: g.underside.slice(), topFrac: g.topFrac.slice() });
+      return h.updateShadow();
+    };
+    for (let round = 0; round < 40; round++) {
+      // Tops, carved space, undersides, rays.
+      for (let n = 0; n < 15; n++) g.set(rng.int(0, 19), rng.int(0, 19), rng.int(0, 19), rng.range(0, 1) < 0.5 ? 100 : rng.int(-40, 15));
+      for (let n = 0; n < 10; n++) g.add(rng.int(0, 19), rng.int(0, 19), rng.int(0, 19), rng.int(-20, 20));
+      for (let n = 0; n < 5; n++) g.integrateRay({ x: rng.range(-0.9, 0.9), y: rng.range(0.1, 1.9), z: rng.range(-0.9, 0.9) }, { x: rng.range(-0.9, 0.9), y: rng.range(0.1, 1.9), z: rng.range(-0.9, 0.9) }, true);
+      if (round % 7 === 3) {
+        const i = rng.int(0, 19), j = rng.int(0, 19), k = rng.int(0, 19);
+        g.underside[g.idx(i, j, k)] = 1;
+        g.touchColumn(i, k);
+      }
+      if (round % 13 === 5) g.ageEvidence(0.5, 0);
+      g.version++; // force an update even without a class change
+      expect(Array.from(g.updateShadow())).toEqual(Array.from(full()));
+    }
+  });
 });
+

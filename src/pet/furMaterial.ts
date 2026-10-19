@@ -231,6 +231,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
     if (eye) addSocketFade(shader, eye.closed, eye.fill, eye.squint);
   };
   if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
-  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
+  // The shell height is a uniform: all shells share one GPU program (one compile, no program switches).
+  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${h < 0 ? 'attr' : 'shell'}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
   return m;
 }

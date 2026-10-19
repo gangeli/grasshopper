@@ -181,6 +181,9 @@ export class ArMode {
       // Some runtimes don't report enabledFeatures: try local-floor and fall back to local.
       this.useFloorSpace = enabled.length ? enabled.includes('local-floor') : await session.requestReferenceSpace('local-floor').then(() => true, () => false);
       r.xr.enabled = true;
+      // ?xrscale=0.5..1: fixed XR framebuffer scale (the governor scales the viewport within it).
+      const xrScale = Number(new URLSearchParams(location.search).get('xrscale'));
+      if (xrScale >= 0.25 && xrScale <= 1) r.xr.setFramebufferScaleFactor(xrScale);
       r.xr.setReferenceSpaceType(this.useFloorSpace ? 'local-floor' : 'local');
       this.stats.refSpace = this.useFloorSpace ? 'local-floor' : 'local';
       // Set the loop before the session: three.js then drives it from the XR
@@ -484,6 +487,8 @@ export class ArMode {
       let vpos: Vec3 | undefined;
       this.guard('viewer pose', () => {
         const vp = this.refSpace ? frame.getViewerPose(this.refSpace) : null;
+        // Render resolution from the quality governor (dynamic viewport scaling, where supported).
+        this.stage.quality.applyViewportScale(vp?.views);
         sample = classifyViewerPose(vp);
         if (sample === 'ok') {
           const m = vp!.transform.matrix;

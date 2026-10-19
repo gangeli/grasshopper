@@ -133,6 +133,7 @@ export class VoxelGrid {
     if (v > MAX_LO) v = MAX_LO;
     if (v < MIN_LO) v = MIN_LO;
     this.data[n] = v;
+    this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
   }
 
@@ -141,7 +142,36 @@ export class VoxelGrid {
     const n = this.idx(i, j, k);
     const before = this.data[n];
     this.data[n] = v;
+    this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
+  }
+
+  // --- Shadow-mask bookkeeping ----------------------------------------------------------
+  // The shadow mask (updateShadow) is a per-column function of data and
+  // underside. Every write marks its column, so a recompute only redoes the
+  // columns written since the last one (a depth frame touches a few
+  // thousand of 57,600). Code writing data / underside directly must call
+  // touchColumn() or touchAll().
+  private dirtyFlag: Uint8Array | null = null;
+  private dirtyList: Int32Array | null = null;
+  private dirtyCount = 0;
+  private allDirty = true;
+  private touch(n: number): void {
+    if (this.allDirty) return;
+    const layer = this.nx * this.nz;
+    const c = n % layer;
+    if (this.dirtyFlag![c]) return;
+    this.dirtyFlag![c] = 1;
+    if (this.dirtyCount < this.dirtyList!.length) this.dirtyList![this.dirtyCount++] = c;
+    else this.allDirty = true;
+  }
+  /** A direct write to data / underside in column (i, k). */
+  touchColumn(i: number, k: number): void {
+    if (i >= 0 && k >= 0 && i < this.nx && k < this.nz) this.touch(k * this.nx + i);
+  }
+  /** Bulk writes to data / underside: the next shadow update recomputes everything. */
+  touchAll(): void {
+    this.allDirty = true;
   }
 
   markObserved(x: number, z: number, radiusCells = 0): void {
@@ -221,6 +251,7 @@ export class VoxelGrid {
         if (nv > MAX_LO) nv = MAX_LO;
         if (nv < MIN_LO) nv = MIN_LO;
         data[q] = nv;
+        this.touch(q);
         if (cls(v) !== cls(nv)) this.version++;
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
@@ -261,6 +292,7 @@ export class VoxelGrid {
       if (v > OCC_THRESHOLD) this.data[n] = OCC_THRESHOLD + 1 + Math.round((v - OCC_THRESHOLD - 1) * factor);
       else if (v < 0) this.data[n] = Math.min(-1, Math.round(v * factor));
     }
+    this.touchAll();
     this.transient.clear();
     this.version++;
   }
@@ -358,32 +390,60 @@ export class VoxelGrid {
   private shadowVersion = -1;
   updateShadow(): Uint8Array {
     if (this.shadow && this.shadowVersion === this.version) return this.shadow;
-    const s = this.shadow ?? new Uint8Array(this.data.length);
-    // Walk all columns at once, layer by layer from the top: the same
-    // per-column scan, but in memory order (a column walk strides a whole
-    // layer per step and thrashes the cache on a phone).
     const layer = this.nx * this.nz;
-    const shadowing = (this._shadowCols ??= new Uint8Array(layer));
-    shadowing.fill(0);
+    if (!this.dirtyFlag) {
+      this.dirtyFlag = new Uint8Array(layer);
+      this.dirtyList = new Int32Array(Math.max(1024, layer >> 3));
+    }
+    const s = this.shadow ?? new Uint8Array(this.data.length);
     const data = this.data, under = this.underside;
-    for (let j = this.ny - 1; j >= 0; j--) {
-      const base = j * layer;
-      for (let c = 0; c < layer; c++) {
-        const n = base + c;
-        const v = data[n];
-        if (v > OCC_THRESHOLD) {
-          shadowing[c] = under[n] !== 1 ? 1 : 0;
-          s[n] = 0;
-        } else if (v < 0) {
-          shadowing[c] = 0;
-          s[n] = 0;
-        } else s[n] = shadowing[c];
+    if (this.allDirty || !this.shadow || this.shadowBuiltFor !== s) {
+      // Walk all columns at once, layer by layer from the top: the same
+      // per-column scan, but in memory order (a column walk strides a whole
+      // layer per step and thrashes the cache on a phone).
+      const shadowing = (this._shadowCols ??= new Uint8Array(layer));
+      shadowing.fill(0);
+      for (let j = this.ny - 1; j >= 0; j--) {
+        const base = j * layer;
+        for (let c = 0; c < layer; c++) {
+          const n = base + c;
+          const v = data[n];
+          if (v > OCC_THRESHOLD) {
+            shadowing[c] = under[n] !== 1 ? 1 : 0;
+            s[n] = 0;
+          } else if (v < 0) {
+            shadowing[c] = 0;
+            s[n] = 0;
+          } else s[n] = shadowing[c];
+        }
+      }
+    } else {
+      // Only the columns written since the last update.
+      for (let q = 0; q < this.dirtyCount; q++) {
+        const c = this.dirtyList![q];
+        let shadowing = 0;
+        for (let n = (this.ny - 1) * layer + c; n >= 0; n -= layer) {
+          const v = data[n];
+          if (v > OCC_THRESHOLD) {
+            shadowing = under[n] !== 1 ? 1 : 0;
+            s[n] = 0;
+          } else if (v < 0) {
+            shadowing = 0;
+            s[n] = 0;
+          } else s[n] = shadowing;
+        }
       }
     }
+    for (let q = 0; q < this.dirtyCount; q++) this.dirtyFlag[this.dirtyList![q]] = 0;
+    this.dirtyCount = 0;
+    this.allDirty = false;
     this.shadow = s;
+    this.shadowBuiltFor = s;
     this.shadowVersion = this.version;
     return s;
   }
+  /** The mask buffer the dirty tracking is relative to (adoptShadow may swap in another). */
+  private shadowBuiltFor: Uint8Array | null = null;
   private _shadowCols: Uint8Array | null = null;
 
   /**
@@ -395,6 +455,8 @@ export class VoxelGrid {
     if (mask.length !== this.data.length) return;
     this.shadow = mask;
     this.shadowVersion = version;
+    // Built from a snapshot elsewhere: the next local update recomputes all of it.
+    this.allDirty = true;
   }
 
   /** Same rule as updateShadow, for one voxel (walks its column from the top; no full-grid pass). */
