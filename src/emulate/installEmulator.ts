@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { XRDevice, metaQuest3, NativePlane, NativeMesh, XRRigidTransform, type XRDeviceConfig } from 'iwer';
+import { XRDevice, XRFrame, metaQuest3, NativePlane, NativeMesh, XRRigidTransform, type XRDeviceConfig } from 'iwer';
 import { roomFromName, type SimRoom } from '../sim/SimRoom';
 import { buildPlanes, SimSensor, worldNoise } from '../sim/SimSensor';
 
@@ -10,12 +10,18 @@ import { buildPlanes, SimSensor, worldNoise } from '../sim/SimSensor';
  * headless browser. Two device profiles:
  *   ?emulate=phone  — handheld AR: hit-test, planes, CPU depth, dom-overlay
  *   ?emulate=quest  — headset: planes + room mesh, controllers
+ *   &depth=0 / &depth=zero — phone without the depth API / with empty depth frames
+ * Fault injection for tests: __emu.setTracking / setVisibility / setAnchorDrift.
  * The room is also rendered behind the app canvas as a fake camera feed.
  */
 type Profile = 'phone' | 'quest';
 
 export async function installEmulator(roomName: string, profile: Profile = (new URLSearchParams(location.search).get('emulate') as Profile) === 'quest' ? 'quest' : 'phone') {
   const room = roomFromName(roomName);
+  // ?depth=0: a phone without the depth API; ?depth=zero: depth frames that are all empty.
+  const dq = new URLSearchParams(location.search).get('depth');
+  const depthMode = dq === '0' ? 'off' : dq === 'zero' ? 'zero' : 'on';
+  SimRoomSEM.depthMode = depthMode;
   const config: XRDeviceConfig =
     profile === 'quest'
       ? metaQuest3
@@ -23,7 +29,7 @@ export async function installEmulator(roomName: string, profile: Profile = (new 
           ...metaQuest3,
           name: 'Emulated AR phone',
           supportedSessionModes: ['inline', 'immersive-ar'],
-          supportedFeatures: ['viewer', 'local', 'local-floor', 'hit-test', 'plane-detection', 'depth-sensing', 'anchors', 'dom-overlay'],
+          supportedFeatures: ['viewer', 'local', 'local-floor', 'hit-test', 'plane-detection', ...(depthMode === 'off' ? [] : ['depth-sensing' as const]), 'anchors', 'dom-overlay'],
         };
   const device = new XRDevice(config, { stereoEnabled: false, fovy: 1.05 });
   device.position.set(0, 1.45, 0.6);
@@ -40,13 +46,97 @@ export async function installEmulator(roomName: string, profile: Profile = (new 
       device.position.set(x, y, z);
       setYawPitch(device, yaw, pitch);
     },
-    /** Fire an XR select (a screen tap / trigger pull). */
+    /**
+     * Fire an XR select (a screen tap / trigger pull). Press and release are
+     * held for a few XR frames each: IWER's timed select can press and release
+     * within one frame when the frame rate is low (a loaded CI machine), and
+     * the input never sees the edge.
+     */
     async select() {
-      await device.remote.dispatch('select', { device: profile === 'quest' ? 'controller-right' : 'controller-right' } as never);
+      const c = device.controllers.right;
+      if (!c) return void (await device.remote.dispatch('select', { device: 'controller-right' } as never));
+      c.updateButtonValue('trigger', 1);
+      await xrFrames(3);
+      c.updateButtonValue('trigger', 0);
+      await xrFrames(3);
+    },
+    /**
+     * Fault injection for tracking: 'lost' → getViewerPose() returns null,
+     * 'limited' → orientation-only pose (emulatedPosition), 'nan' → a pose
+     * whose matrices are NaN (a broken runtime), 'ok' → normal.
+     */
+    setTracking(mode: TrackingFault) {
+      faults.tracking = mode;
+    },
+    /** Session visibility: 'visible-blurred' (system UI on top) or 'hidden'. */
+    setVisibility(state: 'visible' | 'visible-blurred' | 'hidden') {
+      device.updateVisibilityState(state);
+    },
+    /** Make every anchor appear offset by (x, y, z) metres: tracking drift as the anchor sees it. */
+    setAnchorDrift(x: number, y: number, z: number) {
+      faults.anchorDrift = { x, y, z };
     },
   };
+  installFaults();
   (window as unknown as { __emu: typeof emu }).__emu = emu;
   return emu;
+}
+
+/** XR frames rendered so far (counted by the environment module). */
+let xrFrameCount = 0;
+async function xrFrames(n: number, timeoutMs = 10_000) {
+  const target = xrFrameCount + n, t0 = performance.now();
+  while (xrFrameCount < target && performance.now() - t0 < timeoutMs) await new Promise((r) => setTimeout(r, 10));
+}
+
+type TrackingFault = 'ok' | 'lost' | 'limited' | 'nan';
+const faults = { tracking: 'ok' as TrackingFault, anchorDrift: { x: 0, y: 0, z: 0 } };
+let faultsInstalled = false;
+
+/** Wrap IWER's frame so tests can inject tracking faults and anchor drift. */
+function installFaults() {
+  if (faultsInstalled) return;
+  faultsInstalled = true;
+  const proto = XRFrame.prototype as unknown as {
+    getViewerPose(space: unknown): unknown;
+    getPose(space: unknown, base: unknown): unknown;
+    trackedAnchors: Set<{ anchorSpace: unknown }>;
+  };
+  const getViewerPose = proto.getViewerPose;
+  proto.getViewerPose = function (this: typeof proto, space: unknown) {
+    const mode = faults.tracking;
+    if (mode === 'lost') return null;
+    const pose = getViewerPose.call(this, space) as { views: object[] } | null;
+    if (!pose || mode === 'ok') return pose;
+    if (mode === 'limited') return Object.create(pose, { emulatedPosition: { value: true } });
+    // 'nan': same objects (IWER checks their private state) with poisoned transforms.
+    const nan = new Float32Array(16).fill(NaN);
+    const bad = { matrix: nan, position: { x: NaN, y: NaN, z: NaN, w: 1 }, orientation: { x: NaN, y: NaN, z: NaN, w: NaN }, inverse: { matrix: nan } };
+    return Object.create(pose, {
+      transform: { value: bad },
+      emulatedPosition: { value: false },
+      views: { value: pose.views.map((v) => Object.create(v, { transform: { value: bad } })) },
+    });
+  };
+  const getPose = proto.getPose;
+  proto.getPose = function (this: typeof proto, space: unknown, base: unknown) {
+    const pose = getPose.call(this, space, base) as { transform: { matrix: Float32Array }; emulatedPosition: boolean } | null;
+    const d = faults.anchorDrift;
+    if (!pose) return pose;
+    let isAnchor = false;
+    try {
+      for (const a of this.trackedAnchors) if (a.anchorSpace === space) isAnchor = true;
+    } catch {
+      return pose;
+    }
+    if (!isAnchor) return pose;
+    const m = Float32Array.from(pose.transform.matrix);
+    m[12] += d.x;
+    m[13] += d.y;
+    m[14] += d.z;
+    // IWER marks anchor spaces as emulated; a real runtime reports a tracked anchor as not emulated.
+    return { transform: { matrix: m }, emulatedPosition: false };
+  };
 }
 
 function setYawPitch(device: XRDevice, yaw: number, pitch: number) {
@@ -58,6 +148,7 @@ function setYawPitch(device: XRDevice, yaw: number, pitch: number) {
 class SimRoomSEM {
   static room: SimRoom;
   static profile: Profile;
+  static depthMode: 'on' | 'off' | 'zero' = 'on';
   readonly version = 'hopper-sim-1';
   planesVisible = false;
   boundingBoxesVisible = false;
@@ -106,6 +197,7 @@ class SimRoomSEM {
   }
 
   render() {
+    xrFrameCount++;
     const w = window.innerWidth, h = window.innerHeight;
     if (this.canvas.width !== w || this.canvas.height !== h) this.renderer.setSize(w, h, false);
     const p = this.device.position, q = this.device.quaternion;
@@ -144,6 +236,7 @@ class SimRoomSEM {
     const eye = new THREE.Vector3().setFromMatrixPosition(camWorld);
     const fwd = new THREE.Vector3(0, 0, -1).transformDirection(camWorld);
     const data = new Float32Array(w * h);
+    if (SimRoomSEM.depthMode === 'zero') return { data: data.buffer, width: w, height: h, rawValueToMeters: 1 };
     const p = new THREE.Vector3();
     for (let r = 0; r < h; r++)
       for (let c = 0; c < w; c++) {

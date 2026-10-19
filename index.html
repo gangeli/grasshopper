@@ -38,6 +38,8 @@
   .bubble.show { opacity: 1; transform: none; }
   .status { color: #fff; font-size: 14px; font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
   .hud-corner { position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 12px; display: flex; gap: 6px; align-items: center; }
+  .hud-tools { position: absolute; top: calc(12px + env(safe-area-inset-top)); left: 12px; display: flex; gap: 6px; align-items: center; }
+  .alert { max-width: min(520px, calc(100vw - 32px)); background: #b8462f; color: #fff; padding: 8px 14px; border-radius: 14px; font-weight: 700; text-align: center; box-shadow: var(--shadow); }
   .hud-bottom { position: absolute; left: 16px; right: 16px; bottom: calc(22px + env(safe-area-inset-bottom)); display: flex; gap: 10px; justify-content: center; }
   .cover { position: absolute; inset: 0; background: radial-gradient(circle at 50% 40%, #2f3f4a, #10171c 70%); color: var(--paper);
     flex-direction: column; align-items: center; justify-content: center; pointer-events: auto; }

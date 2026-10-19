@@ -2,12 +2,15 @@
  * DOM HUD. In AR it is the WebXR dom-overlay root, so the same buttons work
  * on a phone in AR and in the simulator. Pure DOM, no framework.
  */
-export type HudAction = 'play' | 'hint' | 'again' | 'exit' | 'debug' | 'difficulty';
+export type HudAction = 'play' | 'hint' | 'again' | 'exit' | 'debug' | 'difficulty' | 'move' | 'rescan';
 
 export class Hud {
   readonly root: HTMLElement;
   private bubble: HTMLElement;
   private status: HTMLElement;
+  private alertEl: HTMLElement;
+  private tools: HTMLElement;
+  private moveBtn: HTMLButtonElement;
   private primary: HTMLButtonElement;
   private secondary: HTMLButtonElement;
   private cover: HTMLElement;
@@ -28,7 +31,11 @@ export class Hud {
     const top = el('div', 'hud-top');
     this.bubble = el('div', 'bubble');
     this.status = el('div', 'status');
-    top.append(this.bubble, this.status);
+    // Persistent warning (tracking lost, paused, repeated errors): unlike the
+    // bubble it stays until the condition clears.
+    this.alertEl = el('div', 'alert');
+    this.alertEl.setAttribute('role', 'status');
+    top.append(this.alertEl, this.bubble, this.status);
     const corner = el('div', 'hud-corner');
     const exit = button('✕', 'icon', () => this.fire('exit'));
     exit.title = 'Exit';
@@ -42,6 +49,14 @@ export class Hud {
     const dbg = button('map', 'chip', () => this.fire('debug'));
     dbg.title = 'Show what Hopper has mapped';
     corner.append(this.diffBtn, dbg, exit);
+    // AR escape hatches: re-place Hopper (fixes a mis-tapped floor) and
+    // forget the map when it has visibly gone wrong.
+    this.tools = el('div', 'hud-tools');
+    this.moveBtn = button('move', 'chip', () => this.fire('move'));
+    this.moveBtn.title = 'Move Hopper: tap the floor to place again';
+    const rescan = button('↻ rescan', 'chip', () => this.fire('rescan'));
+    rescan.title = 'Forget the map and scan the room again';
+    this.tools.append(this.moveBtn, rescan);
     const bottom = el('div', 'hud-bottom');
     this.primary = button('Play hide & seek', 'primary', () => this.fire(this.primary.dataset.action as HudAction));
     this.primary.dataset.action = 'play';
@@ -55,7 +70,9 @@ export class Hud {
     this.cardText = el('div', 'card-text');
     this.card.append(this.cardText, button('Play again', 'primary', () => this.fire('again')));
     this.reticleHint = el('div', 'place-hint', 'Point at the floor and tap to place Hopper');
-    this.root.append(top, corner, bottom, this.cover, this.card, this.reticleHint);
+    this.root.append(top, corner, this.tools, bottom, this.cover, this.card, this.reticleHint);
+    this.showTools(false);
+    this.setAlert(null);
     this.showCover(false);
     this.showCard(null);
     this.showPlaceHint(false);
@@ -73,6 +90,22 @@ export class Hud {
     this.bubble.classList.add('show');
     clearTimeout(this.bubbleTimer);
     this.bubbleTimer = window.setTimeout(() => this.bubble.classList.remove('show'), seconds * 1000);
+  }
+
+  /** Show (or clear, with null) the persistent warning line. */
+  setAlert(text: string | null) {
+    const t = text ?? '';
+    if (this.alertEl.textContent !== t) this.alertEl.textContent = t;
+    this.alertEl.style.display = text ? '' : 'none';
+  }
+
+  get alertText(): string {
+    return this.alertEl.style.display === 'none' ? '' : this.alertEl.textContent ?? '';
+  }
+
+  showTools(on: boolean, moveLabel = 'move') {
+    this.tools.style.display = on ? '' : 'none';
+    if (this.moveBtn.textContent !== moveLabel) this.moveBtn.textContent = moveLabel;
   }
 
   setStatus(text: string) {
