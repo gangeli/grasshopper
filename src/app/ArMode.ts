@@ -53,8 +53,9 @@ export class ArMode {
   private refSpace: XRReferenceSpace | null = null;
   private useFloorSpace = false;
   private frameNo = 0;
-  private planeTimes = new Map<XRPlane, number>();
-  private meshTimes = new Map<XRMesh, number>();
+  // Weak: the device drops plane/mesh objects as it merges and replaces them.
+  private planeTimes = new WeakMap<XRPlane, number>();
+  private meshTimes = new WeakMap<XRMesh, number>();
   private lastHit: Hit | null = null;
   private ui: GameUI;
   private lastT = 0;
@@ -688,12 +689,25 @@ export class ArMode {
       this.stack.world.ingestPlane({ id: `p${planeId(plane)}`, polygon, normal: { x: n.x, y: n.y, z: n.z }, label });
     }
     this.planeFloorY = floorLabelled ?? lowest;
+    // Surfaces the device no longer reports are forgotten (checked now and then; cheap).
+    if (++this.surfaceSweep % 60 === 0) {
+      const live = new Set<string>();
+      for (const plane of planes) live.add(`p${planeId(plane)}`);
+      this.stack.world.forgetSurfaces({ planes: live });
+    }
   }
+  private surfaceSweep = 0;
+  private meshSweep = 0;
 
   private ingestMeshes(frame: XRFrame) {
     const meshes = (frame as unknown as { detectedMeshes?: Set<XRMesh> }).detectedMeshes;
     if (!meshes) return;
     this.stats.meshes = meshes.size;
+    if (++this.meshSweep % 60 === 0) {
+      const live = new Set<string>();
+      for (const mesh of meshes) live.add(`m${planeId(mesh)}`);
+      this.stack.world.forgetSurfaces({ meshes: live });
+    }
     for (const mesh of meshes) {
       if (this.meshTimes.get(mesh) === mesh.lastChangedTime) continue;
       const pose = frame.getPose(mesh.meshSpace, this.refSpace!);

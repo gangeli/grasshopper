@@ -147,7 +147,9 @@ export class Stage {
     this.debugBuiltEpoch = stack.world.epoch;
     for (const c of [...this.debugGroup.children]) {
       this.debugGroup.remove(c);
-      (c as THREE.Points).geometry.dispose();
+      const o = c as THREE.Mesh;
+      o.geometry.dispose();
+      (o.material as THREE.Material).dispose();
     }
     const pts: number[] = [], cols: number[] = [];
     const col = new THREE.Color();
