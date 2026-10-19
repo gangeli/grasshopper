@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BONES } from '../skeleton';
-import { buildCreatureSculpt, FUR_LENGTH } from './creature';
+import { buildCreatureSculpt, EYE, EYE_RADIUS, FUR_LENGTH } from './creature';
 import type { Region } from './sdf';
 import { surfaceNets } from './surfaceNets';
 
@@ -31,6 +31,23 @@ const smooth = (a: number, b: number, x: number) => {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
 };
+
+/**
+ * SDF ambient occlusion at a surface point: march a few steps out along the
+ * normal; wherever the field is closer than the step, something is nearby.
+ * Returns 1 (open) .. 0 (fully occluded).
+ */
+function occlusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+  let occ = 0, w = 1, wsum = 0;
+  for (let i = 0; i < 5; i++) {
+    const h = 0.003 + 0.0055 * i;
+    const d = S.d(x + nx * h, y + ny * h, z + nz * h);
+    occ += w * Math.max(0, Math.min(1, (h - d) / h));
+    wsum += w;
+    w *= 0.72;
+  }
+  return Math.max(0, Math.min(1, 1 - 1.6 * (occ / wsum)));
+}
 
 const boneIndex = new Map(BONES.map(([n], i) => [n as string, i]));
 
@@ -90,7 +107,16 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     const rw = (r: Region) => att.regionWeights.get(r) ?? 0;
     let fl = 0;
     for (const [r, w] of att.regionWeights) fl += FUR_LENGTH[r] * w;
-    furLen[v] = fl;
+    // Around the eye sockets the fur gets short and the skin a little darker:
+    // a clean soft "eyeliner" instead of hairs stabbing into the eyeball.
+    const eyeD = Math.min(
+      Math.hypot(x - EYE.L[0], (y - EYE.L[1]) / 1.08, z - EYE.L[2]),
+      Math.hypot(x - EYE.R[0], (y - EYE.R[1]) / 1.08, z - EYE.R[2]),
+    ) / EYE_RADIUS;
+    const rim = 1 - smooth(1.0, 1.42, eyeD);
+    furLen[v] = fl * (1 - 0.85 * rim);
+    // Wispy fluff inside the ear cups.
+    if (att.region === 'ear') furLen[v] *= 1 + 0.9 * smooth(0.2, 0.7, 0.6 * ny + 0.6 * nz);
     // --- colour ---
     c.copy(cBody);
     // Subtle mottling so it never looks like flat plastic.
@@ -116,11 +142,15 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     if (att.region === 'ear') {
       const inner = 0.6 * ny + 0.6 * nz;
       c.lerp(cDark, 0.5 * smooth(-0.1, -0.6, inner));
-      c.lerp(cEar, 0.9 * smooth(0.15, 0.55, inner));
+      c.lerp(cEar, 0.85 * smooth(0.15, 0.55, inner));
+      // Deeper, warmer pink down in the cup.
+      c.lerp(cBlush, 0.3 * smooth(0.5, 0.9, inner));
     }
     // Paws: cream soles, pink beans.
     if (att.region === 'foot' && ny < -0.4) c.lerp(cBelly, 0.85);
-    if ((att.region === 'toe' || att.region === 'finger') && ny < 0.1) c.lerp(cPink, 0.7);
+    // Pink beans only underneath (seen when it lifts a paw), not as painted tips.
+    if (att.region === 'toe' || att.region === 'finger') c.lerp(cPink, 0.75 * smooth(-0.2, -0.6, ny));
+    if (att.region === 'hand') c.lerp(cPink, 0.45 * smooth(-0.45, -0.8, ny));
     if (att.region === 'hand' && nz > 0.4) c.lerp(cBelly, 0.4);
     // Tail stripes and a dark tuft.
     if (att.region === 'tail') {
@@ -128,6 +158,12 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
       if (st > 0.35 && ny + -nz > -0.2) c.lerp(cDark, 0.6);
     }
     if (att.region === 'tuft') c.lerp(cDark, 0.7);
+    // Socket liner.
+    c.lerp(cDark, 0.22 * rim).multiplyScalar(1 - 0.18 * rim);
+    // Baked ambient occlusion: creases (armpits, under the chin, between the
+    // toes, ear roots, eye sockets) get darker, like dense fur self-shadowing.
+    const ao = occlusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
+    c.multiplyScalar(0.5 + 0.5 * ao);
     // Tiny brightness variation.
     const varn = 0.94 + 0.12 * vnoise(x * 300, y * 300, z * 300);
     color[v * 3] = c.r * varn;

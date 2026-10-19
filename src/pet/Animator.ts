@@ -566,7 +566,10 @@ export class Animator {
       set(`ear${side}` as BoneName, 0, 0, s * (-P.earLift * 0.5 + ear * 0.05));
       // Wings: fold back, spread out, flap.
       const flap = P.wingFlap * Math.sin(this.time * 55) * 0.6;
-      set(`wing${side}` as BoneName, 0.1 - P.wingSpread * 0.3, s * (P.wingSpread * 0.9 + flap), s * (P.wingSpread * 0.4 + flap * 0.5));
+      // At rest the wings lie folded back along the shoulders. Spreading raises
+      // them in the plane of the back (so they stay face-on and peek above the
+      // shoulders) with a little outward swing.
+      set(`wing${side}` as BoneName, 0.1 - P.wingSpread * 0.3, -s * (P.wingSpread * 0.35 + flap * 0.3), s * (P.wingSpread * 0.6 + flap * 0.7));
     }
     // Tail chain: curl, lift and sway distributed along the bones, with spring lag.
     for (let q = 0; q < 6; q++) {
@@ -585,7 +588,7 @@ export class Animator {
     // Upper lid: a hemispherical shell that rotates from tucked back (open)
     // to covering the front of the eye (closed). Lower lid rises for squints.
     const up = THREE.MathUtils.lerp(1.5, -1.65, clamp(open + happy * 0.5, 0, 1)) - (open > 1 ? (open - 1) * 0.6 : 0);
-    const lo = THREE.MathUtils.lerp(1.65, 0.15, happy);
+    const lo = THREE.MathUtils.lerp(1.65, 0.62, happy);
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
     const ps = clamp(P.pupilSize, 0.5, 1.5);

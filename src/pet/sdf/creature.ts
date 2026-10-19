@@ -1,5 +1,5 @@
 import { BONES, type BoneName, type V } from '../skeleton';
-import { alignX, carve, ellipsoid, roundCone, Sculpt, type BoneWeight, type Region } from './sdf';
+import { alignX, carve, ellipsoid, ring, roundCone, Sculpt, type BoneWeight, type Region } from './sdf';
 
 /**
  * Hopper's sculpt: one continuous body built from smoothly blended shapes on
@@ -14,6 +14,8 @@ export const EYE: Record<'L' | 'R', V> = { L: [0.03, 0.247, 0.066], R: [-0.03, 0
 export const EYE_RADIUS = 0.0235;
 export const NOSE: V = [0, 0.228, 0.097];
 export const MOUTH: V = [0, 0.213, 0.093];
+/** Lid fold ring around each eye, in eye radii: offset along the eye axis, ring radius, tube radius. */
+export const LID_FOLD = { offset: 0.4, R: 1.03, r: 0.25 };
 
 /** Torso weights blend hips → spine → chest → neck by height. */
 function torsoBones(_x: number, y: number): BoneWeight[] {
@@ -69,7 +71,15 @@ export function buildCreatureSculpt(): Sculpt {
   ] as const) {
     const base = P[`ear${side}`];
     const dir: V = [0.8 * s, 0.42, -0.42];
-    S.add(ellipsoid('ear', add(base, [0.022 * s, 0.012, -0.012]), [0.036, 0.0075, 0.017], `ear${side}`, 0.014, alignX(dir, [0, 1, 0.3])));
+    const rot = alignX(dir, [0, 1, 0.3]);
+    const c = add(base, [0.022 * s, 0.012, -0.012]);
+    // Leaf-shaped fin: a broad blade plus a narrower one reaching to a soft point.
+    S.add(ellipsoid('ear', c, [0.036, 0.0075, 0.017], `ear${side}`, 0.014, rot));
+    const X: V = [rot[0], rot[1], rot[2]], Y: V = [rot[3], rot[4], rot[5]];
+    const at = (x: number, y: number): V => [c[0] + X[0] * x + Y[0] * y, c[1] + X[1] * x + Y[1] * y, c[2] + X[2] * x + Y[2] * y];
+    S.add(ellipsoid('ear', at(0.02, -0.0005), [0.026, 0.0055, 0.0095], `ear${side}`, 0.008, rot));
+    // Cupped inner face, leaving a soft rim (the pink side faces up and forward).
+    S.add(carve(ellipsoid('ear', at(0.008, 0.0068), [0.028, 0.0042, 0.0112], `ear${side}`, 0, rot), 0.004));
   }
   // ---- Neck & torso -------------------------------------------------------------------------------
   S.add(
@@ -113,6 +123,14 @@ export function buildCreatureSculpt(): Sculpt {
     const e = EYE[side];
     S.add(carve(ellipsoid('head', add(e, [0, 0, 0.004]), [0.0215, 0.0235, 0.017], 'head', 0), 0.007));
   }
+  // Soft lid folds wrapping the eyeballs, so from the side the eye sits in the
+  // face rather than bulging out of it like a ball.
+  for (const side of ['L', 'R'] as const) {
+    const s = side === 'L' ? 1 : -1;
+    const ax: V = [0.2955 * s, 0.0763, 0.9522];
+    const o = EYE_RADIUS * LID_FOLD.offset;
+    S.add(ring('brow', add(EYE[side], [ax[0] * o, ax[1] * o, ax[2] * o]), ax, EYE_RADIUS * LID_FOLD.R, EYE_RADIUS * LID_FOLD.r, 'head', 0.006, 1.08));
+  }
   return S;
 }
 
@@ -122,7 +140,7 @@ export const FUR_LENGTH: Record<Region, number> = {
   cheek: 0.0075,
   muzzle: 0.0011,
   brow: 0.003,
-  ear: 0.0018,
+  ear: 0.0028,
   neck: 0.007,
   body: 0.006,
   belly: 0.0065,

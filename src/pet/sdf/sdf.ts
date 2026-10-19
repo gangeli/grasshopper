@@ -105,6 +105,35 @@ export function roundCone(region: Region, a: V3, b: V3, ra: number, rb: number, 
   };
 }
 
+/**
+ * Torus ring around `axis` through centre c (major radius R, tube radius r);
+ * `squash` stretches the ring along the frame's up direction (for oval eyes).
+ */
+export function ring(region: Region, c: V3, axis: V3, R: number, r: number, bone: string, k = 0.01, squash = 1): Prim {
+  const al = Math.hypot(...axis);
+  const ax = axis.map((v) => v / al) as V3;
+  // Frame: u = up × axis, v = axis × u.
+  let ux = ax[2], uy = 0, uz = -ax[0];
+  const ul = Math.hypot(ux, uy, uz);
+  ux /= ul;
+  uz /= ul;
+  const vx = ax[1] * uz - ax[2] * uy, vy = ax[2] * ux - ax[0] * uz, vz = ax[0] * uy - ax[1] * ux;
+  const pad = R * squash + r + k;
+  return {
+    region,
+    k,
+    min: [c[0] - pad, c[1] - pad, c[2] - pad],
+    max: [c[0] + pad, c[1] + pad, c[2] + pad],
+    d(x, y, z) {
+      const px = x - c[0], py = y - c[1], pz = z - c[2];
+      const h = px * ax[0] + py * ax[1] + pz * ax[2];
+      const a = px * ux + py * uy + pz * uz, b = (px * vx + py * vy + pz * vz) / squash;
+      return Math.hypot(Math.hypot(a, b) - R, h) - r;
+    },
+    bones: () => [{ bone, w: 1 }],
+  };
+}
+
 export function carve(p: Prim, k = 0.006): Prim {
   return { ...p, carve: true, k };
 }
@@ -120,18 +149,59 @@ export function smax(a: number, b: number, k: number): number {
   return -smin(-a, -b, k);
 }
 
+/** Spatial bucket size and the distance up to which the field is exact (m). */
+const GRID = 0.01;
+const MARGIN = 0.03;
+
 /** A sculpt: an ordered list of primitives combined left to right. */
 export class Sculpt {
   readonly prims: Prim[] = [];
+  private grid: { min: V3; n: [number, number, number]; cells: Prim[][] } | null = null;
   add(...p: Prim[]): this {
     this.prims.push(...p);
+    this.grid = null;
     return this;
+  }
+
+  /**
+   * Primitives that can matter near p: a uniform grid of buckets holding, in
+   * order, every primitive whose (k-padded) bounds are within MARGIN of the
+   * cell (Chebyshev distance). Distances below MARGIN are unaffected, which
+   * is all meshing, attribution and AO look at; far away the field reads as
+   * MARGIN (outside). null = nothing nearby.
+   */
+  private near(x: number, y: number, z: number): Prim[] | null {
+    const g = (this.grid ??= this.buildGrid());
+    const i = Math.floor((x - g.min[0]) / GRID), j = Math.floor((y - g.min[1]) / GRID), k = Math.floor((z - g.min[2]) / GRID);
+    if (i < 0 || j < 0 || k < 0 || i >= g.n[0] || j >= g.n[1] || k >= g.n[2]) return null;
+    const c = g.cells[(k * g.n[1] + j) * g.n[0] + i];
+    return c.length ? c : null;
+  }
+
+  private buildGrid() {
+    const lo: V3 = [Infinity, Infinity, Infinity], hi: V3 = [-Infinity, -Infinity, -Infinity];
+    for (const p of this.prims)
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a], p.min[a] - MARGIN);
+        hi[a] = Math.max(hi[a], p.max[a] + MARGIN);
+      }
+    const n = [0, 1, 2].map((a) => Math.max(1, Math.ceil((hi[a] - lo[a]) / GRID))) as [number, number, number];
+    const cells: Prim[][] = [];
+    for (let k = 0; k < n[2]; k++)
+      for (let j = 0; j < n[1]; j++)
+        for (let i = 0; i < n[0]; i++) {
+          const cmin = [lo[0] + i * GRID, lo[1] + j * GRID, lo[2] + k * GRID];
+          cells.push(this.prims.filter((p) => [0, 1, 2].every((a) => p.min[a] - MARGIN <= cmin[a] + GRID && p.max[a] + MARGIN >= cmin[a])));
+        }
+    return { min: lo, n, cells };
   }
 
   /** Combined distance. */
   d(x: number, y: number, z: number): number {
+    const prims = this.near(x, y, z);
+    if (!prims) return MARGIN;
     let d = 1e9;
-    for (const p of this.prims) {
+    for (const p of prims) {
       // Culling: bounds are padded by k, so the primitive is at least
       // (distance to the box + k) away. It can only change the blend when that
       // is within k of the running value, so skip it otherwise. A looser test
@@ -141,7 +211,7 @@ export class Sculpt {
       const v = p.d(x, y, z);
       d = p.carve ? smax(d, -v, p.k) : smin(d, v, p.k);
     }
-    return d;
+    return Math.min(d, MARGIN);
   }
 
   /**
@@ -151,7 +221,7 @@ export class Sculpt {
   attribution(x: number, y: number, z: number, sharpness = 0.005): { bones: BoneWeight[]; region: Region; regionWeights: Map<Region, number> } {
     const ds: { p: Prim; d: number }[] = [];
     let dmin = Infinity;
-    for (const p of this.prims) {
+    for (const p of this.near(x, y, z) ?? []) {
       if (p.carve) continue;
       const pad = 0.03;
       if (x < p.min[0] - pad || y < p.min[1] - pad || z < p.min[2] - pad || x > p.max[0] + pad || y > p.max[1] + pad || z > p.max[2] + pad) continue;

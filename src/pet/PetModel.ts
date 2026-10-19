@@ -34,7 +34,7 @@ export interface PetPalette {
 export const PALETTES: Record<string, PetPalette> = {
   mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0x9ff3ff },
   plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0 },
-  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x7a3a12, wing: 0xffe39a },
+  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffe39a },
 };
 
 export interface PetRig {
@@ -109,7 +109,19 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // --- Materials --------------------------------------------------------------
   const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
   const glowMaterial = new THREE.MeshStandardMaterial({ color: pal.glow, emissive: pal.glow, emissiveIntensity: 0.9, roughness: 0.3 });
-  const sclera = new THREE.MeshPhysicalMaterial({ color: 0xf7f4ee, roughness: 0.35, clearcoat: 0.6 });
+  // Glowing orbs are brighter in the middle than at the rim, which gives them volume.
+  glowMaterial.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+      float orb = abs(dot(normalize(vNormal), normalize(vViewPosition)));
+      totalEmissiveRadiance *= mix(0.35, 1.2, orb * orb);
+      diffuseColor.rgb *= mix(0.6, 1.0, orb);`,
+    );
+  };
+  glowMaterial.customProgramCacheKey = () => 'glow-orb';
+  const lidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.1);
+  const sclera = scleraMaterial(lidColor);
   const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye), roughness: 0.4 });
   const pupilMat = new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.3 });
   const corneaMat = new THREE.MeshPhysicalMaterial({
@@ -123,21 +135,23 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     envMapIntensity: 2.2,
   });
   const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const lidMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.1), map: furTexture(), roughness: 0.95 });
-  // The lower lid sits in the cream face mask.
-  const lowerLidMat = lidMat.clone();
-  lowerLidMat.color = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.55);
+  // Lids are vertex-coloured (darker towards the lash line) and get their own fur shells.
+  const lidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
+  const lowerLidMat = lidMat;
+  const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.3);
   const lashMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(pal.bodyDark).multiplyScalar(0.35), roughness: 0.7 });
   const noseMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(pal.bodyDark).lerp(new THREE.Color(0x5c2a36), 0.88), roughness: 0.32, clearcoat: 0.5 });
   const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1420, roughness: 0.6 });
-  const tongueMat = new THREE.MeshStandardMaterial({ color: 0xff7a8c, roughness: 0.5 });
+  // The open mouth is a painted cavity (dark palate, tongue, little fangs, lip rim).
+  const tongueMat = new THREE.MeshStandardMaterial({ map: mouthTexture(), roughness: 0.45 });
+  const hornMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42 });
   const toothMat = new THREE.MeshStandardMaterial({ color: 0xfffbf0, roughness: 0.3 });
   const blushMat = new THREE.MeshBasicMaterial({ color: pal.blush, map: radialTexture(), transparent: true, opacity: 0.55, depthWrite: false });
   const wingMat = new THREE.MeshPhysicalMaterial({
     color: pal.wing,
-    map: wingTexture(),
+    map: wingTexture(new THREE.Color(pal.bodyDark)),
     transparent: true,
-    opacity: 0.6,
+    opacity: 0.95,
     roughness: 0.15,
     side: THREE.DoubleSide,
     iridescence: 1,
@@ -145,7 +159,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     depthWrite: false,
   });
   const clawMat = new THREE.MeshStandardMaterial({ color: pal.belly, roughness: 0.4 });
-  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lowerLidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, clawMat];
+  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, clawMat, hornMat];
 
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark);
 
@@ -183,9 +197,11 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
       tubeGeometry(
         [abs[`ant${side}0`].clone().add(new THREE.Vector3(0, -0.012, -0.004)), abs[`ant${side}1`], abs[`ant${side}2`], abs[`ant${side}3`]],
         [boneIndex(`ant${side}0`), boneIndex(`ant${side}1`), boneIndex(`ant${side}2`)],
-        (t) => THREE.MathUtils.lerp(0.0055, 0.0028, t),
-        (t) => cBody.clone().lerp(cDark, 0.2 + t * 0.5),
+        // Beaded like an insect's antenna, darkening towards the tip.
+        (t) => THREE.MathUtils.lerp(0.0056, 0.0029, t) * (0.84 + 0.2 * Math.sqrt(Math.abs(Math.sin(Math.PI * t * 9)))),
+        (t) => cBody.clone().lerp(cDark, 0.15 + t * 0.6).multiplyScalar(0.8 + 0.2 * Math.sqrt(Math.abs(Math.sin(Math.PI * t * 9)))),
         8,
+        80,
       ),
       skin,
       `antenna${side}`,
@@ -202,25 +218,36 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // Little horn nubs behind the antennae.
   for (const s of [1, -1]) {
     const { p, n } = surfaceAt(0.036 * s, 0.3, -0.03);
-    const horn = new THREE.Mesh(new THREE.ConeGeometry(0.0075, 0.02, 12), clawMat);
+    const horn = new THREE.Mesh(hornGeometry(cDark, new THREE.Color(pal.belly)), hornMat);
+    horn.castShadow = true;
     horn.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n.clone().add(new THREE.Vector3(0, 0.6, -0.5)).normalize());
-    attach('head', horn, p.clone().addScaledVector(n, 0.005));
+    attach('head', horn, p.clone().addScaledVector(n, -0.002));
   }
 
   // Antenna tip bulbs.
+  const haloMat = new THREE.SpriteMaterial({ map: radialTexture(), color: pal.glow, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false });
+  materials.push(haloMat);
   for (const side of ['L', 'R'] as const) {
     const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.0105, 18, 12), glowMaterial);
     bulb.name = `bulb${side}`;
     attach(`ant${side}3`, bulb, abs[`ant${side}3`].clone().add(new THREE.Vector3(side === 'L' ? 0.004 : -0.004, 0.002, 0.008)));
+    // Soft halo that brightens with the glow (hints).
+    const halo = new THREE.Sprite(haloMat);
+    halo.scale.setScalar(0.042);
+    halo.renderOrder = 50;
+    halo.onBeforeRender = () => {
+      haloMat.opacity = Math.min(0.75, 0.1 + 0.32 * glowMaterial.emissiveIntensity);
+    };
+    bulb.add(halo);
   }
 
-  // Wings.
+  // Wings: folded back along the shoulders at rest, outside the fur.
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
-    const wing = new THREE.Mesh(wingGeometry(), wingMat);
+    const wing = new THREE.Mesh(wingGeometry(s), wingMat);
     wing.name = `wingMesh${side}`;
-    wing.scale.x = s;
-    attach(`wing${side}`, wing, abs[`wing${side}`]);
+    wing.renderOrder = 20;
+    attach(`wing${side}`, wing, abs[`wing${side}`].clone().add(new THREE.Vector3(0.006 * s, 0.006, -0.018)));
   }
 
   // Tiny claws peeking out of the toe fur.
@@ -234,7 +261,15 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   }
 
   // --- Face --------------------------------------------------------------------------
-  const face = buildFace(bones, abs, { sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lowerLidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat });
+  const lidShells = shells > 0 ? Math.max(2, Math.min(6, Math.round(shells * 0.5))) : 0;
+  const lidFur = makeFurShellMaterial(-1, { ...furOpts, density: furOpts.density * 1.4 }, lidMat);
+  materials.push(lidFur);
+  const face = buildFace(
+    bones,
+    abs,
+    { sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lowerLidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat },
+    { upper: lidColor, lower: lowerLidColor, fur: lidFur, shells: lidShells },
+  );
 
   return { group, bones, rest, skeleton, scaler, face, materials, glowMaterial, palette: pal };
 }
@@ -243,10 +278,19 @@ type FaceMats = Record<'sclera' | 'irisMat' | 'pupilMat' | 'corneaMat' | 'shineM
   blushMat: THREE.MeshBasicMaterial;
 };
 
-function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, THREE.Vector3>, m: FaceMats): FaceRig {
+interface LidOptions {
+  upper: THREE.Color;
+  lower: THREE.Color;
+  fur: THREE.Material;
+  shells: number;
+}
+
+function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, THREE.Vector3>, m: FaceMats, lid: LidOptions): FaceRig {
   const headBone = bones.head;
   const toHead = (v: THREE.Vector3) => v.clone().sub(abs.head);
   const R = EYE_RADIUS;
+  // Lid shell radius (eye radii): clear of the cornea and catchlights (which reach ~1.05).
+  const LID_R = 1.07;
   const mkEye = (side: 'L' | 'R') => {
     const s = side === 'L' ? 1 : -1;
     const eye = new THREE.Group();
@@ -257,12 +301,15 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     headBone.add(eye);
     // Everything inside the eye is spherical; the group's scale makes it a
     // tall oval, so the iris can rotate without poking through the white.
-    eye.scale.set(1, 1.08, 0.92);
+    // Shallow in depth, so in profile it doesn't bulge out of the face.
+    eye.scale.set(1, 1.08, 0.82);
     const ball = new THREE.Mesh(new THREE.SphereGeometry(R, 32, 24), m.sclera);
     eye.add(ball);
     const iris = new THREE.Group();
     eye.add(iris);
-    const irisCap = new THREE.Mesh(capGeometry(R * 1.003, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial));
+    // Lifted just enough off the eyeball not to z-fight at its rim (a polygon
+    // offset would push it through closed lids at grazing angles).
+    const irisCap = new THREE.Mesh(capGeometry(R * 1.006, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial));
     iris.add(irisCap);
     // The pupil is painted by the iris shader; this node only carries its size
     // (the Animator scales it), read back just before the iris draws.
@@ -288,22 +335,36 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
       shine.renderOrder = 41;
       eye.add(shine);
     }
-    const lidGeo = new THREE.SphereGeometry(R * 1.07, 28, 12, 0, Math.PI * 2, 0, Math.PI / 2);
-    const up = new THREE.Mesh(lidGeo, m.lidMat);
+    const furryLid = (color: THREE.Color, arch: number) => {
+      const geo = lidGeometry(R * LID_R, color, arch);
+      const mesh = new THREE.Mesh(geo, m.lidMat);
+      if (lid.shells > 0) {
+        const fur = new THREE.Mesh(shellStack(geo, lid.shells), lid.fur);
+        fur.renderOrder = 2;
+        mesh.add(fur);
+      }
+      return mesh;
+    };
+    const UP_ARCH = 0.2;
+    const up = furryLid(lid.upper, UP_ARCH);
     eye.add(up);
-    // Lash line along the lid edge and three flicked lashes at the outer corner.
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(R * 1.07, 0.0011, 6, 40, Math.PI * 0.9), m.lashMat);
-    rim.rotation.set(Math.PI / 2, 0, Math.PI * 0.05);
+    // Lash line along the (curved) lid edge and three flicked lashes at the outer corner.
+    const rimPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * (LID_R + 0.005), UP_ARCH, -Math.PI * 0.47 + (q / 24) * Math.PI * 0.94));
+    const rim = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(rimPts), 40, 0.0011, 6), m.lashMat);
     up.add(rim);
     for (let q = 0; q < 3; q++) {
-      const a = (s > 0 ? 0.18 : Math.PI - 0.18) + q * 0.22 * (s > 0 ? 1 : -1);
+      const phi = s * (Math.PI / 2 - 0.18 - q * 0.22);
       const lash = new THREE.Mesh(new THREE.ConeGeometry(0.0011, 0.0075 - q * 0.0012, 5), m.lashMat);
-      const base = new THREE.Vector3(Math.cos(a), 0, Math.sin(a)).multiplyScalar(R * 1.07);
+      const base = lidRimPoint(R * LID_R, UP_ARCH, phi);
       lash.position.copy(base);
-      lash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(Math.cos(a), -0.55, Math.sin(a)).normalize());
+      lash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(base.x, -0.55 * R, base.z).normalize());
       up.add(lash);
     }
-    const lo = new THREE.Mesh(lidGeo, m.lowerLidMat);
+    const LO_ARCH = 0.38;
+    const lo = furryLid(lid.lower, LO_ARCH);
+    // A softer lash line defines the lower lid when it rises into a happy squint.
+    const loPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * (LID_R + 0.002), LO_ARCH, -Math.PI * 0.42 + (q / 24) * Math.PI * 0.84));
+    lo.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(loPts), 40, 0.0007, 5), m.lashMat));
     lo.scale.set(0.99, -1, 0.99);
     eye.add(lo);
     return { eye, iris, up, lo };
@@ -342,16 +403,17 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
   fang.position.set(0.0072, -0.0068, 0.0004);
   smile.add(fang);
   // Dome facing out of the face: scale x = width, y = height, z = how far it bulges.
-  const mouthGeo = new THREE.SphereGeometry(0.0105, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2);
+  const mouthGeo = new THREE.SphereGeometry(0.0105, 24, 10, 0, Math.PI * 2, 0, Math.PI / 2);
   mouthGeo.rotateX(Math.PI / 2);
-  const mouthOpen = new THREE.Mesh(mouthGeo, m.mouthMat);
+  {
+    // Planar UVs so the painted cavity stretches with the mouth's shape.
+    const pos = mouthGeo.attributes.position, uv = mouthGeo.attributes.uv;
+    for (let i = 0; i < pos.count; i++) uv.setXY(i, pos.getX(i) / 0.021 + 0.5, pos.getY(i) / 0.021 + 0.5);
+  }
+  const mouthOpen = new THREE.Mesh(mouthGeo, m.tongueMat);
   mouthOpen.scale.set(1, 0.35, 0.01);
   mouthOpen.position.set(0, -0.004, -0.001);
   mouth.add(mouthOpen);
-  const tongue = new THREE.Mesh(new THREE.SphereGeometry(0.006, 12, 8), m.tongueMat);
-  tongue.scale.set(1.2, 0.6, 0.15);
-  tongue.position.set(0, -0.0055, 0.0004);
-  mouthOpen.add(tongue);
 
   // Blush sits on top of the cheek fluff so it tints the fur, not the skin under it.
   const mkBlush = (s: number) => {
@@ -436,6 +498,14 @@ function pupilIrisMaterial(base: THREE.MeshStandardMaterial): THREE.MeshStandard
   return mat;
 }
 
+/** Procedural textures are shared by every pet that needs the same one (they're never disposed). */
+const textureCache = new Map<string, THREE.DataTexture>();
+const cachedTexture = (key: string, make: () => THREE.DataTexture) => {
+  let t = textureCache.get(key);
+  if (!t) textureCache.set(key, (t = make()));
+  return t;
+};
+
 let rng = 1;
 const rand = () => ((rng = (rng * 16807) % 2147483647) - 1) / 2147483646;
 
@@ -457,6 +527,10 @@ function dataTexture(size: number, fn: (u: number, v: number) => [number, number
 
 /** Radial iris: dark limbal ring, fibrous streaks, a warm ring around the pupil. */
 function irisTexture(hex: number): THREE.DataTexture {
+  return cachedTexture(`iris${hex}`, () => makeIrisTexture(hex));
+}
+
+function makeIrisTexture(hex: number): THREE.DataTexture {
   rng = 7;
   // Vivid, light irises read as friendly; the dark eye colour only tints them.
   const hsl = new THREE.Color(hex).getHSL({ h: 0, s: 0, l: 0 });
@@ -477,39 +551,172 @@ function irisTexture(hex: number): THREE.DataTexture {
     c.multiplyScalar(0.6 + 0.4 * smooth((0.75 - y) / 0.7));
     if (r < 0.48) c.lerp(warm, 0.55 * smooth((0.48 - r) / 0.2));
     // Limbal ring.
-    c.multiplyScalar(1 - 0.85 * smooth((r - 0.74) / 0.2));
+    c.multiplyScalar(1 - 0.62 * smooth((r - 0.8) / 0.16));
     return [c.r, c.g, c.b, 1];
   });
 }
 
-/** Short fine fur streaks for the eyelids (which are too small for shells). */
-function furTexture(): THREE.DataTexture {
-  rng = 3;
-  const cols = Array.from({ length: 256 }, () => rand());
-  const t = dataTexture(128, (u, v) => {
-    const k = cols[Math.floor(u * 256)] * 0.6 + cols[Math.floor(u * 256 + v * 9) & 255] * 0.4;
-    const g = 0.9 + 0.12 * k;
-    return [g, g, g, 1];
+/**
+ * Eyelid shell: the top half of a sphere, vertex-coloured darker towards the
+ * lash line, with a `furLen` attribute so fur shells can grow on it.
+ */
+function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferGeometry {
+  const g = new THREE.SphereGeometry(r, 32, 14, 0, Math.PI * 2, 0, Math.PI / 2);
+  const pos = g.attributes.position;
+  // Curve the lash line: the lid reaches further around the eye at the front
+  // (+Z) than at the corners, so a closed lid reads as a soft "‿" and a raised
+  // lower lid as a smiling "◠" instead of a straight cut.
+  const v = new THREE.Vector3();
+  const rimT = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).divideScalar(r);
+    const theta = Math.acos(THREE.MathUtils.clamp(v.y, -1, 1));
+    const phi = Math.atan2(v.x, v.z);
+    const front = Math.pow(Math.max(0, Math.cos(phi)), 2);
+    rimT[i] = theta / (Math.PI / 2);
+    const t2 = theta * (1 + (arch * front) / (Math.PI / 2));
+    v.set(Math.sin(t2) * Math.sin(phi), Math.cos(t2), Math.sin(t2) * Math.cos(phi));
+    g.attributes.normal.setXYZ(i, v.x, v.y, v.z);
+    v.multiplyScalar(r);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  const col = new Float32Array(pos.count * 3), fl = new Float32Array(pos.count);
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const k = smooth((1 - rimT[i]) / 0.35); // 1 on top of the lid, 0 at the lash line
+    c.copy(color).multiplyScalar(0.72 + 0.28 * k);
+    col.set([c.r, c.g, c.b], i * 3);
+    fl[i] = 0.0036 * (0.3 + 0.7 * k);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('furLen', new THREE.BufferAttribute(fl, 1));
+  return g;
+}
+
+/** A point on a lid's (arched) lash line at azimuth phi (0 = front, +X = π/2). */
+function lidRimPoint(r: number, arch: number, phi: number): THREE.Vector3 {
+  const t2 = (Math.PI / 2) * (1 + (arch * Math.pow(Math.max(0, Math.cos(phi)), 2)) / (Math.PI / 2));
+  return new THREE.Vector3(Math.sin(t2) * Math.sin(phi), Math.cos(t2), Math.sin(t2) * Math.cos(phi)).multiplyScalar(r);
+}
+
+/** `n` copies of a geometry tagged with shell heights 1/n..1, for single-draw fur shells. */
+function shellStack(geo: THREE.BufferGeometry, n: number): THREE.BufferGeometry {
+  const copies = [];
+  for (let q = 1; q <= n; q++) {
+    const g = geo.clone();
+    g.setAttribute('shellH', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count).fill(q / n), 1));
+    copies.push(g);
+  }
+  return mergeGeometries(copies);
+}
+
+/**
+ * Eyeball material. The visible opening is almond-shaped: towards the corners
+ * the sclera turns into eyelid skin with a soft dark liner, and the white is
+ * shaded greyer near the lids, so the eye sits *in* the face instead of
+ * bulging out of it like a ball.
+ */
+function scleraMaterial(skin: THREE.Color): THREE.MeshPhysicalMaterial {
+  const mat = new THREE.MeshPhysicalMaterial({ color: 0xf7f4ee, roughness: 0.35, clearcoat: 0.6 });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uSkin = { value: skin.clone() };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vEyeP;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvEyeP = position;');
+    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nuniform vec3 uSkin;\nvarying vec3 vEyeP;').replace(
+      '#include <color_fragment>',
+      `#include <color_fragment>
+      vec3 en = normalize(vEyeP);
+      float ap = length(vec2(en.x / 0.88, en.y / 1.3));
+      float inside = (1.0 - smoothstep(0.92, 0.99, ap)) * smoothstep(-0.1, 0.15, en.z);
+      diffuseColor.rgb *= mix(vec3(0.6, 0.62, 0.72), vec3(1.0), smoothstep(1.0, 0.5, ap));
+      vec3 skinC = uSkin * mix(0.38, 0.85, smoothstep(0.98, 1.2, ap));
+      diffuseColor.rgb = mix(skinC, diffuseColor.rgb, inside);`,
+    );
+  };
+  mat.customProgramCacheKey = () => 'sclera-aperture';
+  return mat;
+}
+
+/** Painted open-mouth cavity: dark palate, tongue with a groove, two tiny fangs, lip rim. */
+function mouthTexture(): THREE.DataTexture {
+  return cachedTexture('mouth', () => makeMouthTexture());
+}
+
+function makeMouthTexture(): THREE.DataTexture {
+  const c = new THREE.Color(), deep = new THREE.Color(0.16, 0.03, 0.06), warm = new THREE.Color(0.5, 0.13, 0.19);
+  const tmp = new THREE.Color();
+  const tongue = new THREE.Color(1.0, 0.52, 0.58), lip = new THREE.Color(0.34, 0.11, 0.16), tooth = new THREE.Color(0.98, 0.96, 0.92);
+  return dataTexture(128, (u, v) => {
+    const x = u * 2 - 1, y = v * 2 - 1;
+    const r = Math.hypot(x, y);
+    c.copy(deep).lerp(warm, 0.85 * smooth((0.2 - y) / 1.2));
+    // Tongue: a soft mound at the bottom, lit on top, with a centre groove.
+    const tx = x / 0.72, ty = (y + 0.66) / 0.52;
+    const tr = Math.hypot(tx, ty);
+    if (tr < 1.05) {
+      const t = tmp.copy(tongue).multiplyScalar(0.72 + 0.32 * smooth((ty + 0.2) / 1.1));
+      t.multiplyScalar(1 - 0.22 * (1 - smooth(Math.abs(x) / 0.07)) * smooth((ty + 0.6) / 0.6));
+      c.lerp(t, smooth((1.05 - tr) / 0.14));
+    }
+    // Two little fangs hanging from the upper lip.
+    for (const sx of [-0.4, 0.4]) {
+      const h = (0.86 - y) / 0.34; // 0 at the gum, 1 at the tip
+      if (h > 0 && h < 1) {
+        const w = 0.12 * (1 - h);
+        c.lerp(tmp.copy(tooth).multiplyScalar(0.82 + 0.18 * (1 - h)), smooth((w - Math.abs(x - sx)) / 0.03));
+      }
+    }
+    // Lip rim.
+    c.lerp(lip, smooth((r - 0.8) / 0.16));
+    return [c.r, c.g, c.b, 1];
   });
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(6, 1);
-  return t;
+}
+
+/** Little curved, ridged horn (local +Y up, curving back towards -Z), dark at the root, cream at the tip. */
+function hornGeometry(root: THREE.Color, tip: THREE.Color): THREE.BufferGeometry {
+  const pts = [new THREE.Vector3(0, -0.004, 0.001), new THREE.Vector3(0, 0.007, 0), new THREE.Vector3(0, 0.015, -0.004), new THREE.Vector3(0, 0.02, -0.011)];
+  return tubeGeometry(
+    pts,
+    [0, 0, 0],
+    (t) => THREE.MathUtils.lerp(0.0064, 0.0016, Math.pow(t, 0.8)) * (1 - 0.09 * Math.pow(Math.abs(Math.cos(Math.PI * t * 5)), 6)),
+    (t) => root.clone().multiplyScalar(0.8).lerp(tip, smooth((t - 0.15) / 0.7)).multiplyScalar(1 - 0.12 * Math.pow(Math.abs(Math.cos(Math.PI * t * 5)), 6)),
+    12,
+    40,
+  );
 }
 
 /** Soft round falloff (white, alpha = falloff) for blush decals. */
 function radialTexture(): THREE.DataTexture {
+  return cachedTexture('radial', () => makeRadialTexture());
+}
+
+function makeRadialTexture(): THREE.DataTexture {
   return dataTexture(64, (u, v) => {
     const r = Math.hypot(u * 2 - 1, v * 2 - 1);
     return [1, 1, 1, Math.pow(Math.max(0, 1 - r), 1.6)];
   });
 }
 
-/** Translucent wing membrane with darker veins. */
-function wingTexture(): THREE.DataTexture {
+/** Wing membrane: translucent, with veins radiating from the root, a crossing vein and a darker rim (alpha in A). */
+function wingTexture(vein: THREE.Color): THREE.DataTexture {
+  return cachedTexture(`wing${vein.getHex()}`, () => makeWingTexture(vein));
+}
+
+function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
+  const c = new THREE.Color();
+  const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.25);
   return dataTexture(128, (u, v) => {
-    const a = Math.atan2(v - 0.5, u);
-    const vein = Math.abs(Math.sin(a * 9)) < 0.12 || Math.abs(Math.sin((u + v) * 40)) < 0.04 ? 0.55 : 1;
-    return [vein, vein, vein, 1];
+    const a = Math.atan2(v - 0.5, u + 0.02);
+    const d = Math.hypot(u, v - 0.5);
+    // Radial veins fade out towards the tip; one curved cross vein.
+    const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.12), 1.5) * smooth((0.95 - d) / 0.4);
+    const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.018);
+    const k = Math.min(1, radial + cross);
+    // Membrane is lighter (and more see-through) away from the root.
+    c.setRGB(0.85, 0.85, 0.85).multiplyScalar(0.9 + 0.1 * smooth(d / 0.8));
+    c.lerp(veinC, k * 0.85);
+    return [c.r, c.g, c.b, 0.42 + 0.5 * k + 0.25 * (1 - smooth(d / 0.35))];
   });
 }
 
@@ -524,9 +731,10 @@ function tubeGeometry(
   radius: (t: number) => number,
   color: (t: number, angle: number) => THREE.Color,
   radial = 10,
+  ringCount = 0,
 ): THREE.BufferGeometry {
   const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
-  const rings = Math.max(12, pts.length * 8);
+  const rings = ringCount || Math.max(12, pts.length * 8);
   // Segment parameter boundaries along the curve, by joint arc length.
   const lens = [0];
   for (let s = 1; s < pts.length; s++) lens.push(lens[s - 1] + pts[s].distanceTo(pts[s - 1]));
@@ -595,21 +803,35 @@ function tubeGeometry(
   return geo;
 }
 
-/** Two-lobed insect wing, root at origin, extending back (-Z) and out (+X). */
-function wingGeometry(): THREE.BufferGeometry {
+/**
+ * Two-lobed wing (a big fore-lobe and a smaller hind-lobe), root at the
+ * origin. At rest it lies folded back along the shoulders: spanning out, up
+ * and back, with the membrane roughly parallel to the back. s = +1 left, -1 right.
+ */
+function wingGeometry(s: number): THREE.BufferGeometry {
   const shape = new THREE.Shape();
   shape.moveTo(0, 0);
-  shape.bezierCurveTo(0.03, 0.025, 0.075, 0.03, 0.09, 0.008);
-  shape.bezierCurveTo(0.095, -0.004, 0.07, -0.012, 0.045, -0.008);
-  shape.bezierCurveTo(0.065, -0.02, 0.06, -0.04, 0.035, -0.032);
-  shape.bezierCurveTo(0.02, -0.025, 0.008, -0.012, 0, 0);
-  const geo = new THREE.ShapeGeometry(shape, 12);
+  shape.bezierCurveTo(0.03, 0.028, 0.08, 0.034, 0.096, 0.01);
+  shape.bezierCurveTo(0.102, -0.004, 0.075, -0.012, 0.05, -0.008);
+  shape.bezierCurveTo(0.068, -0.022, 0.062, -0.044, 0.036, -0.035);
+  shape.bezierCurveTo(0.02, -0.027, 0.008, -0.013, 0, 0);
+  const geo = new THREE.ShapeGeometry(shape, 16);
   // Shape UVs are in metres; stretch them over the vein texture.
   const uv = geo.attributes.uv;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.095, uv.getY(i) / 0.08 + 0.5);
-  // Lay the wing back along the body: shape X → back/out, shape Y → up.
-  geo.rotateZ(0.9); // sweep the wing up
-  geo.rotateY(-Math.PI / 2 + 0.45); // and back/out from the shoulders
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.1, uv.getY(i) / 0.08 + 0.5);
+  // A gentle camber so the membrane catches light like a real wing.
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    pos.setZ(i, 0.06 * x * x + 0.04 * y * y);
+  }
+  const X = new THREE.Vector3(0.62 * s, 0.5, -0.6).normalize();
+  const N = new THREE.Vector3(0.35 * s, 0.15, -1);
+  N.addScaledVector(X, -N.dot(X)).normalize();
+  const Y = new THREE.Vector3().crossVectors(N, X);
+  if (s < 0) Y.negate();
+  geo.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, N));
+  geo.computeVertexNormals();
   return geo;
 }
 
