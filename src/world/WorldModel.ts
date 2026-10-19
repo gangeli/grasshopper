@@ -849,7 +849,8 @@ export class WorldModel {
     if (pa >= 2) {
       const off = py / pa - this.floorY;
       if (Math.abs(off) < 0.02) return false;
-      return this.rebuildAtFloor(this.floorY + off);
+      this.relevelFloor(this.floorY + off);
+      return true;
     }
     if (this.floorSamples < minSamples) return false;
     let best = 0;
@@ -871,7 +872,8 @@ export class WorldModel {
     if (this.histRefined) return false;
     this.histRefined = true;
     const corr = Math.max(-0.03, Math.min(0.03, (prev + off) / 2));
-    return this.rebuildAtFloor(this.floorY + corr);
+    this.relevelFloor(this.floorY + corr);
+    return true;
   }
 
   private rebuildAtFloor(newY: number): boolean {

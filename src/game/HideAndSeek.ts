@@ -188,6 +188,19 @@ export class HideAndSeek {
     this.say('Hi! I’m Hopper. Look around so I can learn your room, then let’s play hide and seek!');
   }
 
+  /**
+   * Put the pet back somewhere (map frame) without the introduction — for
+   * re-placing it and for recoveries. Any round in progress is abandoned.
+   */
+  respawn(at: Vec3, faceToward?: Vec3): void {
+    const yaw = faceToward ? Math.atan2(faceToward.x - at.x, faceToward.z - at.z) : this.pet.yaw;
+    this.move = null;
+    this.pet.placeAt(new THREE.Vector3(at.x, at.y, at.z), Number.isFinite(yaw) ? yaw : 0);
+    this.pet.perform('wave');
+    this.roamTimer = 2.5;
+    if (this.phase !== 'roam') this.setPhase('roam');
+  }
+
   refreshNav(force = false): NavGrid | null {
     if (!this.world.grid) return null;
     // The world replaces its grid when it rebuilds (floor correction, reset):
@@ -207,7 +220,9 @@ export class HideAndSeek {
   }
 
   /** Begin a round: the seeker should cover their eyes now. */
-  start(view: ViewPose): boolean {
+  start(viewTracking: ViewPose): boolean {
+    const view = this.viewToMap(viewTracking);
+    if (!view) return false;
     if (this.phase !== 'roam' && this.phase !== 'found') return false;
     if (this.clock < this.startBlockedUntil) return false;
     if (this.health.unsettled) {

@@ -396,7 +396,7 @@ export class ArMode {
       }
       world.ingestHit(hit.pos, hit.normal);
       this.afterMapRebuilt();
-      game.spawn(pm, camM);
+      game.respawn(pm, camM);
       this.stats.replacements++;
     }
     this.lastGoodPet = game.pet.pos.clone();
@@ -550,7 +550,7 @@ export class ArMode {
     }
     this.stats.petResets++;
     const at = this.lastGoodPet ?? new THREE.Vector3(0, this.stack.world.floorY, 0);
-    game.spawn(at.clone(), this.stage.trackingToMap(this.camPos()));
+    game.respawn(at.clone(), this.stage.trackingToMap(this.camPos()));
   }
 
   /**
@@ -572,7 +572,7 @@ export class ArMode {
       if (level >= 1 && world.ready) world.hardReset();
       this.afterMapRebuilt();
       const at = this.lastGoodPet ?? new THREE.Vector3(0, world.floorY, 0);
-      game.spawn(at.clone(), this.stage.trackingToMap(this.camPos()));
+      game.respawn(at.clone(), this.stage.trackingToMap(this.camPos()));
     });
     this.hud.say(level ? 'Oops, I got muddled — I’m relearning the room. Look around slowly.' : 'Oops, I got muddled. Let’s carry on!', 5);
   }

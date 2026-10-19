@@ -202,21 +202,37 @@ export class HealthMonitor {
       }
     }
     if (this.t < 8 || this.t < this.floorBanUntil || this.t - this.lastRelevel < O.floorCooldown) return;
+    // The original early refinement (floor planes / steep depth); bounded, cheap.
+    if (w.refineFloor()) {
+      this.lastRelevel = this.t;
+      this.report('floorTooHigh', `floor refined to ${(w.floorY * 100).toFixed(1)}cm`);
+      game.mapChanged();
+      return;
+    }
     const f = w.floorEvidence();
     // Detected floor planes are fitted over many points and don't inherit the
-    // local, persistent bias of depth near the floor: if they agree with the
-    // current floor, depth alone doesn't get to move it.
+    // local, persistent bias of depth near the floor (a few cm): if they agree
+    // with the current floor, depth alone doesn't get to move it.
     const plane = w.floorPlaneEstimate();
     if (plane && Math.abs(plane.y - w.floorY) < 0.02) {
       this.floorCand = null;
       return;
     }
-    if (f.mass < O.floorMinMass || f.share < O.floorMinShare || Math.abs(f.offset) < O.floorMinOffset) {
+    if (f.mass < O.floorMinMass || Math.abs(f.offset) < O.floorMinOffset) {
       this.floorCand = null;
       return;
     }
-    // With a plane available, depth and plane must agree on the new height.
-    if (plane && Math.abs(plane.y - (w.floorY + f.offset)) > 0.02) {
+    let target: number | null = null;
+    if (plane) {
+      // Plane and depth agree the floor is off, in the same direction and by
+      // about as much: go to the plane's height.
+      const po = plane.y - w.floorY;
+      if (Math.sign(po) === Math.sign(f.offset) && Math.abs(po) >= O.floorMinOffset && Math.abs(po - f.offset) <= 0.04 && f.share >= 0.35) target = plane.y;
+    } else if (Math.abs(f.offset) >= 0.05 && f.share >= 0.35) {
+      // Depth alone: only errors well beyond its own bias.
+      target = w.floorY + f.offset;
+    } else if (f.share >= O.floorMinShare) target = w.floorY + f.offset;
+    if (target === null) {
       this.floorCand = null;
       return;
     }
@@ -225,9 +241,8 @@ export class HealthMonitor {
       this.floorCand = { off: f.offset, t: this.t };
       return;
     }
-    if (this.t - this.floorCand.t < 3) return;
-    // A plane that agrees is the more precise height.
-    const off = plane ? plane.y - w.floorY : Math.max(-0.2, Math.min(0.2, (this.floorCand.off + f.offset) / 2));
+    if (this.t - this.floorCand.t < (plane ? 3 : 5)) return;
+    const off = Math.max(-0.2, Math.min(0.2, target - w.floorY));
     this.floorUndo = { prevY: w.floorY, areaBefore: game.mappedArea(), t: this.t };
     w.relevelFloor(w.floorY + off);
     this.lastRelevel = this.t;
