@@ -101,6 +101,11 @@ export class HealthMonitor {
     this.onIssue?.(issue, detail);
   }
 
+  /** The map is under suspicion (just after a tracking loss): don't plan anything big on it. */
+  get unsettled(): boolean {
+    return this.drift.suspicious;
+  }
+
   /** Called every frame by the game (view already in the map frame). */
   update(dt: number, view: ViewPose | null): void {
     if (!this.opts.enabled) return;
@@ -129,12 +134,23 @@ export class HealthMonitor {
       // After a tracking loss the new view and the old map disagree and no
       // consistent correction exists: don't keep a map we can't trust. If the
       // world frame clearly moved a lot, the pet moved with it: re-anchor it.
-      w.softReset(0.15);
-      this.softResetAt = this.t;
-      const big = verdict.mag > 0.15;
-      this.report('mapContradictory', `after a tracking loss the map no longer matched what the camera sees: evidence aged${big ? ', pet re-anchored' : ''}`);
-      this.game.mapChanged();
-      if (big) this.game.reanchorPet();
+      const big = verdict.mag >= 0.12;
+      if (big) {
+        // The world moved a lot and we couldn't say how: parts of the map we
+        // haven't re-seen are now simply wrong (a remembered gap may be a crate).
+        // Start the map afresh in the current frame and bring the pet back.
+        w.hardReset();
+        this.softResetAt = this.t;
+        this.report('mapReset', `after a tracking loss the world shifted ~${(verdict.mag * 100).toFixed(0)}cm and couldn't be realigned: map cleared, pet re-anchored`);
+        this.game.mapChanged();
+        this.game.reanchorPet();
+        this.game.say('Whoa, everything moved! Look around a bit so I can find my way again.');
+      } else {
+        w.softReset(0.15);
+        this.softResetAt = this.t;
+        this.report('mapContradictory', 'after a tracking loss the map no longer matched what the camera sees: evidence aged');
+        this.game.mapChanged();
+      }
     }
     if (fixed) {
       this.lastRealign = this.t;
@@ -235,14 +251,22 @@ export class HealthMonitor {
     if (g.cellX(pet.pos.x) < 0 || g.cellZ(pet.pos.z) < 0 || g.cellX(pet.pos.x) >= g.nx || g.cellZ(pet.pos.z) >= g.nz) bad = 'petOffMap';
     else if (!airborne && pet.pos.y < w.floorY - 0.05) bad = 'petUnderFloor';
     else if (!airborne && !pet.moving) {
-      // Inside: confident obstacles through the body core.
-      let inside = 0;
+      // Inside: confident obstacles through the body core — or space the map
+      // infers is solid (under an observed top with nothing seen beneath, e.g.
+      // the inside of a sofa); a table's underside is seen empty, so hiding
+      // under one doesn't count.
+      let inside = 0, shadowed = 0;
       for (const h of [0.08, 0.13, 0.18])
         for (const [ox, oz] of [[0, 0], [0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03]]) {
           const i = g.cellX(pet.pos.x + ox), j = g.cellY(pet.pos.y + h), k = g.cellZ(pet.pos.z + oz);
-          if (g.inBounds(i, j, k) && g.data[g.idx(i, j, k)] > 35) inside++;
+          if (!g.inBounds(i, j, k)) continue;
+          if (g.data[g.idx(i, j, k)] > 35) inside++;
+          else if (g.data[g.idx(i, j, k)] >= 10 || g.shadowAt(i, j, k)) shadowed++;
         }
-      if (inside >= 4) bad = 'petInside';
+      // Or the camera *right now* sees surfaces inside the pet's body (the map
+      // may not have caught up: drift, a tracking jump, something moved).
+      const live = w.recentPointsIn(pet.pos, 0.06, 0.07, 0.2, 1.5);
+      if (inside >= 4 || inside + shadowed >= 10 || (live.points >= 6 && live.frames >= 2)) bad = 'petInside';
       else if (pet.pos.y > w.floorY + 0.06) {
         // Standing on something: there must be a surface right below.
         let support = false;

@@ -325,6 +325,20 @@ export class VoxelGrid {
     return s;
   }
 
+  /** Same rule as updateShadow, for one voxel (walks its column from the top; no full-grid pass). */
+  shadowAt(i: number, j: number, k: number): boolean {
+    if (!this.inBounds(i, j, k)) return false;
+    let shadowing = false;
+    for (let jj = this.ny - 1; jj > j; jj--) {
+      const n = (jj * this.nz + k) * this.nx + i;
+      const v = this.data[n];
+      if (v > OCC_THRESHOLD) shadowing = this.underside[n] !== 1;
+      else if (v < 0) shadowing = false;
+    }
+    const v = this.data[this.idx(i, j, k)];
+    return shadowing && v >= 0 && v <= OCC_THRESHOLD;
+  }
+
   /** Occupied, or assumed solid (see updateShadow). */
   solid(i: number, j: number, k: number): boolean {
     if (!this.inBounds(i, j, k)) return false;

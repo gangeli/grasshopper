@@ -108,6 +108,20 @@ export class SeekerBot {
         break;
       }
       case 'waiting': {
+        // Like a player following "look around so I can learn your room":
+        // if there's hardly anywhere to play, go scan again.
+        if (game.mappedArea() < 2) {
+          this.lowArea += dt;
+          if (this.lowArea > 6) {
+            this.lowArea = 0;
+            this.phase = 'mapping';
+            this.t = 2;
+            this.mapSeconds = 25;
+            this.tour = [];
+            this.tourIdx = 0;
+            break;
+          }
+        } else this.lowArea = 0;
         // Look at the pet, then start.
         this.lookAt(sim.pet.pos.x, sim.pet.pos.y + 0.1, sim.pet.pos.z, dt);
         if (this.t > 1.5 && game.canStart() && this.t > this.nextTry) {
@@ -185,6 +199,7 @@ export class SeekerBot {
     sim.step(dt);
   }
 
+  private lowArea = 0;
   /** Play round after round instead of stopping after the first. */
   continuous = false;
   rounds = 0;

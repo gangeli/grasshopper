@@ -89,6 +89,18 @@ export function runSoak(room: string, seed: number, seconds: number, opts: Parti
       const dx = p.x - v.pos.x, dy = p.y - v.pos.y, dz = p.z - v.pos.z, d = Math.hypot(dx, dy, dz);
       if (d < 4 && (dx * v.forward.x + dy * v.forward.y + dz * v.forward.z) / d > Math.cos(0.6)) rep.insideVisibleTime += dt;
       rep.insideTime += dt;
+      if (process.env.SOAK_DEBUG && Math.floor(inside) !== Math.floor(inside + dt)) {
+        const g = sim.world.grid!, pp = sim.pet.pos;
+        let occ = 0, sh = 0, free = 0;
+        for (const h of [0.08, 0.13, 0.18]) {
+          const i = g.cellX(pp.x), j = g.cellY(pp.y + h), k = g.cellZ(pp.z);
+          const v = g.data[g.idx(i, j, k)];
+          if (v > 35) occ++;
+          else if (g.shadowAt(i, j, k)) sh++;
+          else if (v < 0) free++;
+        }
+        console.log(`${sim.time.toFixed(0)}s INSIDE pen ${(pen * 100).toFixed(0)}cm phase ${sim.game.phase} pet ${sim.pet.state} map(${pp.x.toFixed(2)},${pp.y.toFixed(2)},${pp.z.toFixed(2)}) real(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) body voxels occ ${occ} shadow ${sh} free ${free} piece ${sim.room.pieceAt(p)?.label}`);
+      }
       inside += dt;
       rep.longestInside = Math.max(rep.longestInside, inside);
     } else inside = 0;

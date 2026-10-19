@@ -557,6 +557,30 @@ export class WorldModel {
     while (this.replayPoints > this.replayBudget && this.replay.length > 1) this.replayPoints -= this.replay.shift()!.pts.length / 3;
   }
 
+  /**
+   * Fresh depth readings (last `maxAge` s) inside a vertical cylinder — e.g.
+   * the pet's body. Independent of the map's (possibly stale) beliefs: if
+   * the camera currently sees surfaces there, something real is there.
+   */
+  recentPointsIn(c: Vec3, radius: number, y0: number, y1: number, maxAge = 2): { points: number; frames: number } {
+    let points = 0, frames = 0;
+    const r2 = radius * radius;
+    for (let f = this.replay.length - 1; f >= 0; f--) {
+      const fr = this.replay[f];
+      if (this.now - fr.t > maxAge) break;
+      let n = 0;
+      for (let q = 0; q < fr.pts.length; q += 3) {
+        const dx = fr.pts[q] - c.x, dz = fr.pts[q + 2] - c.z, y = fr.pts[q + 1];
+        if (dx * dx + dz * dz < r2 && y > c.y + y0 && y < c.y + y1) n++;
+      }
+      if (n) {
+        points += n;
+        frames++;
+      }
+    }
+    return { points, frames };
+  }
+
   /** Area-weighted height of detected floor planes, if there are enough of them. */
   floorPlaneEstimate(minArea = 2): { y: number; area: number } | null {
     let pa = 0, py = 0;

@@ -66,6 +66,11 @@ export class DriftMonitor {
   }
   /** Currently checking for a jump after a tracking loss. */
   inEvent = false;
+  /** Just after a loss, or a jump looks likely and nothing says the map still fits. */
+  get suspicious(): boolean {
+    if (!this.inEvent) return false;
+    return this.world.now - this.world.lastTrackingEvent < 4 || (this.votes.length > 0 && this.against === 0);
+  }
 
   /**
    * Just after tracking was lost and recovered: did the frame jump? Compare

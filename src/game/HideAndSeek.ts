@@ -203,13 +203,18 @@ export class HideAndSeek {
   }
 
   canStart(): boolean {
-    return this.phase === 'roam' && this.mappedArea() > 2 && this.clock >= this.startBlockedUntil;
+    return this.phase === 'roam' && this.mappedArea() > 2 && this.clock >= this.startBlockedUntil && !this.health.unsettled;
   }
 
   /** Begin a round: the seeker should cover their eyes now. */
   start(view: ViewPose): boolean {
     if (this.phase !== 'roam' && this.phase !== 'found') return false;
     if (this.clock < this.startBlockedUntil) return false;
+    if (this.health.unsettled) {
+      this.say('Hang on — I’m still getting my bearings after that tracking hiccup…');
+      this.startBlockedUntil = this.clock + 3;
+      return false;
+    }
     const nav = this.refreshNav(true);
     if (!nav) return false;
     const t0 = performance.now();
