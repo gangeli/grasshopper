@@ -73,9 +73,10 @@ export function buildCreatureSculpt(): Sculpt {
     // outline of the head (a touch longer on the left, nothing is perfectly symmetric).
     const a = s > 0 ? 1.0 : 0.92;
     S.add(
-      roundCone('cheek', [0.055 * s, 0.214, 0.03], [(0.055 + 0.034 * a) * s, 0.196, 0.004], 0.016, 0.005, 'head', 'head', 0.014),
-      roundCone('cheek', [0.058 * s, 0.234, 0.016], [(0.058 + 0.03 * a) * s, 0.238, -0.012], 0.013, 0.0045, 'head', 'head', 0.012),
-      roundCone('cheek', [0.046 * s, 0.198, 0.036], [(0.046 + 0.024 * a) * s, 0.178, 0.022], 0.012, 0.0045, 'head', 'head', 0.012),
+      // Soft, rounded ends: seen from behind, thin points read as spikes.
+      roundCone('cheek', [0.055 * s, 0.214, 0.03], [(0.055 + 0.03 * a) * s, 0.198, 0.008], 0.016, 0.0068, 'head', 'head', 0.016),
+      roundCone('cheek', [0.058 * s, 0.234, 0.016], [(0.058 + 0.025 * a) * s, 0.237, -0.006], 0.013, 0.0062, 'head', 'head', 0.014),
+      roundCone('cheek', [0.046 * s, 0.198, 0.036], [(0.046 + 0.022 * a) * s, 0.18, 0.024], 0.012, 0.006, 'head', 'head', 0.013),
     );
   }
   // ---- Ears: soft leaf-shaped fins sweeping out and back ---------------------------------------

@@ -76,6 +76,8 @@ export interface FaceRig {
   eyeFill?: { value: number };
   /** 0..1: how far the cheek fur fills in below a "^^" squint (set by the Animator). */
   eyeSquint?: { value: number };
+  /** Lid skin and lid fur (the Animator lifts their tone in a "^^" squint). */
+  lidMats?: THREE.MeshStandardMaterial[];
 }
 
 export interface PetOptions {
@@ -119,11 +121,22 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
   // Ears are thin: backlight glows through them (fur shells add the same term).
   const eyeClosed = { value: 0 }, eyeFill = { value: 0 }, eyeSquint = { value: 0 };
+  // Skin showing between the strands where the coat is long. With many shells
+  // the dark lower layers hide it; with few (phones, lod=low) it shows through
+  // and would make the coat read paler, so it is dimmed to match (set below).
+  const underCoat = { value: 1 };
   skin.onBeforeCompile = (shader) => {
     addTranslucency(shader);
     addSocketFade(shader, eyeClosed, eyeFill, eyeSquint);
+    shader.uniforms.uUnderCoat = underCoat;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float furLen;\nuniform float uUnderCoat;\nvarying float vUnderK;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvUnderK = mix(1.0, uUnderCoat, smoothstep(0.003, 0.008, furLen));');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vUnderK;')
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vUnderK;');
   };
-  skin.customProgramCacheKey = () => 'skin-thin-sock';
+  skin.customProgramCacheKey = () => 'skin-thin-sock-under';
   // The emissive is a deeper, more saturated version of the glow colour, so the
   // bulbs stay coloured instead of tone-mapping to pale cream when they light up.
   const glowHsl = new THREE.Color(pal.glow).getHSL({ h: 0, s: 0, l: 0 });
@@ -241,6 +254,10 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
   // With few shells long fur shows as stacked layers; keep it a little shorter there.
   furOpts.lengthScale ??= THREE.MathUtils.clamp(0.45 + shells * 0.05, 0.6, 1);
+  // ...and fewer dark root layers would make the coat read paler (measured ~6% at 3 shells).
+  const few = Math.pow(THREE.MathUtils.clamp((12 - shells) / 9, 0, 1), 1.3);
+  furOpts.tone ??= 1 - 0.05 * few;
+  underCoat.value = 1 - 0.24 * few;
   for (let q = 1; q <= shells; q++) {
     const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill, squint: eyeSquint });
     materials.push(mat);
@@ -400,6 +417,8 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   });
   face.eyeFill = eyeFill;
   face.eyeSquint = eyeSquint;
+  face.lidMats = [lidMat, lidFur];
+  materials.push(face.blushL.material as THREE.Material, face.blushR.material as THREE.Material);
   return { group, bones, rest, skeleton, scaler, face, materials, glowMaterial, palette: pal };
 }
 
@@ -585,9 +604,8 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
   const smile = new THREE.Mesh(smileGeo, m.mouthMat);
   smile.renderOrder = 31;
   mouth.add(smile);
-  const fang = new THREE.Mesh(new THREE.ConeGeometry(0.0014, 0.0032, 8), m.toothMat);
-  fang.rotation.z = Math.PI;
-  fang.position.set(0.0072, -0.0068, 0.0004);
+  const fang = new THREE.Mesh(fangGeometry(), m.toothMat);
+  fang.position.set(0.0072, -0.0054, 0.0004);
   smile.add(fang);
   // Dome facing out of the face: scale x = width, y = height, z = how far it bulges.
   const mouthGeo = new THREE.SphereGeometry(0.0105, 24, 10, 0, Math.PI * 2, 0, Math.PI / 2);
@@ -614,11 +632,27 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
 
   // Blush sits on top of the cheek fluff so it tints the fur, not the skin under it.
   const mkBlush = (s: number) => {
-    const { p, n } = surfaceAt(0.047 * s, 0.222, 0.068);
-    const b = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.022), m.blushMat);
+    // Low and outboard on the cheek, clear of the lower lids (a shut eye sinks
+    // behind the cheek fur, where a higher blush would tint the lid).
+    const { p, n } = surfaceAt(0.05 * s, 0.214, 0.064);
+    // Each cheek has its own copy of the (Animator-driven) blush material, so
+    // it can fade as the cheek turns away: seen edge-on, a flat patch on the
+    // far cheek would poke out past the face's outline.
+    const mat = m.blushMat.clone();
+    const b = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.019), mat);
     b.position.copy(toHead(p.clone().addScaledVector(n, furLengthAt(p.x, p.y, p.z) * 0.95 + 0.0005)));
     b.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
     b.renderOrder = 30;
+    const wp = new THREE.Vector3(), wn = new THREE.Vector3(), cp = new THREE.Vector3();
+    b.onBeforeRender = (_r, _s, camera) => {
+      b.getWorldPosition(wp);
+      wn.set(0, 0, 1).transformDirection(b.matrixWorld);
+      cp.setFromMatrixPosition(camera.matrixWorld).sub(wp).normalize();
+      const facing = THREE.MathUtils.smoothstep(wn.dot(cp), 0.1, 0.45);
+      mat.opacity = m.blushMat.opacity * facing;
+      mat.color.copy(m.blushMat.color);
+    };
+    b.name = s > 0 ? 'blushL' : 'blushR';
     headBone.add(b);
     return b;
   };
@@ -912,6 +946,32 @@ function lidGeometry(r: number, colorAt: (p: THREE.Vector3) => THREE.Color, arch
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.setAttribute('furLen', new THREE.BufferAttribute(fl, 1));
+  return g;
+}
+
+/**
+ * A tiny milk-tooth fang hanging from the lip line: flattened front to back,
+ * rounded at the tip and curving slightly inwards, instead of a sharp cone.
+ */
+function fangGeometry(): THREE.BufferGeometry {
+  const L = 0.0033, W = 0.00135;
+  const pts: THREE.Vector2[] = [];
+  for (let i = 0; i <= 10; i++) {
+    const t = i / 10;
+    // Wide at the gum, tapering, with a round (not pointed) end.
+    pts.push(new THREE.Vector2(W * Math.sqrt(Math.max(0, 1 - Math.pow(t, 2.4))) * (1 - 0.25 * t), -L * t));
+  }
+  pts.push(new THREE.Vector2(0, -L));
+  pts.reverse();
+  const g = new THREE.LatheGeometry(pts, 10);
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const t = -pos.getY(i) / L;
+    // Flatten front-to-back and hook the tip slightly towards the mouth's centre.
+    pos.setZ(i, pos.getZ(i) * 0.6);
+    pos.setX(i, pos.getX(i) - 0.0005 * t * t);
+  }
+  g.computeVertexNormals();
   return g;
 }
 

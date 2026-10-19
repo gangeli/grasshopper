@@ -149,7 +149,9 @@ export class PetController {
         this.travelled += step;
         // Hop cadence scales gently with speed so stride length grows.
         const prev = this.hopPhase;
-        this.hopPhase += dt * (2.2 + this.speed * 1.6);
+        const rate = 2.2 + this.speed * 1.6;
+        this.hopPhase += dt * rate;
+        a.ctx.hopRate = rate;
         if (Math.floor(prev) !== Math.floor(this.hopPhase)) this.events.onHop?.();
         a.ctx.hopPhase = this.hopPhase % 1;
         a.ctx.speed = this.speed;
@@ -223,6 +225,7 @@ export class PetController {
           if (this.turning) {
             this.yaw += Math.sign(err) * Math.min(Math.abs(err), 3.2 * dt);
             this.hopPhase += dt * 3;
+            a.ctx.hopRate = 3;
             a.ctx.hopPhase = this.hopPhase % 1;
             a.ctx.speed = 0.15;
             if (Math.abs(err) < 0.05) {
