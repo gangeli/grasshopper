@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { Simulation, type SimOptions } from './Simulation';
+import { roomFromName } from './SimRoom';
+import { dressRoom } from './Realism';
+import { penetration as truthPenetration } from './MapMetrics';
 import { SeekerBot } from './SeekerBot';
 import type { FoundInfo } from '../game/HideAndSeek';
 
@@ -9,8 +12,12 @@ export interface RoundReport {
   started: boolean;
   spotKind: string | null;
   spotWhere: string | null;
+  /** The game had to relax its hiding criteria (bare room). */
+  relaxed: boolean;
   /** Ground-truth visibility of the pet from the seeker when seeking began. */
   truthVisAtSeek: number;
+  /** Same, for the core body only (head, neck, chest, hips). */
+  truthCoreVisAtSeek: number;
   /** Distance between the pet and its chosen spot when seeking began. */
   petToSpot: number;
   found: FoundInfo | null;
@@ -24,8 +31,9 @@ export interface RoundReport {
 }
 
 /** Play one full automated round: map, start, hide, seek, find. */
-export function runRound(room: string, seed: number, opts: Partial<SimOptions> = {}): RoundReport {
-  const sim = new Simulation({ room, seed, ...opts });
+export function runRound(room: string, seed: number, opts: Partial<SimOptions> & { dress?: boolean } = {}): RoundReport {
+  const simRoom = opts.dress ? dressRoom(roomFromName(room), seed) : roomFromName(room);
+  const sim = new Simulation({ seed, ...opts, room: simRoom });
   const bot = new SeekerBot(sim);
   const r: RoundReport = {
     room,
@@ -33,7 +41,9 @@ export function runRound(room: string, seed: number, opts: Partial<SimOptions> =
     started: false,
     spotKind: null,
     spotWhere: null,
+    relaxed: false,
     truthVisAtSeek: -1,
+    truthCoreVisAtSeek: -1,
     petToSpot: -1,
     found: null,
     truthVisAtFound: -1,
@@ -49,9 +59,11 @@ export function runRound(room: string, seed: number, opts: Partial<SimOptions> =
       r.started = true;
       r.spotKind = sim.game.spot?.kind ?? null;
       r.planMs = sim.game.stats.planMs;
+      r.relaxed = sim.game.stats.relaxed;
     }
     if (p === 'seek') {
       r.truthVisAtSeek = sim.truthVisibility();
+      r.truthCoreVisAtSeek = sim.truthVisibility(true);
       const s = sim.game.spot;
       r.petToSpot = s ? Math.hypot(s.pos.x - sim.pet.pos.x, s.pos.z - sim.pet.pos.z) : -1;
     }
@@ -77,13 +89,7 @@ export function runRound(room: string, seed: number, opts: Partial<SimOptions> =
   return r;
 }
 
-/** How deep a point is inside the nearest thick solid box (0 if outside). */
+/** How deep a point is inside real furniture (incl. toys and legs; not rugs/cables). */
 function penetration(sim: Simulation, p: THREE.Vector3): number {
-  let worst = 0;
-  for (const b of sim.room.boxes) {
-    if (Math.min(b.max.x - b.min.x, b.max.z - b.min.z) < 0.1) continue; // thin legs: below sensing resolution
-    const d = Math.min(p.x - b.min.x, b.max.x - p.x, p.y - b.min.y, b.max.y - p.y, p.z - b.min.z, b.max.z - p.z);
-    if (d > worst) worst = d;
-  }
-  return worst;
+  return truthPenetration(sim.room, p);
 }

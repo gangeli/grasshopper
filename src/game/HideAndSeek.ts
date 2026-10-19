@@ -70,11 +70,14 @@ export class HideAndSeek {
   private navTimer = 0;
   private relocated = false;
   private foundTimer = 0;
+  /** Game clock (s) and a cooldown after a failed start. */
+  private clock = 0;
+  private startBlockedUntil = 0;
   private hidden = false;
   private lastView: ViewPose | null = null;
   events: GameEvents = {};
   /** Diagnostics for tests and the debug overlay. */
-  readonly stats = { spotsConsidered: 0, planMs: 0, replans: 0 };
+  readonly stats = { spotsConsidered: 0, planMs: 0, replans: 0, relaxed: false };
 
   constructor(
     readonly world: WorldModel,
@@ -119,31 +122,39 @@ export class HideAndSeek {
   }
 
   canStart(): boolean {
-    return this.phase === 'roam' && this.mappedArea() > 2;
+    return this.phase === 'roam' && this.mappedArea() > 2 && this.clock >= this.startBlockedUntil;
   }
 
   /** Begin a round: the seeker should cover their eyes now. */
   start(view: ViewPose): boolean {
     if (this.phase !== 'roam' && this.phase !== 'found') return false;
+    if (this.clock < this.startBlockedUntil) return false;
     const nav = this.refreshNav(true);
     if (!nav) return false;
     const t0 = performance.now();
     this.objects = segmentObjects(this.world);
-    const spots = findHideSpots(
-      nav,
-      this.pet.pos,
-      view.pos,
-      {
-        difficulty: this.opts.difficulty,
-        maxPathCost: 9,
-        previous: this.previous,
-        rng: this.rng,
-        objects: this.objects,
-        eyeHeight: this.opts.eyeHeight,
-        poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
-      },
-      this.world.floorY,
-    );
+    // Prefer properly hidden spots; in a bare room, settle for the best cover there is.
+    let spots: HideSpot[] = [];
+    for (const minHiddenNow of [0.85, 0.5, 0]) {
+      spots = findHideSpots(
+        nav,
+        this.pet.pos,
+        view.pos,
+        {
+          difficulty: this.opts.difficulty,
+          maxPathCost: 9,
+          previous: this.previous,
+          rng: this.rng,
+          objects: this.objects,
+          eyeHeight: this.opts.eyeHeight,
+          minHiddenNow,
+          poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
+        },
+        this.world.floorY,
+      );
+      this.stats.relaxed = minHiddenNow < 0.85;
+      if (spots.length) break;
+    }
     this.stats.planMs = performance.now() - t0;
     this.stats.spotsConsidered = spots.length;
     this.round++;
@@ -165,12 +176,15 @@ export class HideAndSeek {
     }
     if (!this.spot) {
       // Nowhere good: hide behind the player's back as a joke.
-      this.say('Hmm, I can’t find anywhere to hide yet — show me more of the room!');
+      // Every place I can safely reach is in plain view from here: the room
+      // needs exploring (walking around, looking behind and under things).
+      this.say('I can’t find a good hiding place yet — walk around and show me behind the furniture and under tables!');
       this.setPhase('roam');
+      this.startBlockedUntil = this.clock + 4;
       return false;
     }
     this.setPhase('countdown');
-    this.say('Cover your eyes and count to ten!');
+    this.say(this.stats.relaxed ? 'Not much to hide behind in here… I’ll do my best! Cover your eyes!' : 'Cover your eyes and count to ten!');
     return true;
   }
 
@@ -217,12 +231,15 @@ export class HideAndSeek {
   }
 
   update(dt: number, view: ViewPose): void {
+    this.clock += dt;
     this.lastView = view;
     this.anim.lookTarget = new THREE.Vector3(view.pos.x, view.pos.y, view.pos.z);
     this.navTimer -= dt;
-    if (this.navTimer <= 0 && this.phase !== 'countdown') {
+    // Nav rebuilds cost ~100ms+ on a phone: refresh while roaming (the map is
+    // still growing), and otherwise only on demand (start, sneak).
+    if (this.navTimer <= 0 && this.phase === 'roam') {
       this.refreshNav();
-      this.navTimer = 1.0;
+      this.navTimer = 2.5;
     }
     switch (this.phase) {
       case 'roam':
@@ -342,7 +359,7 @@ export class HideAndSeek {
   }
 
   private sneak(view: ViewPose) {
-    const nav = this.nav;
+    const nav = this.refreshNav();
     if (!nav) return;
     const spots = findHideSpots(
       nav,

@@ -47,6 +47,7 @@ export class SeekerBot {
   }
 
   heard = 0;
+  private nextTry = 0;
 
   private standable(x: number, z: number): boolean {
     const room = this.sim.room;
@@ -84,20 +85,33 @@ export class SeekerBot {
     this.t += dt;
     switch (this.phase) {
       case 'mapping': {
-        // Turn around slowly, looking down, to map the room.
-        cam.yaw += dt * 0.9;
-        cam.pitch = -0.55 + 0.2 * Math.sin(this.t * 0.8);
+        // Map like a person would: walk around the room looking at things,
+        // behind and under furniture (crouching now and then), then come back.
         if (this.t > 1 && game.phase === 'waiting') sim.spawnPet();
-        if (this.t > 9) {
-          this.phase = 'waiting';
-          this.t = 0;
+        if (this.t < 1.5) {
+          cam.yaw += dt * 0.6;
+          cam.pitch = -0.6;
+          break;
+        }
+        if (!this.tour.length) this.buildTour();
+        if (this.tourIdx < this.tour.length && this.t < this.mapSeconds) this.walkAndLook(dt, 0.7);
+        else {
+          // Walk back to where we started, then start the game from there.
+          const dx = this.home.x - cam.pos.x, dz = this.home.z - cam.pos.z, d = Math.hypot(dx, dz);
+          if (d > 0.1) this.walkTowards(this.home.x, this.home.z, dt);
+          else {
+            cam.pos.y = 1.45;
+            this.phase = 'waiting';
+            this.t = 0;
+          }
         }
         break;
       }
       case 'waiting': {
         // Look at the pet, then start.
         this.lookAt(sim.pet.pos.x, sim.pet.pos.y + 0.1, sim.pet.pos.z, dt);
-        if (this.t > 1.5 && game.canStart()) {
+        if (this.t > 1.5 && game.canStart() && this.t > this.nextTry) {
+          this.nextTry = this.t + 4;
           if (game.start(sim.view())) {
             this.log.push(`round ${game.round}: hiding ${game.spot?.kind} at ${game.spot?.pos.x.toFixed(2)},${game.spot?.pos.y.toFixed(2)},${game.spot?.pos.z.toFixed(2)}`);
             this.phase = 'counting';
@@ -112,6 +126,7 @@ export class SeekerBot {
           this.phase = 'searching';
           this.searchTime = 0;
           this.buildTour();
+          this.spin = 0;
         }
         break;
       }
@@ -155,6 +170,40 @@ export class SeekerBot {
         break;
     }
     sim.step(dt);
+  }
+
+  /** Seconds spent walking around mapping before the first round. */
+  mapSeconds = 35;
+  private home = { x: 0, z: 0.6 };
+
+  private walkTowards(x: number, z: number, dt: number) {
+    const cam = this.sim.cam;
+    const dx = x - cam.pos.x, dz = z - cam.pos.z, d = Math.hypot(dx, dz);
+    const want = Math.atan2(-dx, -dz);
+    cam.yaw += clamp(wrapAngle(want - cam.yaw), -2 * dt, 2 * dt);
+    const sp = Math.min(d, 0.9 * dt);
+    cam.pos.x += (dx / d) * sp;
+    cam.pos.z += (dz / d) * sp;
+    cam.pitch = -0.5;
+  }
+
+  /** Walk the tour; at each point turn around looking down/under things. */
+  private walkAndLook(dt: number, spinRate: number) {
+    const cam = this.sim.cam;
+    const target = this.tour[this.tourIdx];
+    const d = Math.hypot(target.x - cam.pos.x, target.z - cam.pos.z);
+    if (d > 0.1) this.walkTowards(target.x, target.z, dt);
+    else {
+      this.spin += dt;
+      cam.yaw += dt * spinRate;
+      cam.pitch = -0.65 + 0.3 * Math.sin(this.spin * 1.7);
+      cam.pos.y = 1.45 - 0.6 * Math.max(0, Math.sin(this.spin * 0.9));
+      if (this.spin > (Math.PI * 2) / spinRate) {
+        this.spin = 0;
+        cam.pos.y = 1.45;
+        this.tourIdx++;
+      }
+    }
   }
 
   private lookAt(x: number, y: number, z: number, dt: number) {

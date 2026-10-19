@@ -6,12 +6,27 @@ import type { Vec3 } from '../core/math';
  * world in tests and in the in-browser simulator: SimSensor raycasts them to
  * produce depth, planes and meshes the way a headset/phone would.
  */
+/**
+ * How a surface looks to a depth sensor. Depth-from-motion (ARCore) needs
+ * texture: blank walls and dark fabric give holes and noise; glass is
+ * invisible; mirrors show a phantom room behind them.
+ */
+export type Material = 'matte' | 'textureless' | 'dark' | 'glass' | 'mirror';
+
 export interface SimBox {
   min: Vec3;
   max: Vec3;
   color: number;
   /** Owning furniture piece. */
   piece: number;
+  material?: Material;
+}
+
+/** Something that moves through the room (a person walking past). */
+export interface DynamicBox {
+  size: Vec3;
+  /** Feet position at time t, or null when not in the room. */
+  at: (t: number) => Vec3 | null;
 }
 
 export interface SimPiece {
@@ -26,6 +41,11 @@ export interface SimPiece {
 export class SimRoom {
   readonly pieces: SimPiece[] = [];
   readonly boxes: SimBox[] = [];
+  readonly dynamic: DynamicBox[] = [];
+  /** Simulation time (s), for dynamic objects. */
+  time = 0;
+  /** Material of the floor (blank floors are hard for depth-from-motion). */
+  floorMaterial: Material = 'matte';
   constructor(readonly width: number, readonly depth: number, readonly wallHeight = 2.4) {}
 
   /** Room spans x ∈ [-w/2, w/2], z ∈ [-d/2, d/2], floor at y=0. */
@@ -78,6 +98,54 @@ export class SimRoom {
     return { t: best >= maxDist ? Infinity : best, box: hitBox, normal };
   }
 
+  /**
+   * What a depth sensor ray actually returns: glass is skipped, mirrors
+   * reflect (the reading lands behind the mirror), people walking by are
+   * included. `range` is the apparent distance along the original ray.
+   */
+  sensorRay(o: Vec3, d: Vec3, maxDist = 20): { range: number; material: Material } {
+    let origin = o, dir = d, travelled = 0;
+    for (let bounce = 0; bounce < 3; bounce++) {
+      let best = maxDist - travelled;
+      let mat: Material = this.floorMaterial;
+      let normal: Vec3 | null = null;
+      if (dir.y < -1e-6) {
+        const t = -origin.y / dir.y;
+        if (t > 1e-4 && t < best) best = t;
+      }
+      for (const b of this.boxes) {
+        if (b.material === 'glass') continue;
+        const r = rayBox(origin, dir, b.min, b.max);
+        if (r && r.t > 1e-4 && r.t < best) {
+          best = r.t;
+          mat = b.material ?? 'matte';
+          normal = r.normal;
+        }
+      }
+      for (const dyn of this.dynamic) {
+        const f = dyn.at(this.time);
+        if (!f) continue;
+        const mn = { x: f.x - dyn.size.x / 2, y: f.y, z: f.z - dyn.size.z / 2 }, mx = { x: f.x + dyn.size.x / 2, y: f.y + dyn.size.y, z: f.z + dyn.size.z / 2 };
+        const r = rayBox(origin, dir, mn, mx);
+        if (r && r.t > 1e-4 && r.t < best) {
+          best = r.t;
+          mat = 'dark';
+          normal = r.normal;
+        }
+      }
+      if (best >= maxDist - travelled) return { range: Infinity, material: mat };
+      if (mat === 'mirror' && normal) {
+        travelled += best;
+        origin = { x: origin.x + dir.x * best, y: origin.y + dir.y * best, z: origin.z + dir.z * best };
+        const dn = dir.x * normal.x + dir.y * normal.y + dir.z * normal.z;
+        dir = { x: dir.x - 2 * dn * normal.x, y: dir.y - 2 * dn * normal.y, z: dir.z - 2 * dn * normal.z };
+        continue;
+      }
+      return { range: travelled + best, material: mat };
+    }
+    return { range: Infinity, material: 'matte' };
+  }
+
   /** Is the point inside any solid box? */
   solidAt(p: Vec3, pad = 0): boolean {
     if (p.y < 0) return true;
@@ -87,11 +155,18 @@ export class SimRoom {
   }
 
   /** Line of sight between two points (true if unobstructed). */
+  /** Line of sight for eyes (glass is see-through; mirrors and everything else block). */
   visible(a: Vec3, b: Vec3): boolean {
     const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
     const len = Math.hypot(dx, dy, dz);
-    const hit = this.raycast(a, { x: dx / len, y: dy / len, z: dz / len }, len);
-    return !(hit.t < len - 1e-3);
+    const d = { x: dx / len, y: dy / len, z: dz / len };
+    if (d.y < -1e-6 && -a.y / d.y < len - 1e-3 && -a.y / d.y > 0) return false; // floor
+    for (const box of this.boxes) {
+      if (box.material === 'glass') continue;
+      const r = rayBox(a, d, box.min, box.max);
+      if (r && r.t < len - 1e-3) return false;
+    }
+    return true;
   }
 
   pieceAt(p: Vec3, pad = 0.05): SimPiece | null {

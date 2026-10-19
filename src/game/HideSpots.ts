@@ -36,6 +36,8 @@ export interface HideOptions {
   rng: Rng;
   objects: WorldObject[];
   eyeHeight: number;
+  /** Minimum fraction hidden from the seeker right now (default 0.85). */
+  minHiddenNow?: number;
   /** Body sample offsets of the actual hiding poses (pet facing +Z), see measurePoseSamples. */
   poseSamples?: { hide: Vec3[]; hideLow: Vec3[] };
 }
@@ -54,6 +56,8 @@ export const HIDE_SAMPLES: Vec3[] = [
 /** Fraction of `points` with an unobstructed line of sight from `eye`. */
 export function visibleFraction(g: VoxelGrid, eye: Vec3, points: Vec3[], skipEnd = 0.04): number {
   let vis = 0;
+// Only observed obstacles count as cover: unknown space is assumed see-through,
+  // so Hopper never "hides" behind something we merely guessed is there.
   for (const q of points) if (g.segmentClear(eye, q, skipEnd)) vis++;
   return vis / points.length;
 }
@@ -159,23 +163,28 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     const p = nav.pos(a);
     const dSeeker = Math.hypot(p.x - seekerEye.x, p.z - seekerEye.z);
     if (dSeeker < 1.0) continue;
-    if (visibleFraction(g, seekerEye, samplesAt(p)) > 0.5) continue; // quick reject
+    const minHidden = opts.minHiddenNow ?? 0.85;
+    if (minHidden > 0.5 && visibleFraction(g, seekerEye, samplesAt(p)) > 0.5) continue; // quick reject
     const cls = classifySpot(g, nav, a, floorY);
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
     const pts = samplesAt(p, offs, cls.openYaw);
+    // Measured edges are off by a few cm (sensor noise, 5cm voxels): judge
+    // "hidden now" on a body raised by a 6cm safety margin.
+    const ptsUp = pts.map((q) => ({ x: q.x, y: q.y + 0.06, z: q.z }));
     // Robust to map quantisation and to the seeker shifting a little: must be
     // hidden from the eye and from points ~15cm around it.
     let hiddenNow = 1;
     for (const e of jitterEyes) {
-      hiddenNow = Math.min(hiddenNow, 1 - visibleFraction(g, e, pts));
-      if (hiddenNow < 0.85) break;
+      hiddenNow = Math.min(hiddenNow, 1 - visibleFraction(g, e, ptsUp));
+      if (hiddenNow < minHidden) break;
     }
-    if (hiddenNow < 0.85) continue;
+    if (hiddenNow < minHidden) continue;
     let pre = 0;
     pre += { inside: 1.0, under: 0.8, corner: 0.5, behind: 0.3, atop: 0.4 }[cls.kind];
     pre += Math.min(cls.walls, 5) * 0.05;
     pre -= Math.abs(dSeeker - 2.8) * 0.12;
+    pre += hiddenNow * 1.5; // matters when criteria are relaxed
     cands.push({ a, p, hiddenNow, pre, cls, pts });
   }
   cands.sort((x, y) => y.pre - x.pre);

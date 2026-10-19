@@ -53,6 +53,14 @@ export class VoxelGrid {
    * standing *inside* the object, so navigation ignores those surfaces.
    */
   readonly underside: Uint8Array;
+  /**
+   * Sub-voxel height of the observed surface inside each voxel, as a fraction
+   * of the voxel (0..254; 255 = unknown, treated as the voxel top). Lets the
+   * pet stand at the real height of a table instead of the voxel boundary.
+   */
+  readonly topFrac: Uint8Array;
+  /** See integrateRay: occupied voxels resist erosion by passing rays. */
+  stickyOccupied = true;
   /** Increments whenever occupancy changes meaningfully, so derived data can be cached. */
   version = 0;
 
@@ -65,6 +73,7 @@ export class VoxelGrid {
     this.data = new Int8Array(o.nx * o.ny * o.nz);
     this.observed = new Uint8Array(o.nx * o.nz);
     this.underside = new Uint8Array(o.nx * o.ny * o.nz);
+    this.topFrac = new Uint8Array(o.nx * o.ny * o.nz).fill(255);
   }
 
   idx(i: number, j: number, k: number): number {
@@ -158,19 +167,26 @@ export class VoxelGrid {
    * Integrate a depth observation: the ray from `from` to `to` is free space and
    * `to` itself is occupied (unless `hit` is false, e.g. max-range readings).
    */
-  integrateRay(from: Vec3, to: Vec3, hit: boolean, hitDelta = 14, missDelta = -3): void {
+  integrateRay(from: Vec3, to: Vec3, hit: boolean, hitDelta = 14, missDelta = -3, carveShort = this.res * 1.5): void {
     const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
     const len = Math.hypot(dx, dy, dz);
     if (len < 1e-4) return;
     const ti = this.cellX(to.x), tj = this.cellY(to.y), tk = this.cellZ(to.z);
-    // Stop carving a little short of the endpoint so noisy surfaces don't self-erase.
-    const carveLen = hit ? Math.max(0, len - this.res * 1.5) : len;
+    // Stop carving short of the endpoint (by more for noisier readings) so a
+    // reading that lands behind a surface doesn't carve into the object.
+    const carveLen = Math.max(0, len - carveShort);
     this.traverse(from, { x: dx / len, y: dy / len, z: dz / len }, carveLen, (i, j, k) => {
       if (i === ti && j === tj && k === tk) return true;
-      this.add(i, j, k, missDelta);
+      // Asymmetric update: rays grazing past a confidently occupied voxel
+      // erode it only slowly, so small real objects survive many near-misses.
+      const v = this.data[this.idx(i, j, k)];
+      this.add(i, j, k, v > OCC_THRESHOLD && this.stickyOccupied ? Math.max(missDelta, -1) : missDelta);
       return false;
     });
-    if (hit) this.add(ti, tj, tk, hitDelta);
+    if (hit) {
+      this.add(ti, tj, tk, hitDelta);
+      this.noteHeight(ti, tj, tk, to.y);
+    }
   }
 
   /**
@@ -214,10 +230,13 @@ export class VoxelGrid {
   }
 
   /** First occupied cell along a ray. */
-  raycast(o: Vec3, d: Vec3, maxDist: number): RayHit | null {
+  raycast(o: Vec3, d: Vec3, maxDist: number, includeShadow = false): RayHit | null {
     let hit: RayHit | null = null;
+    const sh = includeShadow ? this.updateShadow() : null;
     this.traverse(o, d, maxDist, (i, j, k, t) => {
-      if (this.data[this.idx(i, j, k)] > OCC_THRESHOLD) {
+      const n = this.idx(i, j, k);
+      if (this.data[n] > OCC_THRESHOLD && this.passesAboveSurface(n, i, j, k, o, d, t)) return false;
+      if (this.data[n] > OCC_THRESHOLD || (sh !== null && sh[n] === 1)) {
         hit = { t, i, j, k };
         return true;
       }
@@ -227,14 +246,29 @@ export class VoxelGrid {
   }
 
   /**
+   * A ray crossing the top voxel of a horizontal surface (table top, seat)
+   * above the surface's measured height isn't really blocked: the voxel is 5cm
+   * tall but the surface inside it may be lower. Uses the sub-voxel height.
+   */
+  private passesAboveSurface(n: number, i: number, j: number, k: number, o: Vec3, d: Vec3, t: number): boolean {
+    const f = this.topFrac[n];
+    if (f === 255) return false;
+    if (this.inBounds(i, j + 1, k) && this.data[this.idx(i, j + 1, k)] > OCC_THRESHOLD) return false; // not a top surface
+    const top = this.origin.y + (j + f / 254) * this.res;
+    // Ray height on entry and after the longest possible chord through the voxel.
+    const y0 = o.y + d.y * t, y1 = o.y + d.y * (t + this.res * 1.733);
+    return Math.min(y0, y1) > top + 0.005;
+  }
+
+  /**
    * Whether the straight segment a→b is free of occupied voxels, ignoring the
    * last `skipEnd` meters near b (so the target's own support doesn't block it).
    */
-  segmentClear(a: Vec3, b: Vec3, skipEnd = 0): boolean {
+  segmentClear(a: Vec3, b: Vec3, skipEnd = 0, includeShadow = false): boolean {
     const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
     const len = Math.hypot(dx, dy, dz);
     if (len < 1e-6) return true;
-    const hit = this.raycast(a, { x: dx / len, y: dy / len, z: dz / len }, len - skipEnd);
+    const hit = this.raycast(a, { x: dx / len, y: dy / len, z: dz / len }, len - skipEnd, includeShadow);
     return !hit || hit.t > len - skipEnd;
   }
 
@@ -275,6 +309,21 @@ export class VoxelGrid {
     if (!this.inBounds(i, j, k)) return false;
     const n = this.idx(i, j, k);
     return this.data[n] >= SOFT_SOLID || (this.shadow !== null && this.shadow[n] === 1);
+  }
+
+  /** Running estimate of where inside voxel (i,j,k) the surface is (height y). */
+  noteHeight(i: number, j: number, k: number, y: number): void {
+    if (!this.inBounds(i, j, k)) return;
+    const n = this.idx(i, j, k);
+    const f = Math.max(0, Math.min(254, Math.round(((y - (this.origin.y + j * this.res)) / this.res) * 254)));
+    const old = this.topFrac[n];
+    this.topFrac[n] = old === 255 ? f : Math.round(old * 0.8 + f * 0.2);
+  }
+
+  /** Height of the surface on top of voxel (i,j,k). */
+  surfaceY(i: number, j: number, k: number): number {
+    const f = this.inBounds(i, j, k) ? this.topFrac[this.idx(i, j, k)] : 255;
+    return this.origin.y + (j + (f === 255 ? 1 : f / 254)) * this.res;
   }
 
   countOccupied(): number {

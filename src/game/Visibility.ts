@@ -75,7 +75,8 @@ export function petVisibility(grid: VoxelGrid, view: ViewPose, samples: { p: Vec
     total += w;
     const s = projectToView(view, p);
     if (!s || s.depth > maxDist || Math.abs(s.x) > margin || Math.abs(s.y) > margin) continue;
-    if (grid.segmentClear(view.pos, p, 0.03)) vis += w;
+    // Occupied or inferred-solid (unseen space under an observed top) blocks sight.
+    if (grid.segmentClear(view.pos, p, 0.03, true)) vis += w;
   }
   return total ? vis / total : 0;
 }

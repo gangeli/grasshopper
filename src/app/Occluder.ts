@@ -12,11 +12,20 @@ export function buildOccluderGeometry(g: VoxelGrid, center: THREE.Vector3, radiu
   const i0 = Math.max(0, g.cellX(center.x - radius)), i1 = Math.min(g.nx - 1, g.cellX(center.x + radius));
   const k0 = Math.max(0, g.cellZ(center.z - radius)), k1 = Math.min(g.nz - 1, g.cellZ(center.z + radius));
   const j0 = minLayer, j1 = g.ny - 1;
-  const occ = (i: number, j: number, k: number) => i >= i0 && i <= i1 && k >= k0 && k <= k1 && j >= j0 && j <= j1 && g.data[g.idx(i, j, k)] > OCC_THRESHOLD;
   const pos: number[] = [];
   const r = g.res, o = g.origin;
   const dims = [i1 - i0 + 1, j1 - j0 + 1, k1 - k0 + 1];
   const base = [i0, j0, k0];
+  // Snapshot the region's occupancy once (the sweep below reads each cell ~6 times).
+  const [DX, DY, DZ] = dims;
+  const occGrid = new Uint8Array(DX * DY * DZ);
+  for (let j = 0; j < DY; j++)
+    for (let k = 0; k < DZ; k++) {
+      let src = g.idx(i0, j0 + j, k0 + k);
+      let dst = (j * DZ + k) * DX;
+      for (let i = 0; i < DX; i++) occGrid[dst++] = g.data[src++] > OCC_THRESHOLD ? 1 : 0;
+    }
+  const strides = [1, DZ * DX, DX];
   // For each axis d and direction s, sweep slices and greedy-merge the face mask.
   for (let d = 0; d < 3; d++) {
     const u = (d + 1) % 3, v = (d + 2) % 3;
@@ -25,12 +34,17 @@ export function buildOccluderGeometry(g: VoxelGrid, center: THREE.Vector3, radiu
     for (x[d] = 0; x[d] <= dims[d]; x[d]++) {
       // Build mask: +1 face facing +d (solid behind, free ahead), -1 facing -d.
       let n = 0;
-      for (x[v] = 0; x[v] < dims[v]; x[v]++)
-        for (x[u] = 0; x[u] < dims[u]; x[u]++, n++) {
-          const a = x[d] > 0 && occAt(x, d, -1);
-          const b = x[d] < dims[d] && occAt(x, d, 0);
+      const xd = x[d], su = strides[u], sv = strides[v], sd = strides[d];
+      const hasA = xd > 0, hasB = xd < dims[d];
+      const baseOff = xd * sd;
+      for (let jv = 0; jv < dims[v]; jv++) {
+        let off = baseOff + jv * sv;
+        for (let iu = 0; iu < dims[u]; iu++, n++, off += su) {
+          const a = hasA && occGrid[off - sd] === 1;
+          const b = hasB && occGrid[off] === 1;
           mask[n] = a === b ? 0 : a ? 1 : -1;
         }
+      }
       // Greedy merge.
       n = 0;
       for (let jv = 0; jv < dims[v]; jv++)
@@ -70,12 +84,6 @@ export function buildOccluderGeometry(g: VoxelGrid, center: THREE.Vector3, radiu
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   return geo;
-
-  function occAt(x: number[], d: number, off: number) {
-    const c = [x[0], x[1], x[2]];
-    c[d] += off;
-    return occ(base[0] + c[0], base[1] + c[1], base[2] + c[2]);
-  }
 }
 
 export class Occluder {

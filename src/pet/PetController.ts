@@ -33,6 +33,7 @@ export class PetController {
   private jumpFrom = new THREE.Vector3();
   private jumpTo = new THREE.Vector3();
   private jumpDur = 0.5;
+  private jumpLift = 0;
   /** Ground speed target (m/s): walk ≈ 0.45, run ≈ 1.0. */
   cruise = 0.5;
   /** Action to settle into after arriving. */
@@ -100,6 +101,7 @@ export class PetController {
       this.state = 'turn';
       this.jumpFrom.copy(this.pos);
       this.jumpTo.set(w.x, w.y, w.z);
+      this.jumpLift = w.lift ?? 0;
       this.anim.play('idle', 0.15);
     } else {
       this.state = 'walk';
@@ -174,7 +176,7 @@ export class PetController {
           this.jumpFrom.copy(this.pos);
           const h = Math.abs(this.jumpTo.y - this.jumpFrom.y);
           const horiz = Math.hypot(this.jumpTo.x - this.jumpFrom.x, this.jumpTo.z - this.jumpFrom.z);
-          this.jumpDur = 0.32 + 0.35 * Math.sqrt(h) + 0.18 * horiz;
+          this.jumpDur = 0.32 + 0.35 * Math.sqrt(h + this.jumpLift) + 0.18 * horiz;
           this.jumpsMade++;
           a.play('jumpAir', 0.06, true);
           this.events.onJump?.();
@@ -185,7 +187,7 @@ export class PetController {
         const u = clamp(this.stateT / this.jumpDur, 0, 1);
         // Ease time slightly so the apex hangs (cartoon timing).
         const ue = u < 0.5 ? 0.5 * Math.pow(2 * u, 0.85) : 1 - 0.5 * Math.pow(2 * (1 - u), 0.85);
-        const p = NavGrid.arcPoint(this.jumpFrom, this.jumpTo, ue);
+        const p = NavGrid.arcPoint(this.jumpFrom, this.jumpTo, ue, undefined, this.jumpLift);
         this.pos.set(p.x, p.y, p.z);
         a.ctx.jumpU = u;
         if (u >= 1) {

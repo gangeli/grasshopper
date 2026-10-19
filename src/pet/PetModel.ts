@@ -32,11 +32,11 @@ const BONES: [BoneName, BoneName | null, V][] = [
   ['head', 'neck', [0, 0.19, 0.016]],
   // Hind legs: thigh angles forward, shin back down, long foot.
   ['thighL', 'hips', [0.042, 0.082, 0]],
-  ['shinL', 'thighL', [0.054, 0.05, 0.04]],
+  ['shinL', 'thighL', [0.060, 0.05, 0.042]],
   ['ankleL', 'shinL', [0.052, 0.018, -0.022]],
   ['toeL', 'ankleL', [0.052, 0.008, 0.035]],
   ['thighR', 'hips', [-0.042, 0.082, 0]],
-  ['shinR', 'thighR', [-0.054, 0.05, 0.04]],
+  ['shinR', 'thighR', [-0.060, 0.05, 0.042]],
   ['ankleR', 'shinR', [-0.052, 0.018, -0.022]],
   ['toeR', 'ankleR', [-0.052, 0.008, 0.035]],
   // Arms.
@@ -200,9 +200,10 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     // Thigh: chunky drumstick, shin: slim.
     addSkinned(
       tubeGeometry(
-        [abs[`thighL`].clone().setX(0.03 * s), abs[`shin${side}`], abs[`ankle${side}`]],
+        [abs[`thigh${side}`].clone().setX(0.034 * s), abs[`shin${side}`], abs[`ankle${side}`]],
         [boneIndex(`thigh${side}`), boneIndex(`shin${side}`)],
-        (t) => (t < 0.5 ? THREE.MathUtils.lerp(0.03, 0.019, smooth(t * 2)) : THREE.MathUtils.lerp(0.019, 0.011, (t - 0.5) * 2)),
+        // Grasshopper-style drumstick thigh tapering into a slim shin.
+        (t) => (t < 0.5 ? THREE.MathUtils.lerp(0.034, 0.02, smooth(t * 2)) : THREE.MathUtils.lerp(0.02, 0.011, (t - 0.5) * 2)),
         (t, a) => cBody.clone().lerp(cDark, 0.35 * smooth(t) + 0.15 * Math.max(0, -Math.cos(a))),
       ),
       `leg${side}`,
@@ -648,8 +649,8 @@ function wingGeometry(): THREE.BufferGeometry {
   shape.bezierCurveTo(0.02, -0.025, 0.008, -0.012, 0, 0);
   const geo = new THREE.ShapeGeometry(shape, 12);
   // Lay the wing back along the body: shape X → back/out, shape Y → up.
-  geo.rotateY(-Math.PI / 2 + 0.5);
-  geo.rotateX(0.5);
+  geo.rotateZ(0.9); // sweep the wing up
+  geo.rotateY(-Math.PI / 2 + 0.45); // and back/out from the shoulders
   return geo;
 }
 

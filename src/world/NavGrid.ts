@@ -21,17 +21,26 @@ export interface NavParams {
   maxJumpDist: number;
   /** Ignore surfaces higher than this above the floor (wall tops, wardrobes). */
   maxSurfaceHeight: number;
+  /** With depth sensing: fraction of the body volume that must have been observed empty. */
+  knownFreeMin: number;
+  /** Raised surfaces lower than this (above the floor) aren't stood on. */
+  minPlatform: number;
+  /** Voxels of observed-empty space required right above a surface. */
+  seenFreeMin: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
   standHeight: 0.26,
   crawlHeight: 0.13,
   radius: 0.1,
-  maxStep: 0.08,
+  maxStep: 0.045,
   maxJumpUp: 0.95,
   maxJumpDown: 1.3,
   maxJumpDist: 1.1,
   maxSurfaceHeight: 1.95,
+  knownFreeMin: 0.5,
+  minPlatform: 0.12,
+  seenFreeMin: 2,
 };
 
 export interface Waypoint {
@@ -40,6 +49,8 @@ export interface Waypoint {
   z: number;
   /** True when arriving at this waypoint requires a jump from the previous one. */
   jump: boolean;
+  /** For jumps: extra apex height above the default arc (metres), chosen to clear obstacles. */
+  lift?: number;
   node: number;
 }
 
@@ -62,6 +73,8 @@ export class NavGrid {
   count = 0;
   builtVersion = -1;
   private jumpCache = new Map<number, number[]>();
+  /** Extra arc lift per jump link, keyed by from*count+to. */
+  private jumpLift = new Map<number, number>();
   private edgeFlag: Uint8Array = new Uint8Array(0);
 
   constructor(readonly world: WorldModel, params: Partial<NavParams> = {}) {
@@ -102,6 +115,15 @@ export class NavGrid {
         for (let j = floorTopJ; j < g.ny - 1; j++) {
           if (!g.solid(i, j, k) || g.solid(i, j + 1, k)) continue;
           if (j === floorTopJ && !g.isObserved(i, k)) continue;
+          // Only real observations can hold the pet up; guessed ("soft") or
+          // shadow-inferred cells only block.
+          if (j !== floorTopJ && !g.occ(i, j, k)) continue;
+          // Low "platforms" (a few cm up to ~12cm) are mostly depth noise on
+          // the floor, or toys: walk around them, never stand on them.
+          if (j !== floorTopJ) {
+            const hAbove = g.surfaceY(i, j, k) - this.world.floorY;
+            if (hAbove > p.maxStep && hAbove < p.minPlatform) continue;
+          }
           if (g.underside[g.idx(i, j, k)] === 1) continue;
           if (j * r > p.maxSurfaceHeight) break;
           // Headroom.
@@ -127,6 +149,7 @@ export class NavGrid {
       const needCells = Math.min(Math.round(candH[q] / r), Math.ceil(p.standHeight / r));
       let ok = true;
       let nearest = 9;
+      let seen = 0, total = 0;
       for (let dk = -rad - 1; dk <= rad + 1 && ok; dk++)
         for (let di = -rad - 1; di <= rad + 1 && ok; di++) {
           const d2 = di * di + dk * dk;
@@ -134,11 +157,16 @@ export class NavGrid {
           const inDisc = d2 <= rad * rad;
           // Obstacle check: anything solid in the body's height band.
           let blocked = false;
-          for (let jj = j + 1 + Math.floor(stepCells); jj <= j + needCells; jj++)
+          for (let jj = j + 1 + Math.floor(stepCells); jj <= j + needCells; jj++) {
             if (g.solid(ii, jj, kk)) {
               blocked = true;
               break;
             }
+            if (inDisc && requireSeen) {
+              total++;
+              if (g.data[g.idx(ii, jj, kk)] <= -2) seen++;
+            }
+          }
           if (blocked) {
             const d = Math.sqrt(d2);
             if (inDisc) ok = false;
@@ -150,12 +178,16 @@ export class NavGrid {
             for (let jj = j - Math.ceil(stepCells); jj <= j + Math.floor(stepCells); jj++)
               if (g.solid(ii, jj, kk) && !g.solid(ii, jj + 1, kk)) {
                 if (jj === floorTopJ && !g.isObserved(ii, kk)) continue;
+                if (jj !== floorTopJ && !g.occ(ii, jj, kk)) continue;
                 support = true;
                 break;
               }
             if (!support) ok = false;
           }
         }
+      // With depth sensing, most of the body's footprint must have been seen
+      // empty: unseen space (e.g. a pot hidden under foliage) isn't trusted.
+      if (ok && requireSeen && total > 0 && seen < total * p.knownFreeMin) ok = false;
       if (ok) {
         keep[q] = 1;
         wd[q] = Math.min(nearest, 9) * r;
@@ -183,13 +215,15 @@ export class NavGrid {
       this.colCount[col]++;
       this.ni[w] = candI[q];
       this.nk[w] = candK[q];
-      this.ny[w] = g.origin.y + (candJ[q] + 1) * r;
+      // Floor nodes sit exactly on the floor; others at the observed sub-voxel surface height.
+      this.ny[w] = candJ[q] === floorTopJ ? this.world.floorY : g.surfaceY(candI[q], candJ[q], candK[q]);
       this.headroom[w] = candH[q];
       this.wallDist[w] = wd[q];
       w++;
     }
     this.count = n;
     this.jumpCache.clear();
+    this.jumpLift.clear();
 
     // Edge nodes: next to a height discontinuity → candidates for jump links.
     this.edgeFlag = new Uint8Array(n);
@@ -206,11 +240,16 @@ export class NavGrid {
   }
 
   /** Some voxel in the body band of this column (or a 4-neighbour) was carved free by depth. */
+  /**
+   * The body space right above this surface has actually been observed empty
+   * (carved by depth rays) in this very column — not just next to it, and not
+   * merely assumed.
+   */
   private seenFree(i: number, j: number, k: number): boolean {
     const g = this.g;
-    for (const [di, dk] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]])
-      for (let jj = j + 1; jj <= j + 4; jj++) if (g.inBounds(i + di, jj, k + dk) && g.data[g.idx(i + di, jj, k + dk)] < -1) return true;
-    return false;
+    let n = 0;
+    for (let jj = j + 1; jj <= j + 5; jj++) if (g.inBounds(i, jj, k) && g.data[g.idx(i, jj, k)] < -2) n++;
+    return n >= this.p.seenFreeMin;
   }
 
   pos(a: number): Vec3 {
@@ -271,6 +310,8 @@ export class NavGrid {
     const i0 = this.ni[a], k0 = this.nk[a], y0 = this.ny[a];
     const from = this.pos(a);
     const minD = 3, maxD = Math.floor(p.maxJumpDist / r);
+    // Is there room to leap upward from here (nothing overhead up to the highest reachable surface)?
+    const takeoffOpen = this.openAbove(a, p.maxJumpUp + 0.2);
     for (let dir = 0; dir < 16; dir++) {
       const ang = (dir / 16) * Math.PI * 2;
       const cx = Math.cos(ang), cz = Math.sin(ang);
@@ -288,8 +329,23 @@ export class NavGrid {
           // Must be a meaningful jump: a height change or a gap we can't walk.
           if (Math.abs(dy) <= p.maxStep && d <= 4) continue;
           if (Math.abs(dy) <= p.maxStep && this.walkable(from, this.pos(q))) continue;
+          // Same-height leaps only hop over a mapped obstacle, never over unknown floor.
+          if (Math.abs(dy) <= p.maxStep && !this.obstacleBetween(from, this.pos(q))) continue;
           if (this.headroom[q] < p.standHeight * 0.8) continue;
-          if (!this.arcClear(from, this.pos(q))) continue;
+          // Land well inside a surface, never on its edge: under tracking
+          // drift, mapped edges can be ~10cm off.
+          if (!this.landingZone(q)) continue;
+          // Dropping down: land in the open, never tucked under an overhang
+          // whose edge the descending arc could clip.
+          // The landing column must be open all the way up past the take-off
+          // height: you can't drop onto a spot that's under something.
+          if (dy < -p.maxStep && !this.openAbove(q, -dy + 0.25)) continue;
+          // Likewise, jumping up needs open space above the take-off spot.
+          if (dy > p.maxStep && !takeoffOpen) continue;
+          // Lowest arc that clears everything in between (vault over walls/rims).
+          const lift = this.clearLift(from, this.pos(q));
+          if (lift === null) continue;
+          if (lift > 0) this.jumpLift.set(a * this.count + q, lift);
           out.push(q);
           found = true;
           break;
@@ -300,15 +356,59 @@ export class NavGrid {
     return out;
   }
 
+  /**
+   * No drop-off within ~10cm of node q: every nearby cell has ground at the
+   * same height or is a wall (solid at body height, e.g. a basket's side).
+   */
+  private landingZone(q: number): boolean {
+    const g = this.g;
+    const i = this.ni[q], k = this.nk[q], y = this.ny[q];
+    const j0 = g.cellY(y + 0.06), j1 = g.cellY(y + 0.2);
+    for (let dk = -2; dk <= 2; dk++)
+      for (let di = -2; di <= 2; di++) {
+        if (!(di || dk) || this.neighborAt(i + di, k + dk, y, this.p.maxStep * 0.6) !== NONE) continue;
+        // Ground at the same height (just too close to a wall to be a node)?
+        const js = g.cellY(y - 0.001);
+        if (g.solid(i + di, js, k + dk) || g.solid(i + di, js - 1, k + dk)) continue;
+        let wall = false;
+        for (let j = j0; j <= j1 && !wall; j++) wall = g.solid(i + di, j, k + dk);
+        if (!wall) return false;
+      }
+    return true;
+  }
+
+  /** No solid within `h` above node q (and its 4-neighbours). */
+  private openAbove(q: number, h: number): boolean {
+    const g = this.g;
+    const i = this.ni[q], k = this.nk[q];
+    const j0 = g.cellY(this.ny[q] + 0.02), j1 = g.cellY(this.ny[q] + h);
+    for (const [di, dk] of [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (let j = j0; j <= j1; j++) if (g.solid(i + di, j, k + dk)) return false;
+    return true;
+  }
+
   /** Apex height above the higher endpoint for a jump between two points. */
-  static jumpApex(from: Vec3, to: Vec3): number {
+  /** Extra lift needed for a clear arc from→to, or null if no allowed arc is clear. */
+  clearLift(from: Vec3, to: Vec3): number | null {
+    for (const lift of [0, 0.12, 0.25, 0.4]) {
+      // Never above what the pet can jump from the start point.
+      if (NavGrid.jumpApex(from, to, lift) - from.y > this.p.maxJumpUp + 0.2) break;
+      if (this.arcClear(from, to, lift)) return lift;
+    }
+    return null;
+  }
+
+  liftFor(a: number, b: number): number {
+    return this.jumpLift.get(a * this.count + b) ?? 0;
+  }
+
+  static jumpApex(from: Vec3, to: Vec3, lift = 0): number {
     const horiz = Math.hypot(to.x - from.x, to.z - from.z);
-    return Math.max(from.y, to.y) + 0.12 + horiz * 0.15;
+    return Math.max(from.y, to.y) + 0.12 + horiz * 0.15 + lift;
   }
 
   /** Point on the jump arc at parameter t ∈ [0,1]. */
-  static arcPoint(from: Vec3, to: Vec3, t: number, out: Vec3 = { x: 0, y: 0, z: 0 }): Vec3 {
-    const apex = NavGrid.jumpApex(from, to);
+  static arcPoint(from: Vec3, to: Vec3, t: number, out: Vec3 = { x: 0, y: 0, z: 0 }, lift = 0): Vec3 {
+    const apex = NavGrid.jumpApex(from, to, lift);
     // Quadratic Bezier through an apex control point gives a smooth parabola.
     const cy = 2 * apex - 0.5 * (from.y + to.y);
     const u = 1 - t;
@@ -318,22 +418,48 @@ export class NavGrid {
     return out;
   }
 
-  arcClear(from: Vec3, to: Vec3): boolean {
+  arcClear(from: Vec3, to: Vec3, lift = 0): boolean {
     const g = this.g;
     const horiz = Math.hypot(to.x - from.x, to.z - from.z);
     const steps = Math.max(8, Math.ceil(horiz / (g.res * 0.8)) + 6);
     const p: Vec3 = { x: 0, y: 0, z: 0 };
+    const strict = this.world.depthPoints > 0;
+    let samples = 0, unseen = 0;
+    // Unit vector perpendicular to the jump direction (horizontal).
+    const hl = Math.hypot(to.x - from.x, to.z - from.z) || 1;
+    const sx = -(to.z - from.z) / hl, sz = (to.x - from.x) / hl;
     for (let s = 1; s < steps; s++) {
       const t = s / steps;
-      NavGrid.arcPoint(from, to, t, p);
+      NavGrid.arcPoint(from, to, t, p, lift);
       // Sample the body: feet (raised a bit), middle and head.
       for (const h of [0.06, 0.13, 0.2]) {
         // Near the endpoints the feet are on the surface itself; skip the lowest sample.
         if (h === 0.06 && (t < 0.12 || t > 0.88)) continue;
-        if (g.solid(g.cellX(p.x), g.cellY(p.y + h), g.cellZ(p.z))) return false;
+        // Centre line plus the body's width either side.
+        for (const side of [0, -1, 1]) {
+          const x = p.x + side * sx * 0.07, z = p.z + side * sz * 0.07;
+          const i = g.cellX(x), j = g.cellY(p.y + h), k = g.cellZ(z);
+          if (g.solid(i, j, k)) return false;
+          if (side) continue;
+          samples++;
+          if (strict && g.inBounds(i, j, k) && g.data[g.idx(i, j, k)] >= -2) unseen++;
+        }
       }
     }
-    return true;
+    // Like walking, leaping needs space we've actually seen to be empty.
+    return !strict || unseen <= samples * 0.15;
+  }
+
+  /** Is there something solid (5–35cm above the start height) under the straight line a→b? */
+  private obstacleBetween(a: Vec3, b: Vec3): boolean {
+    const g = this.g;
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    const n = Math.ceil(len / (g.res * 0.5));
+    for (let s = 1; s < n; s++) {
+      const x = a.x + ((b.x - a.x) * s) / n, z = a.z + ((b.z - a.z) * s) / n;
+      for (let y = a.y + 0.05; y <= a.y + 0.35; y += g.res) if (g.occAt({ x, y, z })) return true;
+    }
+    return false;
   }
 
   /** Straight-line walkability between two nodes' positions (for path smoothing). */
@@ -438,7 +564,7 @@ export class NavGrid {
     const raw: Waypoint[] = nodes.map((a, idx) => {
       const p = this.pos(a);
       const jump = idx > 0 && !this.isWalkStep(nodes[idx - 1], a);
-      return { ...p, jump, node: a };
+      return jump ? { ...p, jump, node: a, lift: this.liftFor(nodes[idx - 1], a) } : { ...p, jump, node: a };
     });
     return this.smooth(raw);
   }

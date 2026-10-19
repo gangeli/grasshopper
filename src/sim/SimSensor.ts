@@ -1,6 +1,7 @@
 import { Rng } from '../core/rng';
 import type { Vec3 } from '../core/math';
 import type { MeshInput, PlaneInput } from '../world/WorldModel';
+import { depthImageToPoints, filterDiscontinuities, type DepthImage } from '../world/DepthFrame';
 import type { SimRoom } from './SimRoom';
 
 /** Pinhole camera pose. yaw=0 looks down -Z (three.js convention), pitch>0 looks up. */
@@ -36,6 +37,96 @@ export function inFrustum(c: SimCamera, p: Vec3, margin = 1): boolean {
   return q.depth > 0.05 && Math.abs(q.x) <= margin && Math.abs(q.y) <= margin;
 }
 
+/**
+ * How a real depth camera + tracker deviates from the truth. Values are
+ * per-frame (depth frames arrive at ~10Hz in the sim).
+ */
+export interface NoiseProfile {
+  name: string;
+  depthRes: [number, number];
+  /** Depth noise sigma = sigmaA + sigmaB * z² (metres). */
+  sigmaA: number;
+  sigmaB: number;
+  /** Fraction of edge pixels that take an in-between depth. */
+  flyingPixels: number;
+  /** Blur radius (pixels) and how much interior pixels are smoothed (0..1). */
+  edgeBlur: number;
+  smooth: number;
+  dropout: number;
+  holeBlobs: number;
+  outliers: number;
+  maxRange: number;
+  /** Tracking drift (random walk, per sqrt(s)) and per-frame jitter. */
+  driftPos: number;
+  driftRot: number;
+  jitterPos: number;
+  jitterRot: number;
+  planeEdgeErr: number;
+  planeHeightErr: number;
+  /** Error of the floor height taken from the placement tap. */
+  floorErr: number;
+  /** Persistent, world-anchored depth error (× sigma): doesn't average out over frames. */
+  persistentBias?: number;
+  /** Simulate materials (blank walls, dark fabric, glass, mirrors) and moving people. */
+  materials?: boolean;
+  /** Per-frame chance of a relocalisation jump, and its size. */
+  relocRate?: number;
+  relocPos?: number;
+  relocRot?: number;
+  /** Per-frame chance of losing tracking (no data for ~1–2s, then a jump). */
+  lossRate?: number;
+  /** Angular speed (rad/s) above which frames are too blurred to give depth. */
+  blurAngVel?: number;
+}
+
+export const NOISE_PROFILES = {
+  ideal: { name: 'ideal', depthRes: [40, 30], sigmaA: 0, sigmaB: 0.004, flyingPixels: 0, edgeBlur: 0, smooth: 0, dropout: 0, holeBlobs: 0, outliers: 0, maxRange: 6, driftPos: 0, driftRot: 0, jitterPos: 0, jitterRot: 0, planeEdgeErr: 0, planeHeightErr: 0, floorErr: 0 },
+  /** A typical ARCore phone with a decent tracking session. */
+  arcore: { name: 'arcore', depthRes: [40, 30], sigmaA: 0.006, sigmaB: 0.012, flyingPixels: 0.5, edgeBlur: 1, smooth: 0.3, dropout: 0.1, holeBlobs: 2, outliers: 0.005, maxRange: 5, driftPos: 0.01, driftRot: 0.004, jitterPos: 0.003, jitterRot: 0.002, planeEdgeErr: 0.05, planeHeightErr: 0.01, floorErr: 0.015 },
+  /** A bad day: dim room, older phone, fast motion. */
+  /**
+   * Realistic operating conditions for an ARCore phone: everything in
+   * 'arcore' plus persistent (non-averaging) depth bias, hard materials,
+   * relocalisation jumps, tracking loss and motion blur. Use with dressRoom()
+   * and humanScanPath().
+   */
+  real: { name: 'real', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.004, blurAngVel: 2.5 },
+  harsh: { name: 'harsh', depthRes: [32, 24], sigmaA: 0.01, sigmaB: 0.025, flyingPixels: 0.8, edgeBlur: 1, smooth: 0.5, dropout: 0.25, holeBlobs: 4, outliers: 0.02, maxRange: 4, driftPos: 0.025, driftRot: 0.01, jitterPos: 0.008, jitterRot: 0.005, planeEdgeErr: 0.1, planeHeightErr: 0.02, floorErr: 0.03 },
+} satisfies Record<string, NoiseProfile>;
+export type NoiseName = keyof typeof NOISE_PROFILES;
+
+const MAT_CODE = { matte: 0, textureless: 1, dark: 2, glass: 0, mirror: 0 } as const;
+
+/** Smooth 3D value noise in [-1,1], ~0.4m feature size. */
+function worldNoise(x: number, y: number, z: number): number {
+  const s = 2.5;
+  x *= s;
+  y *= s;
+  z *= s;
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const fx = x - xi, fy = y - yi, fz = z - zi;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy), w = fz * fz * (3 - 2 * fz);
+  const h = (a: number, b: number, c: number) => {
+    const n = Math.sin(a * 127.1 + b * 311.7 + c * 74.7) * 43758.5453;
+    return (n - Math.floor(n)) * 2 - 1;
+  };
+  const l = (a: number, b: number, t: number) => a + (b - a) * t;
+  return l(
+    l(l(h(xi, yi, zi), h(xi + 1, yi, zi), u), l(h(xi, yi + 1, zi), h(xi + 1, yi + 1, zi), u), v),
+    l(l(h(xi, yi, zi + 1), h(xi + 1, yi, zi + 1), u), l(h(xi, yi + 1, zi + 1), h(xi + 1, yi + 1, zi + 1), u), v),
+    w,
+  );
+}
+
+function applyPoseError(e: { yaw: number; pitch: number; x: number; y: number; z: number }, c: Vec3, p: Vec3): Vec3 {
+  // Rotate about the camera, then translate.
+  const dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+  const cy = Math.cos(e.yaw), sy = Math.sin(e.yaw), cp = Math.cos(e.pitch), sp = Math.sin(e.pitch);
+  const x1 = dx * cy + dz * sy, z1 = -dx * sy + dz * cy;
+  const y2 = dy * cp - z1 * sp, z2 = dy * sp + z1 * cp;
+  return { x: c.x + x1 + e.x, y: c.y + y2 + e.y, z: c.z + z2 + e.z };
+}
+
 export interface SensorCaps {
   depth: boolean;
   planes: boolean;
@@ -45,35 +136,211 @@ export interface SensorCaps {
 export class SimSensor {
   private rng: Rng;
   private detectedPlanes = new Map<string, PlaneInput>();
+  private texturelessPlanes = new Set<string>();
   private allPlanes: PlaneInput[];
-  constructor(readonly room: SimRoom, readonly caps: SensorCaps = { depth: true, planes: true, mesh: false }, seed = 7, readonly depthNoise = 0.01) {
+  readonly noise: NoiseProfile;
+  constructor(readonly room: SimRoom, readonly caps: SensorCaps = { depth: true, planes: true, mesh: false }, seed = 7, noise: NoiseProfile | NoiseName = 'ideal') {
     this.rng = new Rng(seed);
-    this.allPlanes = buildPlanes(room);
+    this.noise = typeof noise === 'string' ? NOISE_PROFILES[noise] : noise;
+    this.allPlanes = buildPlanes(room).map((p) => this.perturbPlane(p));
+    // Planes on texture-less surfaces (blank walls, bare floors) are harder to detect.
+    for (const p of this.allPlanes) {
+      const m = p.id === 'floor' ? room.floorMaterial : room.boxes[Number(p.id.replace(/\D+(\d+).*/, '$1'))]?.material;
+      if (this.noise.materials && m === 'textureless') this.texturelessPlanes.add(p.id);
+    }
+  }
+
+  /** Plane detection is imprecise: boundaries are off and heights wobble a little. */
+  private perturbPlane(p: PlaneInput): PlaneInput {
+    const N = this.noise;
+    if (!N.planeEdgeErr && !N.planeHeightErr) return p;
+    const c = p.polygon.reduce((a, q) => ({ x: a.x + q.x / p.polygon.length, y: a.y + q.y / p.polygon.length, z: a.z + q.z / p.polygon.length }), { x: 0, y: 0, z: 0 });
+    const horizontal = Math.abs(p.normal.y) > 0.85;
+    const dh = horizontal ? this.gauss() * N.planeHeightErr : 0;
+    const polygon = p.polygon.map((q) => {
+      // Move each vertex towards/away from the centre by a random amount (edge error).
+      const dx = q.x - c.x, dy = q.y - c.y, dz = q.z - c.z;
+      const L = Math.hypot(dx, dy, dz) || 1;
+      const e = this.gauss() * N.planeEdgeErr;
+      return { x: q.x + (dx / L) * e, y: q.y + (horizontal ? dh : (dy / L) * e), z: q.z + (dz / L) * e };
+    });
+    return { ...p, polygon };
   }
 
   /**
-   * A low-res depth image like ARCore's, turned into world points.
-   * Points beyond maxRange are returned at their true position; the world
-   * model clips them to free-space rays.
+   * A low-res depth image like ARCore's, turned into world points, degraded
+   * according to the sensor's noise profile (see NOISE_PROFILES).
    */
-  depthPoints(cam: SimCamera, w = 40, h = 30, maxRange = 5): Vec3[] {
+  depthPoints(cam: SimCamera, w = this.noise.depthRes[0], h = this.noise.depthRes[1]): Vec3[] {
+    const img = this.depthImage(cam, w, h);
+    return depthImageToPoints(img, filterDiscontinuities(img));
+  }
+
+  /**
+   * The raw depth image the device would hand the app, with its *tracked*
+   * (estimated, possibly wrong) camera pose. Same format as ArMode builds from
+   * WebXR, so the same front-end (filtering, gating) runs on both.
+   */
+  depthImage(cam: SimCamera, w = this.noise.depthRes[0], h = this.noise.depthRes[1]): DepthImage {
+    const N = this.noise;
     const { forward, right, up } = cameraBasis(cam);
     const t = Math.tan(cam.fovY / 2);
-    const pts: Vec3[] = [];
+    const far = N.maxRange * 1.6;
+    // 1. True depth image (z-depth) and ray directions.
+    const depth = new Float32Array(w * h);
+    const mats = new Uint8Array(w * h);
+    const dirs: Vec3[] = new Array(w * h);
     for (let py = 0; py < h; py++)
       for (let px = 0; px < w; px++) {
-        const nx = ((px + this.rng.next()) / w) * 2 - 1, ny = ((py + this.rng.next()) / h) * 2 - 1;
+        const nx = ((px + 0.5) / w) * 2 - 1, ny = ((py + 0.5) / h) * 2 - 1;
         const dx = forward.x + right.x * nx * t * cam.aspect + up.x * ny * t;
         const dy = forward.y + right.y * nx * t * cam.aspect + up.y * ny * t;
         const dz = forward.z + right.z * nx * t * cam.aspect + up.z * ny * t;
         const l = Math.hypot(dx, dy, dz);
         const d = { x: dx / l, y: dy / l, z: dz / l };
-        const hit = this.room.raycast(cam.pos, d, maxRange * 1.5);
-        let dist = Number.isFinite(hit.t) ? hit.t : maxRange * 1.5;
-        dist *= 1 + this.gauss() * this.depthNoise;
-        pts.push({ x: cam.pos.x + d.x * dist, y: cam.pos.y + d.y * dist, z: cam.pos.z + d.z * dist });
+        let range: number;
+        if (N.materials) {
+          const sr = this.room.sensorRay(cam.pos, d, far);
+          range = Number.isFinite(sr.range) ? sr.range : far;
+          mats[py * w + px] = MAT_CODE[sr.material];
+        } else {
+          const hit = this.room.raycast(cam.pos, d, far);
+          range = Number.isFinite(hit.t) ? hit.t : far;
+        }
+        dirs[py * w + px] = d;
+        depth[py * w + px] = range * (d.x * forward.x + d.y * forward.y + d.z * forward.z);
       }
-    return pts;
+    // 2. Edge blur / flying pixels: depth sensors smear across discontinuities
+    //    and smooth away thin structures (table legs).
+    let img = depth;
+    if (N.edgeBlur > 0) {
+      const out = new Float32Array(w * h);
+      const r = N.edgeBlur;
+      for (let py = 0; py < h; py++)
+        for (let px = 0; px < w; px++) {
+          let sum = 0, n = 0;
+          for (let yy = Math.max(0, py - r); yy <= Math.min(h - 1, py + r); yy++)
+            for (let xx = Math.max(0, px - r); xx <= Math.min(w - 1, px + r); xx++) {
+              sum += depth[yy * w + xx];
+              n++;
+            }
+          const mean = sum / n, own = depth[py * w + px];
+          // Median-ish behaviour: mostly keep own value, but near edges a fraction
+          // of pixels take the blurred (in-between) value: classic flying pixels.
+          const edge = Math.abs(mean - own) > 0.08 * own;
+          out[py * w + px] = edge && this.rng.chance(N.flyingPixels) ? mean : own * (1 - N.smooth) + mean * N.smooth;
+        }
+      img = out;
+    }
+    // 3. Low-frequency correlated bias + per-pixel noise, both growing with distance.
+    const gx = 4, gy = 3;
+    const bias = Array.from({ length: (gx + 1) * (gy + 1) }, () => this.gauss());
+    const biasAt = (u: number, v: number) => {
+      const fx = u * gx, fy = v * gy;
+      const x0 = Math.min(gx - 1, Math.floor(fx)), y0 = Math.min(gy - 1, Math.floor(fy));
+      const ax = fx - x0, ay = fy - y0;
+      const b = (x: number, y: number) => bias[y * (gx + 1) + x];
+      return (b(x0, y0) * (1 - ax) + b(x0 + 1, y0) * ax) * (1 - ay) + (b(x0, y0 + 1) * (1 - ax) + b(x0 + 1, y0 + 1) * ax) * ay;
+    };
+    // 4. Holes: blobs where the sensor returns nothing (texture-less or dark areas).
+    const holes = Array.from({ length: N.holeBlobs }, () => ({ x: this.rng.next(), y: this.rng.next(), r: this.rng.range(0.05, 0.18) }));
+    // 5. Pose error for this frame: slow drift plus jitter.
+    const pose = this.stepPoseError();
+    const out = new Float32Array(w * h);
+    for (let py = 0; py < h; py++)
+      for (let px = 0; px < w; px++) {
+        const u = (px + 0.5) / w, v = (py + 0.5) / h;
+        if (this.rng.chance(N.dropout)) continue;
+        if (holes.some((hb) => (u - hb.x) ** 2 + (v - hb.y) ** 2 < hb.r * hb.r)) continue;
+        const i = py * w + px;
+        const d = dirs[i];
+        const cosA = d.x * forward.x + d.y * forward.y + d.z * forward.z;
+        let z = img[i];
+        // Hard materials: blank surfaces and dark fabric give holes and extra noise.
+        const mat = mats[i];
+        if (mat === 1 && this.rng.chance(0.5)) continue;
+        if (mat === 2 && this.rng.chance(0.6)) continue;
+        const matGain = mat === 1 ? 2.5 : mat === 2 ? 1.5 : 1;
+        if (this.rng.chance(N.outliers)) z = this.rng.range(0.3, N.maxRange);
+        else {
+          const sigma = (N.sigmaA + N.sigmaB * z * z) * matGain;
+          let e = 0.6 * this.gauss() + 0.8 * biasAt(u, v);
+          if (N.persistentBias) {
+            // World-anchored error at the true surface point: the same wall is
+            // "bent" the same way every time it's seen.
+            const r0 = z / cosA;
+            e += N.persistentBias * 1.5 * worldNoise(cam.pos.x + d.x * r0, cam.pos.y + d.y * r0, cam.pos.z + d.z * r0);
+          }
+          z += sigma * e;
+        }
+        if (!(z > 0.2) || z > N.maxRange) continue; // no reading
+        out[(h - 1 - py) * w + px] = z; // image row 0 = top
+      }
+    // Camera pose as tracked (true pose with this frame's tracking error).
+    const est = (v: Vec3) => applyPoseError(pose, { x: 0, y: 0, z: 0 }, v);
+    const X = est(right), Y = est(up), Zb = est({ x: -forward.x, y: -forward.y, z: -forward.z });
+    const T = applyPoseError(pose, cam.pos, cam.pos);
+    const camToWorld = [X.x, X.y, X.z, 0, Y.x, Y.y, Y.z, 0, Zb.x, Zb.y, Zb.z, 0, T.x, T.y, T.z, 1];
+    // Inverse of a standard perspective projection (near 0.1, far 100).
+    const n = 0.1, f = 100, ty = Math.tan(cam.fovY / 2), tx = ty * cam.aspect;
+    const invProj = [tx, 0, 0, 0, 0, ty, 0, 0, 0, 0, 0, (n - f) / (2 * f * n), 0, 0, -1, (f + n) / (2 * f * n)];
+    return { w, h, depth: out, invProj, camToWorld };
+  }
+
+  /** Floor height as measured by the placement hit-test (with error). */
+  floorEstimate(): number {
+    return this.gauss() * this.noise.floorErr;
+  }
+
+  /** The camera position the device *believes* it is at (true pose + tracking error). */
+  estimatedEye(cam: SimCamera): Vec3 {
+    return applyPoseError(this.poseErr, cam.pos, cam.pos);
+  }
+
+  private poseErr = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
+  private poseJit = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
+  /** Mean-reverting random walk (tracking drifts, then relocalises) plus jitter. */
+  private lossFrames = 0;
+  /** Tracking state for this frame: false while tracking is lost or the frame is too blurred. */
+  trackingOk(angVel = 0): boolean {
+    const N = this.noise;
+    if (this.lossFrames > 0) {
+      this.lossFrames--;
+      if (this.lossFrames === 0) this.relocalise();
+      return false;
+    }
+    if (N.lossRate && this.rng.chance(N.lossRate)) {
+      this.lossFrames = this.rng.int(10, 20);
+      return false;
+    }
+    if (N.relocRate && this.rng.chance(N.relocRate)) this.relocalise();
+    if (N.blurAngVel && angVel > N.blurAngVel) return false;
+    return true;
+  }
+  /** A sudden pose correction (loop closure / relocalisation). */
+  private relocalise() {
+    const N = this.noise, e = this.poseErr;
+    e.x += this.gauss() * (N.relocPos ?? 0);
+    e.z += this.gauss() * (N.relocPos ?? 0);
+    e.y += this.gauss() * (N.relocPos ?? 0) * 0.3;
+    e.yaw += this.gauss() * (N.relocRot ?? 0);
+  }
+
+  private stepPoseError() {
+    const N = this.noise, e = this.poseErr, dt = 1 / 10;
+    const k = 0.05; // reversion per frame
+    e.yaw += -k * e.yaw + this.gauss() * N.driftRot * Math.sqrt(dt);
+    e.pitch += -k * e.pitch + this.gauss() * N.driftRot * 0.5 * Math.sqrt(dt);
+    e.x += -k * e.x + this.gauss() * N.driftPos * Math.sqrt(dt);
+    e.y += -k * e.y + this.gauss() * N.driftPos * 0.5 * Math.sqrt(dt);
+    e.z += -k * e.z + this.gauss() * N.driftPos * Math.sqrt(dt);
+    const j = this.poseJit;
+    j.yaw = e.yaw + this.gauss() * N.jitterRot;
+    j.pitch = e.pitch + this.gauss() * N.jitterRot;
+    j.x = e.x + this.gauss() * N.jitterPos;
+    j.y = e.y + this.gauss() * N.jitterPos;
+    j.z = e.z + this.gauss() * N.jitterPos;
+    return j;
   }
 
   /** Planes become "detected" once part of them has been seen; they then persist. */
@@ -86,7 +353,8 @@ export class SimSensor {
         const lifted = { x: s.x + p.normal.x * 0.01, y: s.y + p.normal.y * 0.01, z: s.z + p.normal.z * 0.01 };
         if (inFrustum(cam, lifted, 0.95) && this.room.visible(cam.pos, lifted)) seen++;
       }
-      if (seen >= 2) this.detectedPlanes.set(p.id, p);
+      // Blank surfaces need a much better look before a plane is found.
+      if (seen >= (this.texturelessPlanes.has(p.id) ? 8 : 2)) this.detectedPlanes.set(p.id, p);
     }
     return [...this.detectedPlanes.values()];
   }
@@ -163,6 +431,8 @@ export function buildPlanes(room: SimRoom): PlaneInput[] {
   });
   room.boxes.forEach((b, idx) => {
     const pc = room.pieces[b.piece];
+    // Plane detection needs visual features: nothing on glass or mirrors.
+    if (b.material === 'glass' || b.material === 'mirror') return;
     const area = (b.max.x - b.min.x) * (b.max.z - b.min.z);
     if (pc.label !== 'wall' && b.max.y > 0.1 && area > 0.08) {
       // Top face unless something sits right on top of it.

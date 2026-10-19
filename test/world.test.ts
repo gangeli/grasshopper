@@ -74,7 +74,7 @@ describe.each(MODES)('world model + navigation — %s', (_name, caps) => {
       for (let s = 1; s < path.length; s++) {
         const a = path[s - 1], b = path[s];
         for (let t = 0; t <= 1; t += 0.05) {
-          const p = b.jump ? NavGrid.arcPoint(a, b, t) : { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
+          const p = b.jump ? NavGrid.arcPoint(a, b, t, undefined, b.lift) : { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
           expect(thickSolidAt(room, { x: p.x, y: p.y + 0.12, z: p.z }), `segment ${s} t=${t.toFixed(2)} of path to ${JSON.stringify(goal)}`).toBe(false);
         }
       }

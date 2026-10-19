@@ -1,5 +1,6 @@
 import type { Vec3 } from '../core/math';
 import { VoxelGrid } from './VoxelGrid';
+import { depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 
 /**
  * Everything the pet knows about the physical room. It fuses the sensor
@@ -54,6 +55,20 @@ export class WorldModel {
   readonly height: number;
   readonly labels = new Map<string, LabeledRegion>();
   private planeVersions = new Map<string, string>();
+  /** Inputs kept so the grid can be rebuilt if the floor estimate is corrected. */
+  private planeInputs = new Map<string, PlaneInput>();
+  private meshInputs = new Map<string, MeshInput>();
+  private center: Vec3 = { x: 0, y: 0, z: 0 };
+  /** Increments whenever the grid is replaced (consumers must rebuild derived data). */
+  epoch = 0;
+  /** Floor-height evidence from depth: 1cm histogram around the current estimate. */
+  private floorHist = new Float32Array(31);
+  private floorSamples = 0;
+  floorRefinements = 0;
+  private floorPlanes = new Map<string, { y: number; area: number }>();
+  private pendingFloorOffset: number | null = null;
+  /** Set false once play starts: rebuilding the map mid-round would be disruptive. */
+  allowFloorRefine = true;
   /** Number of depth points integrated so far (diagnostics/HUD). */
   depthPoints = 0;
 
@@ -75,6 +90,7 @@ export class WorldModel {
   /** Establish the floor height and an anchor point; allocates the grid. */
   setFloor(y: number, center: Vec3): void {
     if (this.grid) return;
+    this.center = { ...center };
     const r = this.res;
     const n = Math.ceil((this.halfExtent * 2) / r);
     const ny = Math.ceil(this.height / r) + FLOOR_LAYERS_BELOW;
@@ -105,6 +121,7 @@ export class WorldModel {
   }
 
   ingestPlane(plane: PlaneInput): void {
+    this.planeInputs.set(plane.id, plane);
     const g = this.grid;
     if (!g || plane.polygon.length < 3) return;
     // Skip re-rasterizing an unchanged plane.
@@ -116,6 +133,10 @@ export class WorldModel {
     const horizontal = Math.abs(n.y) > 0.85;
     const c = centroid(plane.polygon);
     if (horizontal && n.y > 0 && this.isFloorHeight(c.y, 0.1)) {
+      // Floor planes are fitted over many points: the best floor-height evidence.
+      let area = 0;
+      rasterizePolygon(plane.polygon, n, 0.1, () => (area += 0.01));
+      this.floorPlanes.set(plane.id, { y: c.y, area });
       // Floor: rasterize into the observed mask.
       rasterizePolygon(plane.polygon, n, g.res * 0.7, (p) => g.markObserved(p.x, p.z));
       return;
@@ -148,6 +169,7 @@ export class WorldModel {
       max.y = Math.max(p.y, q.y) + 1e-3;
       max.z = Math.max(p.z, q.z) + 1e-3;
       g.fillBox(min, max, 100);
+      if (horizontal && n.y > 0) g.noteHeight(g.cellX(p.x), g.cellY(p.y - 1e-4), g.cellZ(p.z), p.y);
     });
     if (horizontal) {
       // Below a raised plane: tables are open underneath, seats/ottomans are
@@ -163,6 +185,7 @@ export class WorldModel {
   }
 
   ingestMesh(mesh: MeshInput): void {
+    this.meshInputs.set(mesh.id, mesh);
     const g = this.grid;
     if (!g) return;
     const P = mesh.positions, I = mesh.indices;
@@ -193,6 +216,7 @@ export class WorldModel {
           } else {
             const i = g.cellX(x), j = g.cellY(y), k = g.cellZ(z);
             if (g.get(i, j, k) < 100) g.set(i, j, k, 100);
+            if (up) g.noteHeight(i, j, k, y);
             if (g.inBounds(i, j, k)) g.underside[g.idx(i, j, k)] |= down ? 1 : up ? 2 : 0;
           }
           if (mesh.label) pts.push({ x, y, z });
@@ -202,28 +226,151 @@ export class WorldModel {
   }
 
   /**
+   * Depth noise model: sigma(z) = sigmaA + sigmaB·z². Defaults are typical of
+   * ARCore depth (≈1.8cm at 1m, ≈11cm at 3m). Readings are weighted by it:
+   * noisy far readings only carve free space (cautiously) and never create
+   * obstacles on their own.
+   */
+  depthSigmaA = 0.006;
+  depthSigmaB = 0.012;
+  /** Readings noisier than this only carve free space. */
+  maxHitSigma = 0.06;
+
+  readonly poseGate = new PoseGate();
+  /** Weight free-space evidence by measurement precision (see ingestDepth). */
+  weightedCarving = true;
+  /** Gate depth frames on tracking quality. */
+  gateFrames = true;
+  /** Drop depth-discontinuity pixels. */
+  filterEdges = true;
+  /** Max height above the floor at which a noisy reading still counts as floor. */
+  floorTolCap = 0.06;
+
+  /**
+   * Full depth front end, shared by the device and the simulator: gate frames
+   * taken under bad tracking, drop discontinuity ("flying") pixels, lift to
+   * world points and integrate. `t` is in seconds. Returns false if the frame
+   * was rejected.
+   */
+  ingestDepthImage(img: DepthImage, t: number, emulatedPose = false): boolean {
+    const M = img.camToWorld;
+    const eye = { x: M[12], y: M[13], z: M[14] };
+    const fwd = { x: -M[8], y: -M[9], z: -M[10] };
+    if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
+    this.ingestDepth(eye, depthImageToPoints(img, this.filterEdges ? filterDiscontinuities(img) : img.depth));
+    return true;
+  }
+
+  /**
    * Integrate a set of depth samples taken from `eye`. Points near the floor
    * mark the floor as observed; others mark occupancy and carve free space.
    */
   ingestDepth(eye: Vec3, points: Vec3[], maxRange = 4.5): void {
     const g = this.grid;
     if (!g) return;
+    const r = g.res;
     for (const p of points) {
       const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z);
       if (d < 0.1) continue;
-      const far = d > maxRange;
-      const target = far
-        ? { x: eye.x + ((p.x - eye.x) * maxRange) / d, y: eye.y + ((p.y - eye.y) * maxRange) / d, z: eye.z + ((p.z - eye.z) * maxRange) / d }
-        : p;
-      if (!far && p.y < this.floorY + 0.035) {
-        g.markObserved(p.x, p.z);
-        // Free space down to just above the floor.
-        g.integrateRay(eye, { x: p.x, y: this.floorY + 0.03, z: p.z }, false);
-      } else {
-        g.integrateRay(eye, target, !far);
-      }
       this.depthPoints++;
+      const far = d > maxRange;
+      const sigma = this.depthSigmaA + this.depthSigmaB * d * d;
+      const dirY = (p.y - eye.y) / d;
+      // Collect floor-height evidence from close, steeply downward readings.
+      if (d < 2.0 && dirY < -0.4 && Math.abs(p.y - this.floorY) < 0.15) {
+        this.floorHist[Math.round((p.y - this.floorY) * 100) + 15]++;
+        this.floorSamples++;
+      }
+      // Vertical uncertainty of this point.
+      const sy = sigma * Math.abs(dirY);
+      // Floor only if close to it given the noise, capped so a small toy
+      // can't be explained away as "noisy floor".
+      const floorTol = Math.min(this.floorTolCap, 0.025 + sy);
+      if (!far && p.y < this.floorY + floorTol) {
+        // Floor (within noise). Free space down to just above it.
+        g.markObserved(p.x, p.z);
+        const lowBand = p.y > this.floorY + 0.025;
+        if (lowBand && sigma <= 0.03) {
+          // Ambiguous: noisy floor or a small toy. A close, precise reading here
+          // is weak obstacle evidence; consistent repeats make it an obstacle.
+          g.add(g.cellX(p.x), g.cellY(p.y), g.cellZ(p.z), 5);
+        }
+        // Clearly-floor precise readings clear the layer just above the floor.
+        const stopY = !lowBand && sigma <= 0.03 ? this.floorY + 0.02 : this.floorY + floorTol;
+        if (dirY < -0.05) {
+          const t = (stopY - eye.y) / dirY;
+          g.integrateRay(eye, { x: eye.x + ((p.x - eye.x) / d) * t, y: stopY, z: eye.z + ((p.z - eye.z) / d) * t }, false, 0, -3, 0);
+        }
+        continue;
+      }
+      if (far) {
+        const target = { x: eye.x + ((p.x - eye.x) * maxRange) / d, y: eye.y + ((p.y - eye.y) * maxRange) / d, z: eye.z + ((p.z - eye.z) * maxRange) / d };
+        g.integrateRay(eye, target, false, 0, -1, 3 * sigma);
+        continue;
+      }
+      const carveShort = Math.max(r * 1.5, 2.5 * sigma);
+      // Free-space evidence is weighted by precision too: a close, precise ray
+      // clears space confidently, a distant noisy one only nudges it.
+      const miss = this.weightedCarving ? -Math.max(1, Math.round(3 * Math.min(1, 0.03 / sigma))) : -3;
+      if (sigma > this.maxHitSigma) {
+        // Too uncertain to place an obstacle; still (weak) evidence of free space nearer.
+        g.integrateRay(eye, p, false, 0, -1, carveShort);
+        continue;
+      }
+      const hitDelta = Math.round(14 * Math.min(1, Math.max(0.4, 0.025 / sigma)));
+      g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
     }
+  }
+
+  /**
+   * The floor height comes from the placement hit-test, which can be off by a
+   * few cm. Depth sees lots of floor, so check the estimate against it and, if
+   * it's clearly off, rebuild the grid at the corrected height (early on, so
+   * little is lost). Returns true if the floor moved.
+   */
+  refineFloor(minSamples = 400): boolean {
+    if (!this.grid || !this.allowFloorRefine || this.floorRefinements >= 2) return false;
+    // Prefer detected floor planes (area-weighted) once there are enough of them.
+    let pa = 0, py = 0;
+    for (const fp of this.floorPlanes.values()) {
+      pa += fp.area;
+      py += fp.y * fp.area;
+    }
+    if (pa >= 2) {
+      const off = py / pa - this.floorY;
+      if (Math.abs(off) < 0.02) return false;
+      return this.rebuildAtFloor(this.floorY + off);
+    }
+    if (this.floorSamples < minSamples) return false;
+    let best = 0;
+    for (let b = 1; b < this.floorHist.length; b++) if (this.floorHist[b] > this.floorHist[best]) best = b;
+    // Sub-bin estimate from the neighbouring bins.
+    const h = this.floorHist, l = h[best - 1] ?? 0, rr = h[best + 1] ?? 0;
+    const off = (best - 15 + (rr - l) / Math.max(1, h[best] + l + rr)) / 100;
+    this.floorHist.fill(0);
+    this.floorSamples = 0;
+    // Hysteresis: a 1–2cm error is harmless and within tracking noise; only
+    // correct a clear error that two consecutive windows agree on.
+    const prev = this.pendingFloorOffset;
+    // After one correction, only a gross error (tracking reset) justifies another.
+    this.pendingFloorOffset = Math.abs(off) >= (this.floorRefinements ? 0.05 : 0.03) ? off : null;
+    if (prev === null || this.pendingFloorOffset === null || Math.abs(prev - off) > 0.015) return false;
+    this.pendingFloorOffset = null;
+    return this.rebuildAtFloor(this.floorY + (prev + off) / 2);
+  }
+
+  private rebuildAtFloor(newY: number): boolean {
+    this.floorRefinements++;
+    this.floorHist.fill(0);
+    this.floorSamples = 0;
+    this.grid = null;
+    this.planeVersions.clear();
+    this.labels.clear();
+    this.setFloor(newY, this.center);
+    this.epoch++;
+    for (const pl of this.planeInputs.values()) this.ingestPlane(pl);
+    for (const m of this.meshInputs.values()) this.ingestMesh(m);
+    return true;
   }
 
   private addLabel(id: string, label: string, pts: Vec3[], padBelow: number) {

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { GameStack } from '../game/stack';
 import { viewFromCamera } from '../game/Visibility';
+import type { DepthImage } from '../world/DepthFrame';
 import type { Vec3 } from '../core/math';
 import type { Hud } from './Hud';
 import type { Stage } from './Stage';
@@ -28,7 +29,7 @@ export class ArMode {
   private ui: GameUI;
   private lastT = 0;
   /** Diagnostics exposed for tests/debug overlay. */
-  readonly stats = { planes: 0, meshes: 0, depthFrames: 0, depthUsage: '' as string, refSpace: '' as string };
+  readonly stats = { planes: 0, meshes: 0, depthFrames: 0, depthRejected: 0, depthUsage: '' as string, refSpace: '' as string };
   onExit: (() => void) | null = null;
 
   constructor(readonly stage: Stage, readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
@@ -140,7 +141,9 @@ export class ArMode {
     if (game.phase !== 'waiting') {
       game.update(dt, viewFromCamera(cam));
       this.stage.followPet(this.stack);
-      if (this.frameNo % 20 === 0) this.stage.updateOccluder(this.stack);
+      // Occluder meshing takes tens of ms on a phone: refresh every ~2s while the
+      // map grows, less often once a round is under way.
+      if (this.frameNo % (game.phase === 'roam' ? 120 : 300) === 0) this.stage.updateOccluder(this.stack);
       this.stage.updateDebug(this.stack);
     }
     this.ui.update(cam);
@@ -222,38 +225,32 @@ export class ArMode {
     }
     if (!info) return;
     this.stats.depthFrames++;
-    const points = unprojectDepth(info, view, 40, 30);
-    const eye = view.transform.position;
-    this.stack.world.ingestDepth({ x: eye.x, y: eye.y, z: eye.z }, points);
+    // Same front end as the simulator: discontinuity filter + tracking gate.
+    const img = sampleDepthImage(info, view, 40, 30);
+    const emulated = !!viewerPose?.emulatedPosition;
+    if (!this.stack.world.ingestDepthImage(img, frame.predictedDisplayTime / 1000, emulated)) this.stats.depthRejected++;
   }
 }
 
 /**
- * Sample a CPU depth image on a grid and lift samples to world space.
- * Normalised view coordinates have their origin at the top-left; depth is
- * the distance along the view's -Z axis.
+ * Sample a CPU depth image on a w×h grid into a DepthImage. Normalised view
+ * coordinates have their origin at the top-left; depth is the distance along
+ * the view's -Z axis.
  */
-export function unprojectDepth(info: { getDepthInMeters(x: number, y: number): number }, view: { projectionMatrix: Float32Array | number[]; transform: { matrix: Float32Array | number[] } }, w: number, h: number): Vec3[] {
-  const invProj = new THREE.Matrix4().fromArray(Array.from(view.projectionMatrix)).invert();
-  const world = new THREE.Matrix4().fromArray(Array.from(view.transform.matrix));
-  const out: Vec3[] = [];
-  const p = new THREE.Vector3();
+export function sampleDepthImage(info: { getDepthInMeters(x: number, y: number): number }, view: { projectionMatrix: Float32Array | number[]; transform: { matrix: Float32Array | number[] } }, w: number, h: number): DepthImage {
+  const invProj = new THREE.Matrix4().fromArray(Array.from(view.projectionMatrix)).invert().elements;
+  const depth = new Float32Array(w * h);
   for (let j = 0; j < h; j++)
     for (let i = 0; i < w; i++) {
-      const u = (i + 0.5) / w, v = (j + 0.5) / h;
       let d = 0;
       try {
-        d = info.getDepthInMeters(u, v);
+        d = info.getDepthInMeters((i + 0.5) / w, (j + 0.5) / h);
       } catch {
         continue;
       }
-      if (!(d > 0.05) || !Number.isFinite(d)) continue;
-      p.set(u * 2 - 1, 1 - v * 2, -1).applyMatrix4(invProj);
-      // p is on the near plane in view space; scale so that -z == depth.
-      p.multiplyScalar(d / -p.z).applyMatrix4(world);
-      out.push({ x: p.x, y: p.y, z: p.z });
+      if (d > 0.05 && Number.isFinite(d)) depth[j * w + i] = d;
     }
-  return out;
+  return { w, h, depth, invProj, camToWorld: Array.from(view.transform.matrix) };
 }
 
 const ids = new WeakMap<object, number>();

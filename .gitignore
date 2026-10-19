@@ -1,5 +1,6 @@
-node_modules
-dist
-test-results
-playwright-report
 artifacts
+data
+dist
+node_modules
+playwright-report
+test-results
