@@ -1,3 +1,5 @@
+import type { ActivityId, ActivityStatus } from '../game/Activities';
+
 /**
  * DOM HUD. In AR it is the WebXR dom-overlay root, so the same buttons work
  * on a phone in AR and in the simulator. Pure DOM, no framework.
@@ -19,6 +21,10 @@ export class Hud {
   private card: HTMLElement;
   private cardText: HTMLElement;
   private reticleHint: HTMLElement;
+  private acts: HTMLElement;
+  private actButtons = new Map<ActivityId, { btn: HTMLButtonElement; sub: HTMLElement; bar: HTMLElement; key: string }>();
+  /** Called when an activity chip is tapped. */
+  onActivity: ((id: ActivityId) => void) | null = null;
   private bubbleTimer = 0;
   private handlers = new Map<HudAction, () => void>();
   private diffBtn: HTMLButtonElement;
@@ -70,7 +76,12 @@ export class Hud {
     this.cardText = el('div', 'card-text');
     this.card.append(this.cardText, button('Play again', 'primary', () => this.fire('again')));
     this.reticleHint = el('div', 'place-hint', 'Point at the floor and tap to place Hopper');
-    this.root.append(top, corner, this.tools, bottom, this.cover, this.card, this.reticleHint);
+    // The activities picker (walk, hide and seek, ...), see setActivities.
+    this.acts = el('div', 'acts');
+    this.acts.setAttribute('role', 'group');
+    this.acts.setAttribute('aria-label', 'Activities');
+    this.root.append(top, corner, this.tools, bottom, this.acts, this.cover, this.card, this.reticleHint);
+    this.setActivities(null);
     this.showTools(false);
     this.setAlert(null);
     this.showCover(false);
@@ -83,6 +94,72 @@ export class Hud {
   }
   private fire(a: HudAction) {
     this.handlers.get(a)?.();
+  }
+  /** Run the handler of an action as if its button was pressed. */
+  trigger(a: HudAction) {
+    this.fire(a);
+  }
+
+  /**
+   * Show the activities picker (null hides it). Chips are built once and
+   * updated in place; this is cheap to call every frame.
+   */
+  setActivities(list: readonly ActivityStatus[] | null) {
+    this.acts.style.display = list ? '' : 'none';
+    if (!list) return;
+    for (const a of list) {
+      let c = this.actButtons.get(a.id);
+      if (!c) {
+        const btn = button('', 'act', () => this.onActivity?.(a.id));
+        btn.dataset.activity = a.id;
+        const icon = el('span', 'act-icon', a.icon);
+        icon.setAttribute('aria-hidden', 'true');
+        const text = el('span', 'act-text');
+        const sub = el('span', 'act-sub');
+        const bar = el('i', '');
+        const track = el('span', 'act-bar');
+        track.append(bar);
+        text.append(el('span', 'act-label', a.label), sub, track);
+        btn.append(icon, text);
+        this.acts.append(btn);
+        c = { btn, sub, bar, key: '' };
+        this.actButtons.set(a.id, c);
+      }
+      const state = a.active ? 'active' : a.ready ? 'ready' : a.unlocked ? 'waiting' : 'locked';
+      const pct = Math.round(a.progress * 100);
+      const key = `${state}|${pct}|${a.hint}`;
+      if (key === c.key) continue;
+      c.key = key;
+      const b = c.btn;
+      for (const s of ['active', 'ready', 'waiting', 'locked']) b.classList.toggle(s, s === state);
+      const sub =
+        state === 'active' ? (a.id === 'walk' ? 'Hopper follows you' : 'Playing now') : state === 'ready' ? 'Tap to play!' : state === 'waiting' ? 'One moment…' : a.hint;
+      c.sub.textContent = sub;
+      c.bar.parentElement!.style.display = state === 'locked' ? '' : 'none';
+      c.bar.style.width = `${Math.max(4, pct)}%`;
+      b.setAttribute(
+        'aria-label',
+        state === 'ready' ? `Play ${a.label.toLowerCase()}` : state === 'locked' ? `${a.label} (locked, ${pct}%): ${a.hint}` : `${a.label}: ${sub}`,
+      );
+      b.setAttribute('aria-pressed', String(a.active));
+    }
+  }
+
+  /** A little pop and sparkle on an activity chip (it just unlocked). */
+  celebrateActivity(id: ActivityId) {
+    const b = this.actButtons.get(id)?.btn;
+    if (!b) return;
+    b.classList.remove('pop');
+    void b.offsetWidth; // restart the animation
+    b.classList.add('pop');
+    for (let i = 0; i < 8; i++) {
+      const s = el('i', 'spark');
+      const a = (i / 8) * Math.PI * 2;
+      s.style.setProperty('--dx', `${Math.cos(a) * 70}px`);
+      s.style.setProperty('--dy', `${Math.sin(a) * 34 - 10}px`);
+      b.append(s);
+      setTimeout(() => s.remove(), 1000);
+    }
   }
 
   say(msg: string, seconds = 5) {

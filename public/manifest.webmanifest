@@ -1,0 +1,16 @@
+{
+  "name": "Hopper — AR Hide & Seek",
+  "short_name": "Hopper",
+  "description": "A tiny creature moves into your room, then plays hide and seek with you.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#141a2c",
+  "theme_color": "#141a2c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -11,6 +11,7 @@ import { GameUI } from './GameUI';
 import { NavGrid } from '../world/NavGrid';
 import { VoxelGrid } from '../world/VoxelGrid';
 import { NavWorkerClient } from '../world/NavWorkerClient';
+import { HIDE_SEEK_MIN_AREA } from '../game/Activities';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -56,8 +57,9 @@ export class ArMode {
   private refSpace: XRReferenceSpace | null = null;
   private useFloorSpace = false;
   private frameNo = 0;
-  private planeTimes = new Map<XRPlane, number>();
-  private meshTimes = new Map<XRMesh, number>();
+  // Weak: the device drops plane/mesh objects as it merges and replaces them.
+  private planeTimes = new WeakMap<XRPlane, number>();
+  private meshTimes = new WeakMap<XRMesh, number>();
   private lastHit: Hit | null = null;
   private ui: GameUI;
   private lastT = 0;
@@ -359,7 +361,8 @@ export class ArMode {
       this.tryPlace(frame);
       return;
     }
-    // Tap on the pet.
+    // Tap on the pet (a reaction, or "found" while seeking) or on the floor
+    // (Hopper goes there); the screen tap's ray goes through the tapped pixel.
     if (this.tracking.frozen || !this.refSpace) return;
     const pose = frame.getPose(e.inputSource.targetRaySpace, this.refSpace);
     if (!pose || !isFiniteMatrix(pose.transform.matrix)) return;
@@ -640,7 +643,7 @@ export class ArMode {
       if (this.lastHit) this.noHitTold = false;
       return;
     }
-    if (game.phase === 'roam' && game.mappedArea() < 2 && now - this.mappingSince > 30 && now - this.lastTipT > 30) {
+    if (game.phase === 'roam' && game.mappedArea() < HIDE_SEEK_MIN_AREA && now - this.mappingSince > 30 && now - this.lastTipT > 30) {
       this.lastTipT = now;
       const noDepth = this.stats.depthUsage !== 'cpu-optimized' || this.stats.depthDead;
       const tips = noDepth
@@ -726,12 +729,25 @@ export class ArMode {
       this.stack.world.ingestPlane({ id: `p${planeId(plane)}`, polygon, normal: { x: n.x, y: n.y, z: n.z }, label });
     }
     this.planeFloorY = floorLabelled ?? lowest;
+    // Surfaces the device no longer reports are forgotten (checked now and then; cheap).
+    if (++this.surfaceSweep % 60 === 0) {
+      const live = new Set<string>();
+      for (const plane of planes) live.add(`p${planeId(plane)}`);
+      this.stack.world.forgetSurfaces({ planes: live });
+    }
   }
+  private surfaceSweep = 0;
+  private meshSweep = 0;
 
   private ingestMeshes(frame: XRFrame) {
     const meshes = (frame as unknown as { detectedMeshes?: Set<XRMesh> }).detectedMeshes;
     if (!meshes) return;
     this.stats.meshes = meshes.size;
+    if (++this.meshSweep % 60 === 0) {
+      const live = new Set<string>();
+      for (const mesh of meshes) live.add(`m${planeId(mesh)}`);
+      this.stack.world.forgetSurfaces({ meshes: live });
+    }
     for (const mesh of meshes) {
       if (this.meshTimes.get(mesh) === mesh.lastChangedTime) continue;
       const pose = frame.getPose(mesh.meshSpace, this.refSpace!);

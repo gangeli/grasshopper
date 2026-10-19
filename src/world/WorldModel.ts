@@ -207,6 +207,29 @@ export class WorldModel {
     if (plane.label) this.addLabel(plane.id, plane.label, plane.polygon, horizontal ? -0.05 : 0);
   }
 
+  /**
+   * The device stopped reporting these planes/meshes (merged, replaced or
+   * dropped): forget them, so map rebuilds don't re-apply stale surfaces and
+   * long sessions don't keep every surface ever seen. What they already
+   * contributed to the voxel map stays until newer evidence replaces it.
+   */
+  forgetSurfaces(live: { planes?: Set<string>; meshes?: Set<string> }): void {
+    if (live.planes)
+      for (const id of [...this.planeInputs.keys()])
+        if (!live.planes.has(id)) {
+          this.planeInputs.delete(id);
+          this.planeVersions.delete(id);
+          this.floorPlanes.delete(id);
+          this.labels.delete(id);
+        }
+    if (live.meshes)
+      for (const id of [...this.meshInputs.keys()])
+        if (!live.meshes.has(id)) {
+          this.meshInputs.delete(id);
+          this.labels.delete(id);
+        }
+  }
+
   ingestMesh(mesh: MeshInput): void {
     if (!this.frameIsIdentity) {
       const P = Array.from(mesh.positions);

@@ -98,6 +98,7 @@ export class HealthMonitor {
 
   private report(issue: HealthIssue, detail: string) {
     this.log.push({ t: this.t, issue, detail });
+    if (this.log.length > 300) this.log.splice(0, this.log.length - 300);
     if (this.log.length > 200) this.log.shift();
     this.counts[issue] = (this.counts[issue] ?? 0) + 1;
     this.onIssue?.(issue, detail);

@@ -13,10 +13,13 @@ import { describeSpot, findHideSpots, type HideSpot } from './HideSpots';
 import { petSamplePoints, petVisibility, type ViewPose } from './Visibility';
 import { measurePoseSamples } from '../pet/poseSamples';
 import { HealthMonitor, type HealthOptions } from './Health';
+import { Companion, standingNode } from './Companion';
+import { Activities, HIDE_SEEK_MIN_AREA, type ActivityDef } from './Activities';
 
 /**
  * Game flow:
- *   roam → (start) → countdown: the player covers their eyes while Hopper
+ *   roam ("walk": Hopper follows the player around, see Companion) →
+ *   (start) → countdown: the player covers their eyes while Hopper
  *   picks a spot and runs there → seek: the player looks around; Hopper stays
  *   put, giggles and peeks as hints → found → celebrate → roam.
  *
@@ -32,7 +35,23 @@ export interface GameEvents {
   onFound?: (info: FoundInfo) => void;
   /** An idle fidget started while roaming (for voice flavour). */
   onFidget?: (action: string) => void;
+  /** The player tapped somewhere and the game did something about it. */
+  onTap?: (result: TapResult) => void;
+  /** An activity became available for the first time (see Activities). */
+  onUnlock?: (activity: ActivityDef) => void;
 }
+
+/** What a tap did. Points are in the map frame. */
+export type TapResult =
+  | { kind: 'none' }
+  /** Tapped the hidden pet while seeking. */
+  | { kind: 'found' }
+  /** Tapped the pet while walking: it reacts. */
+  | { kind: 'pet'; reaction: ActionName }
+  /** Tapped a reachable spot: Hopper walks to `target` (a nav node near `at`). */
+  | { kind: 'goto'; target: Vec3; at: Vec3 }
+  /** Tapped somewhere Hopper can't go: unmapped ('unknown') or no path ('noPath'). */
+  | { kind: 'unreachable'; reason: 'unknown' | 'noPath'; at: Vec3 | null };
 
 export interface FoundInfo {
   seconds: number;
@@ -51,6 +70,8 @@ export interface GameOptions {
   seed: number;
   /** How far in front of the player Hopper likes to hang out while roaming (m). */
   roamDistance?: number;
+  /** Let Hopper hop onto low surfaces by itself while exploring (default true). */
+  roamHops?: boolean;
   health?: Partial<HealthOptions>;
 }
 
@@ -74,7 +95,11 @@ export class HideAndSeek {
   private peekTimer = 0;
   private previous: THREE.Vector3[] = [];
   private rng: Rng;
-  private roamTimer = 0;
+  /** Walk-mode behaviour: following the player and exploring nearby. */
+  readonly companion: Companion;
+  /** The activities menu (walk, hide and seek, ...). */
+  readonly activities: Activities;
+  private lastReaction: ActionName | null = null;
   private navTimer = 0;
   private relocated = false;
   private foundTimer = 0;
@@ -98,6 +123,35 @@ export class HideAndSeek {
     this.opts = { ...DEFAULTS, ...opts };
     this.rng = new Rng(this.opts.seed);
     this.health = new HealthMonitor(this, this.world, this.opts.health);
+    const game = this;
+    this.companion = new Companion(
+      {
+        pet,
+        get nav() {
+          return game.nav;
+        },
+        get floorY() {
+          return game.world.floorY;
+        },
+        follow: (path, cruise, action, yaw) => this.follow(path, cruise, action, yaw),
+        fidget: (a) => this.events.onFidget?.(a),
+      },
+      // Its own random stream: walking about never reshuffles hide and seek.
+      new Rng(this.opts.seed * 7919 + 17),
+      { roamDistance: this.opts.roamDistance ?? 1.2, hops: this.opts.roamHops ?? true },
+    );
+    this.activities = new Activities(this);
+    this.activities.onUnlock = (def) => this.onUnlocked(def);
+  }
+
+  private onUnlocked(def: ActivityDef) {
+    if (def.unlockLine) this.say(def.unlockLine);
+    // A little celebration, unless Hopper is busy getting somewhere.
+    if (this.phase === 'roam' && !this.pet.moving) {
+      this.pet.perform('celebrate', 0.2);
+      this.companion.delay(2);
+    }
+    this.events.onUnlock?.(def);
   }
 
   private setPhase(p: Phase) {
@@ -172,7 +226,7 @@ export class HideAndSeek {
         break;
       case 'found':
         this.setPhase('roam');
-        this.roamTimer = 0;
+        this.companion.reset();
         break;
     }
   }
@@ -185,9 +239,9 @@ export class HideAndSeek {
     const yaw = faceToward ? Math.atan2(faceToward.x - at.x, faceToward.z - at.z) : 0;
     this.pet.placeAt(at, yaw);
     this.pet.perform('wave');
-    this.roamTimer = 2.5;
+    this.companion.reset(2.5);
     this.setPhase('roam');
-    this.say('Hi! I’m Hopper. Look around so I can learn your room, then let’s play hide and seek!');
+    this.say('Hi! I’m Hopper. Let’s go for a walk — show me around your room, then we can play hide and seek!');
   }
 
   /**
@@ -199,7 +253,7 @@ export class HideAndSeek {
     this.move = null;
     this.pet.placeAt(new THREE.Vector3(at.x, at.y, at.z), Number.isFinite(yaw) ? yaw : 0);
     this.pet.perform('wave');
-    this.roamTimer = 2.5;
+    this.companion.reset(2.5);
     if (this.phase !== 'roam') this.setPhase('roam');
   }
 
@@ -218,7 +272,13 @@ export class HideAndSeek {
   }
 
   canStart(): boolean {
-    return this.phase === 'roam' && this.mappedArea() > 2 && this.clock >= this.startBlockedUntil && !this.health.unsettled;
+    return this.phase === 'roam' && this.mappedArea() > HIDE_SEEK_MIN_AREA && this.clock >= this.startBlockedUntil && !this.health.unsettled && this.petStanding();
+  }
+
+  /** Hopper is on walkable ground (not mid-air or inside something after a glitch). */
+  petStanding(): boolean {
+    if (this.pet.moving) return true;
+    return !!this.nav && standingNode(this.nav, this.pet.pos) !== NAV_NONE;
   }
 
   /** Begin a round: the seeker should cover their eyes now. */
@@ -318,7 +378,8 @@ export class HideAndSeek {
   private move: { goal: Vec3; cruise: number; action: ActionName; yaw: number | null } | null = null;
   private guardTimer = 0;
 
-  private follow(path: Waypoint[], cruise: number, action: ActionName, yaw: number | null) {
+  /** Walk a nav path (re-checked against the live map as Hopper goes, see guardPath). */
+  follow(path: Waypoint[], cruise: number, action: ActionName, yaw: number | null) {
     const end = path[path.length - 1];
     this.move = end ? { goal: { x: end.x, y: end.y, z: end.z }, cruise, action, yaw } : null;
     this.pet.follow(path, cruise, action, yaw);
@@ -372,28 +433,160 @@ export class HideAndSeek {
     }
   }
 
-  /** Tap/select: if aimed at a visible pet, that counts as found. */
+  /** Tap/select (tracking frame ray). Returns true if the tap did something. */
   tapAt(rayOrigin: THREE.Vector3, rayDir: THREE.Vector3): boolean {
-    rayOrigin = toV3(this.world.toMapPoint(rayOrigin));
-    rayDir = toV3(this.world.toMapDir(rayDir));
-    const c = this.pet.pos.clone().add(new THREE.Vector3(0, 0.15, 0));
-    const toC = c.clone().sub(rayOrigin);
-    const t = toC.dot(rayDir);
+    return this.tap(rayOrigin, rayDir).kind !== 'none';
+  }
+
+  /**
+   * A tap on the screen, as a ray in the tracking frame. While seeking, a tap
+   * on a visible Hopper finds them. While walking, tapping Hopper makes them
+   * react (giggle, wave, a happy hop...) and tapping the floor (or a surface)
+   * sends them there along the nav graph.
+   */
+  tap(rayOrigin: Vec3, rayDir: Vec3): TapResult {
+    const r = this.tapInner(toV3(this.world.toMapPoint(rayOrigin)), toV3(this.world.toMapDir(rayDir)).normalize());
+    if (r.kind !== 'none') this.events.onTap?.(r);
+    return r;
+  }
+
+  private tapInner(o: THREE.Vector3, d: THREE.Vector3): TapResult {
+    if (!Number.isFinite(o.x + o.y + o.z + d.x + d.y + d.z)) return { kind: 'none' };
+    if (this.rayHitsPet(o, d)) {
+      if (this.phase === 'seek' && this.visibility > 0.12) {
+        this.foundIt();
+        return { kind: 'found' };
+      }
+      if (this.phase === 'roam') return { kind: 'pet', reaction: this.reactToPoke() };
+      return { kind: 'none' };
+    }
+    if (this.phase !== 'roam') return { kind: 'none' };
+    return this.goToRay(o, d);
+  }
+
+  private rayHitsPet(o: THREE.Vector3, d: THREE.Vector3): boolean {
+    const toC = this.pet.pos.clone().add(new THREE.Vector3(0, 0.15, 0)).sub(o);
+    const t = toC.dot(d);
     if (t < 0) return false;
-    const miss = toC.sub(rayDir.clone().multiplyScalar(t)).length();
-    const hit = miss < 0.17;
-    if (!hit) return false;
-    if (this.phase === 'seek' && this.visibility > 0.12) {
-      this.foundIt();
-      return true;
+    return toC.sub(d.clone().multiplyScalar(t)).length() < 0.17;
+  }
+
+  /** Hopper was poked: a varied, happy reaction (never the same one twice in a row). */
+  private reactToPoke(): ActionName {
+    const options: ActionName[] = ['giggle', 'giggle', 'celebrate', 'wave', 'surprised'];
+    let a = this.companion.rng.pick(options);
+    if (a === this.lastReaction) a = this.companion.rng.pick(options.filter((x) => x !== a));
+    this.lastReaction = a;
+    this.move = null;
+    this.pet.perform(a);
+    if (a === 'surprised') {
+      // Startled, then a fit of giggles.
+      this.addTimer(0.6, () => {
+        if (this.phase === 'roam' && this.pet.state === 'perform') this.anim.play('giggle', 0.15, true);
+      });
     }
-    if (this.phase === 'roam') {
-      this.pet.perform(this.rng.chance(0.5) ? 'giggle' : 'wave');
-      this.roamTimer = 2;
-      this.events.onGiggle?.(this.pet.pos.clone(), false);
-      return true;
+    // Turn to the player while reacting.
+    if (this.lastView) this.pet.arriveYaw = Math.atan2(this.lastView.pos.x - this.pet.pos.x, this.lastView.pos.z - this.pet.pos.z);
+    this.companion.delay(a === 'surprised' ? 2.2 : 1.8);
+    return a;
+  }
+
+  /**
+   * Where a ray (map frame) meets the mapped world: the first occupied voxel
+   * (furniture, a wall) or the floor plane, whichever comes first.
+   */
+  pickSurface(o: Vec3, d: Vec3, maxDist = 8): Vec3 | null {
+    const g = this.world.grid;
+    const fy = this.world.floorY;
+    let tMax = maxDist;
+    const hitsFloor = d.y < -1e-3 && o.y > fy;
+    if (hitsFloor) tMax = Math.min(tMax, (fy - o.y) / d.y);
+    let tHit = -1;
+    if (g)
+      g.traverse(o, d, tMax, (i, j, k, t) => {
+        // The floor itself is the plane; skip its voxels and the first few cm.
+        if (t < 0.1 || g.centerY(j) < fy + g.res * 0.5) return false;
+        if (g.blocked(i, j, k)) {
+          tHit = t;
+          return true;
+        }
+        return false;
+      });
+    if (tHit < 0) {
+      if (!hitsFloor || tMax >= maxDist) return null;
+      tHit = tMax;
     }
-    return false;
+    return { x: o.x + d.x * tHit, y: o.y + d.y * tHit, z: o.z + d.z * tHit };
+  }
+
+  private goToRay(o: THREE.Vector3, d: THREE.Vector3): TapResult {
+    const at = this.pickSurface(o, d);
+    if (!at) return this.cantGo('unknown', null);
+    return this.goTo(at, d);
+  }
+
+  /**
+   * Walk to (near) a point in the map frame: the nearest reachable nav node.
+   * `dir` (the tap ray) helps when the point is on the side of something.
+   */
+  goTo(at: Vec3, dir?: Vec3): TapResult {
+    if (this.phase !== 'roam') return { kind: 'none' };
+    const nav = this.refreshNav();
+    if (!nav || !nav.count) return this.cantGo('unknown', at);
+    const fy = this.world.floorY;
+    // A surface Hopper can stand on right there (floor, a table top)...
+    let n = nav.nearest(at, 0.3);
+    if (n !== NAV_NONE && Math.abs(nav.ny[n] - at.y) > 0.12) n = NAV_NONE;
+    // ...else the floor at the foot of whatever was tapped (a wall, a sofa's side).
+    if (n === NAV_NONE && at.y - fy < 2) {
+      const hl = dir ? Math.hypot(dir.x, dir.z) || 1 : 1;
+      const foot = { x: at.x - (dir ? (dir.x / hl) * 0.15 : 0), y: fy, z: at.z - (dir ? (dir.z / hl) * 0.15 : 0) };
+      n = nav.nearest(foot, 0.5);
+      if (n !== NAV_NONE && Math.abs(nav.ny[n] - fy) > 0.1) n = NAV_NONE;
+    }
+    if (n === NAV_NONE) return this.cantGo('unknown', at);
+    const s = standingNode(nav, this.pet.pos);
+    let path = s === NAV_NONE ? null : nav.pathBetween(s, n);
+    if (!path && s !== NAV_NONE) {
+      // Can't get to that exact spot: the nearest spot close by that Hopper can reach.
+      const goal = nav.pos(n);
+      const { cost } = nav.search(s, NAV_NONE, 30);
+      let best = NAV_NONE, bd = 0.5;
+      for (let q = 0; q < nav.count; q++) {
+        if (!Number.isFinite(cost[q]) || Math.abs(nav.ny[q] - goal.y) > 0.12) continue;
+        const dd = Math.hypot(nav.g.centerX(nav.ni[q]) - goal.x, nav.g.centerZ(nav.nk[q]) - goal.z);
+        if (dd < bd) {
+          bd = dd;
+          best = q;
+        }
+      }
+      if (best !== NAV_NONE) {
+        n = best;
+        path = nav.pathBetween(s, n);
+      }
+    }
+    if (!path) return this.cantGo('noPath', at);
+    const target = nav.pos(n);
+    const far = Math.hypot(target.x - this.pet.pos.x, target.z - this.pet.pos.z) > 1.5;
+    this.follow(path, far ? 0.85 : 0.65, this.companion.rng.chance(0.6) ? 'sniff' : 'lookAround', null);
+    this.companion.startGoto(target);
+    return { kind: 'goto', target, at };
+  }
+
+  private cantGo(reason: 'unknown' | 'noPath', at: Vec3 | null): TapResult {
+    // A puzzled look around, then back to normal.
+    if (!this.pet.moving) {
+      this.pet.perform('lookAround', 0.2);
+      this.companion.delay(1.5);
+    }
+    this.say(
+      reason === 'noPath'
+        ? 'I can’t find a way over there!'
+        : at
+          ? 'Hmm, I don’t know that part of the room yet — show it to me first!'
+          : 'Tap the floor and I’ll hop over there!',
+    );
+    return { kind: 'unreachable', reason, at };
   }
 
   update(dt: number, viewTracking: ViewPose): void {
@@ -412,9 +605,10 @@ export class HideAndSeek {
       this.refreshNav();
       this.navTimer = 2.5;
     }
+    this.activities.update();
     switch (this.phase) {
       case 'roam':
-        this.updateRoam(dt, view);
+        this.companion.update(dt, view);
         break;
       case 'countdown':
         this.updateCountdown(dt);
@@ -426,7 +620,7 @@ export class HideAndSeek {
         this.foundTimer -= dt;
         if (this.foundTimer <= 0) {
           this.setPhase('roam');
-          this.roamTimer = 0;
+          this.companion.reset();
         }
         break;
     }
@@ -443,41 +637,6 @@ export class HideAndSeek {
     if (!v || !ok(v.pos) || !ok(v.forward) || !ok(v.up) || Math.hypot(v.forward.x, v.forward.y, v.forward.z) < 0.5) return null;
     if (this.world.frameVersion === 0) return v;
     return { ...v, pos: this.world.toMapPoint(v.pos), forward: this.world.toMapDir(v.forward), up: this.world.toMapDir(v.up) };
-  }
-
-  private updateRoam(dt: number, view: ViewPose) {
-    this.roamTimer -= dt;
-    if (this.pet.moving || this.roamTimer > 0) return;
-    const nav = this.nav;
-    // Stay in front of the player, ~1m away, so they can admire their pet.
-    const fwd = new THREE.Vector3(view.forward.x, 0, view.forward.z);
-    if (fwd.lengthSq() < 1e-4) fwd.set(0, 0, -1);
-    fwd.normalize();
-    const rd = this.opts.roamDistance ?? 1.1;
-    const want = new THREE.Vector3(view.pos.x + fwd.x * rd, this.world.floorY, view.pos.z + fwd.z * rd);
-    const d = Math.hypot(want.x - this.pet.pos.x, want.z - this.pet.pos.z);
-    if (nav && d > 0.8) {
-      const goal = nav.nearest(want, 0.8);
-      if (goal !== NAV_NONE) {
-        const g = nav.pos(goal);
-        const path = nav.findPath(this.pet.pos, g);
-        if (path) {
-          const faceYaw = Math.atan2(view.pos.x - g.x, view.pos.z - g.z);
-          this.follow(path, 0.55, 'idle', faceYaw);
-          this.roamTimer = 1.5;
-          return;
-        }
-      }
-    }
-    // Idle fidgets.
-    const r = this.rng.next();
-    const fidget = r < 0.25 ? 'lookAround' : r < 0.45 ? 'sniff' : r < 0.55 ? 'wave' : 'idle';
-    this.pet.perform(fidget, 0.3);
-    this.events.onFidget?.(fidget);
-    this.pet.arriveAction = fidget;
-    this.pet.arriveYaw = Math.atan2(view.pos.x - this.pet.pos.x, view.pos.z - this.pet.pos.z);
-    this.pet.state = 'idle';
-    this.roamTimer = 2.5 + this.rng.next() * 2.5;
   }
 
   private updateCountdown(dt: number) {

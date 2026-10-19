@@ -4,6 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#141a2c" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="48x48" href="./icons/favicon-48.png" />
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Hopper" />
 <title>Hopper — AR Hide & Seek</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -53,10 +61,16 @@
   #landing .cta { position: relative; padding: 17px 34px; font-size: 19px; font-weight: 600; border-radius: 999px; color: #10261d;
     background: linear-gradient(180deg, #8ff0c3, #4cc995); box-shadow: 0 10px 30px rgba(76,201,149,.45), inset 0 1px 0 rgba(255,255,255,.6);
     animation: breathe 2.8s ease-in-out infinite; font-family: inherit; }
+  a.cta { text-decoration: none; display: inline-block; }
+  #landing .row2 { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #landing .row2 .cta { padding: 15px 22px; font-size: 17px; }
+  #landing .cta.ghost { background: rgba(255,255,255,.1); color: #eaf7f1; box-shadow: inset 0 0 0 1.5px rgba(143,240,195,.7); animation: none; }
   #landing .cta:active { transform: scale(.97); }
   @keyframes breathe { 50% { box-shadow: 0 10px 42px rgba(76,201,149,.7), inset 0 1px 0 rgba(255,255,255,.6); } }
   @media (prefers-reduced-motion: reduce) { #landing .cta { animation: none; } }
   #landing .alt { margin-top: 14px; background: none; color: #8f98b5; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; padding: 4px 8px; font-family: inherit; }
+  #landing .install { margin-top: 12px; padding: 7px 14px; border-radius: 999px; font: 600 13px/1 inherit; font-family: inherit;
+    background: rgba(255,255,255,.08); color: #dfe4f2; border: 1px solid rgba(255,255,255,.14); }
   #landing small { margin-top: 10px; color: #a3abc4; text-align: center; max-width: 400px; font-size: 13px; line-height: 1.45; }
   .primary { background: var(--mint); color: #0d2a20; padding: 14px 22px; border-radius: 999px; font-weight: 700; box-shadow: var(--shadow); }
   .primary:disabled { background: #9db5ab; color: #33463f; cursor: default; }
@@ -84,6 +98,36 @@
   .card-text { font-size: 18px; font-weight: 700; }
   .place-hint { position: absolute; left: 16px; right: 16px; bottom: calc(110px + env(safe-area-inset-bottom)); text-align: center; color: #fff; font-weight: 700;
     text-shadow: 0 1px 4px rgba(0,0,0,.7); }
+  .hud { font-family: "Fredoka", ui-rounded, "SF Pro Rounded", system-ui, sans-serif; }
+  /* Activities picker: walk (default), hide & seek (unlocks once the room is mapped), ... */
+  .acts { position: absolute; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); display: flex; gap: 10px; justify-content: center; pointer-events: none; }
+  .hud .act { position: relative; flex: 1 1 0; min-width: 0; max-width: 210px; display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 10px;
+    border-radius: 22px; text-align: left; color: #eef1fa; background: rgba(20,26,44,.74); border: 1.5px solid rgba(255,255,255,.12);
+    box-shadow: 0 8px 24px rgba(0,0,0,.3); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); font-family: inherit;
+    transition: background .3s, border-color .3s, transform .15s; -webkit-tap-highlight-color: transparent; }
+  .hud .act:active { transform: scale(.96); }
+  .act-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; font-size: 21px; background: rgba(255,255,255,.09); }
+  .act-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .act-label { font-size: 16px; font-weight: 600; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .act-sub { margin-top: 1px; font-size: 12px; font-weight: 500; line-height: 1.25; color: #aab3cc; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .act-bar { display: block; height: 5px; margin-top: 6px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden; }
+  .act-bar i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #ffd56a, #ffb44d); transition: width .8s ease; }
+  .hud .act.active { background: rgba(26,58,52,.8); border-color: rgba(92,207,159,.9); }
+  .act.active .act-icon { background: rgba(92,207,159,.28); }
+  .act.active .act-sub { color: #a9e6cb; }
+  .act.locked .act-icon { color: transparent; text-shadow: 0 0 0 rgba(255,255,255,.55); }
+  .act-icon { position: relative; }
+  .act.locked .act-icon::after { content: "🔒"; position: absolute; right: -4px; bottom: -3px; font-size: 13px; color: #fff; text-shadow: none; }
+  .hud .act.ready { color: #10261d; background: linear-gradient(180deg, #8ff0c3, #4cc995); border-color: rgba(255,255,255,.5);
+    box-shadow: 0 10px 30px rgba(76,201,149,.45), inset 0 1px 0 rgba(255,255,255,.6); animation: breathe 2.8s ease-in-out infinite; }
+  .act.ready .act-icon { background: rgba(255,255,255,.5); }
+  .act.ready .act-sub { color: #1d4a37; font-weight: 600; }
+  .act.pop { animation: act-pop .8s cubic-bezier(.2,1.5,.4,1), breathe 2.8s ease-in-out .8s infinite; }
+  @keyframes act-pop { 0% { transform: scale(.85); } 45% { transform: scale(1.12); } 100% { transform: scale(1); } }
+  .act .spark { position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px; border-radius: 50%; background: #ffe39a; pointer-events: none;
+    box-shadow: 0 0 10px 3px rgba(255,214,110,.6); animation: act-spark .9s ease-out forwards; }
+  @keyframes act-spark { 0% { transform: translate(0,0) scale(.4); opacity: 1; } 100% { transform: translate(var(--dx), var(--dy)) scale(1); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .hud .act.ready, .act.pop { animation: none; } .act .spark { display: none; } }
 </style>
 </head>
 <body>
@@ -99,9 +143,14 @@
     <li><b>3</b>Find where Hopper hid</li>
   </ol>
   <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
+  <div class="row2" id="chrome-row" style="display:none">
+    <a id="btn-chrome" class="cta">Open in Chrome</a>
+    <a id="btn-chrome-install" class="cta ghost">Install the app</a>
+  </div>
   <button id="btn-cam" class="cta" style="display:none">Start with camera</button>
   <button id="btn-sim" class="alt">or play in a virtual room</button>
   <small id="support-note"></small>
+  <button id="btn-install" class="install" style="display:none">＋ Install Hopper as an app</button>
 </div>
 <script type="module" src="./src/main.ts"></script>
 </body>
