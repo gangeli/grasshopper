@@ -591,7 +591,7 @@ export class Animator {
     const ps = clamp(P.pupilSize, 0.5, 1.5);
     for (const ir of [face.irisL, face.irisR]) {
       const pupil = ir.getObjectByName('pupil')!;
-      pupil.scale.set(ps, ps, 1.15);
+      pupil.scale.set(ps, ps, 1);
     }
     // Remaining look offset goes to the eyes.
     const eyeYaw = clamp(P.lookX * 0.5 + lookYaw * 0.3, -0.5, 0.5);
@@ -599,7 +599,7 @@ export class Animator {
     face.irisL.rotation.set(eyePitch, eyeYaw - 0.25, 0);
     face.irisR.rotation.set(eyePitch, eyeYaw + 0.25, 0);
     const mo = clamp(P.mouthOpen, 0, 1);
-    face.mouthOpen.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.6);
+    face.mouthOpen.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.12);
     face.mouthOpen.visible = mo > 0.04;
     face.smile.visible = mo < 0.25;
     face.smile.scale.set(1, clamp(P.smile, 0.05, 1.2), 1);

@@ -1,7 +1,26 @@
 import * as THREE from 'three';
 
 /**
- * Hopper's voice and foley, synthesised with WebAudio (no audio assets).
+ * Recorded sample banks (public/sfx/, generated with ElevenLabs Sound
+ * Effects). Each key maps to its variant files; one is picked at random.
+ */
+export const SAMPLE_BANKS: Readonly<Record<string, readonly string[]>> = {
+  giggle: ['giggle-1.mp3', 'giggle-2.mp3', 'giggle-3.mp3'],
+  giggleLoud: ['giggle-loud-1.mp3', 'giggle-loud-2.mp3'],
+  greet: ['greet-1.mp3', 'greet-2.mp3', 'greet-3.mp3'],
+  hop: ['hop-1.mp3', 'hop-2.mp3'],
+  jump: ['jump-1.mp3', 'jump-2.mp3'],
+  land: ['land-1.mp3', 'land-2.mp3', 'land-3.mp3'],
+  surprised: ['surprised-1.mp3', 'surprised-2.mp3'],
+  fanfare: ['fanfare-1.mp3', 'fanfare-2.mp3'],
+  yawn: ['yawn-1.mp3', 'yawn-2.mp3'],
+  sneeze: ['sneeze-1.mp3', 'sneeze-2.mp3'],
+  purr: ['purr-1.mp3'],
+};
+
+/**
+ * Hopper's voice and foley. Plays recorded samples (public/sfx/) when they
+ * have loaded, otherwise falls back to sounds synthesised with WebAudio.
  * Sounds are spatialised with an HRTF panner at the pet's position, so a
  * giggle is a real directional hint when seeking.
  */
@@ -12,6 +31,14 @@ export class Voice {
   muted = false;
   /** Log of played sounds (for tests). */
   readonly played: string[] = [];
+  /** Decoded sample variants per bank (empty until loaded / if loading fails). */
+  private readonly samples = new Map<string, AudioBuffer[]>();
+  private readonly lastPick = new Map<string, AudioBuffer>();
+
+  /** Number of banks with at least one decoded sample. */
+  get sampleBanksLoaded(): number {
+    return this.samples.size;
+  }
 
   /** Must be called from a user gesture. */
   unlock(): void {
@@ -19,6 +46,7 @@ export class Voice {
       void this.ctx.resume();
       return;
     }
+    if (typeof window === 'undefined') return;
     const AC = (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext) as typeof AudioContext | undefined;
     if (!AC) return;
     this.ctx = new AC();
@@ -31,6 +59,67 @@ export class Voice {
     this.panner.refDistance = 0.6;
     this.panner.rolloffFactor = 1.1;
     this.panner.connect(this.master);
+    void this.loadSamples();
+  }
+
+  /** Fetch and decode all sample banks in the background; failures are silent. */
+  private async loadSamples(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx || typeof fetch !== 'function') return;
+    let base: string;
+    try {
+      base = new URL('sfx/', typeof document !== 'undefined' ? document.baseURI : undefined).href;
+    } catch {
+      return;
+    }
+    const loadOne = async (file: string): Promise<AudioBuffer | null> => {
+      try {
+        const res = await fetch(base + file);
+        if (!res.ok) return null;
+        const data = await res.arrayBuffer();
+        return await new Promise<AudioBuffer>((resolve, reject) => {
+          // Callback form for older Safari; the promise form also resolves.
+          const p = ctx.decodeAudioData(data, resolve, reject) as Promise<AudioBuffer> | undefined;
+          if (p && typeof p.then === 'function') p.then(resolve, reject);
+        });
+      } catch {
+        return null;
+      }
+    };
+    await Promise.all(
+      Object.entries(SAMPLE_BANKS).map(async ([bank, files]) => {
+        const bufs = (await Promise.all(files.map(loadOne))).filter((b): b is AudioBuffer => !!b);
+        if (bufs.length) this.samples.set(bank, bufs);
+      }),
+    );
+  }
+
+  /**
+   * Play a random variant of a sample bank. Returns false when no sample is
+   * available (caller then uses the synthesised fallback).
+   */
+  private sample(bank: string, vol: number, spatial = true, rateMin = 0.95, rateMax = 1.08): boolean {
+    const bufs = this.samples.get(bank);
+    const ctx = this.ctx;
+    if (!ctx || !bufs || !bufs.length) return false;
+    const dest = this.out(spatial);
+    if (!dest) return true; // muted: sample path handled it (silently)
+    let buf = bufs[Math.floor(Math.random() * bufs.length)];
+    if (bufs.length > 1 && buf === this.lastPick.get(bank)) buf = bufs[(bufs.indexOf(buf) + 1) % bufs.length];
+    this.lastPick.set(bank, buf);
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.playbackRate.value = rateMin + Math.random() * (rateMax - rateMin);
+      const g = ctx.createGain();
+      g.gain.value = vol;
+      src.connect(g);
+      g.connect(dest);
+      src.start(this.now());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Update listener (camera) and source (pet) positions. */
@@ -133,6 +222,7 @@ export class Voice {
 
   giggle(loud = false): void {
     this.log('giggle');
+    if (this.sample(loud ? 'giggleLoud' : 'giggle', loud ? 1.0 : 0.75)) return;
     const t = this.now();
     const n = loud ? 6 : 4;
     const v = loud ? 0.5 : 0.28;
@@ -144,6 +234,7 @@ export class Voice {
 
   greet(): void {
     this.log('greet');
+    if (this.sample('greet', 0.8)) return;
     const t = this.now();
     this.chirp(t, 700, 1300, 0.14, 0.35);
     this.chirp(t + 0.16, 900, 1600, 0.18, 0.35);
@@ -151,18 +242,21 @@ export class Voice {
 
   hop(): void {
     this.log('hop');
+    if (this.sample('hop', 0.45, true, 0.9, 1.15)) return;
     const t = this.now();
     this.chirp(t, 320, 520, 0.06, 0.08, true, 'triangle');
   }
 
   jump(): void {
     this.log('jump');
+    if (this.sample('jump', 0.7)) return;
     const t = this.now();
     this.chirp(t, 500, 1500, 0.22, 0.25);
   }
 
   land(impact: number): void {
     this.log('land');
+    if (this.sample('land', Math.min(1, 0.4 + impact * 0.6), true, 0.92, 1.08)) return;
     const t = this.now();
     this.noise(t, 0.12, Math.min(0.6, 0.2 + impact * 0.4), 500);
     this.chirp(t, 260, 160, 0.08, 0.12, true, 'triangle');
@@ -170,6 +264,7 @@ export class Voice {
 
   surprised(): void {
     this.log('surprised');
+    if (this.sample('surprised', 0.85)) return;
     const t = this.now();
     this.chirp(t, 600, 1900, 0.18, 0.45);
   }
@@ -177,6 +272,7 @@ export class Voice {
   /** Little victory arpeggio (not spatial). */
   fanfare(): void {
     this.log('fanfare');
+    if (this.sample('fanfare', 0.6, false, 0.98, 1.04)) return;
     const t = this.now();
     [523, 659, 784, 1046].forEach((f, i) => this.chirp(t + 0.12 + i * 0.1, f, f * 1.01, 0.16, 0.25, false, 'triangle'));
   }
@@ -185,5 +281,32 @@ export class Voice {
     this.log('tick');
     const t = this.now();
     this.chirp(t, final ? 880 : 620, final ? 880 : 600, 0.07, 0.18, false, 'square');
+  }
+
+  /** Sleepy yawn (for future idle behaviour). */
+  yawn(): void {
+    this.log('yawn');
+    if (this.sample('yawn', 0.7)) return;
+    const t = this.now();
+    this.chirp(t, 900, 1300, 0.35, 0.2);
+    this.chirp(t + 0.35, 1300, 600, 0.6, 0.18);
+  }
+
+  /** Cute little sneeze (for future idle behaviour). */
+  sneeze(): void {
+    this.log('sneeze');
+    if (this.sample('sneeze', 0.75)) return;
+    const t = this.now();
+    this.chirp(t, 800, 1400, 0.2, 0.2);
+    this.noise(t + 0.24, 0.12, 0.35, 4000);
+    this.chirp(t + 0.24, 1600, 900, 0.1, 0.3);
+  }
+
+  /** Content purr / happy trill (for future petting interactions). */
+  purr(): void {
+    this.log('purr');
+    if (this.sample('purr', 0.7)) return;
+    const t = this.now();
+    for (let i = 0; i < 8; i++) this.chirp(t + i * 0.08, 420, 400, 0.07, 0.08, true, 'triangle');
   }
 }

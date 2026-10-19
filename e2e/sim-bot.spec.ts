@@ -17,7 +17,7 @@ for (const room of ['living', 'bedroom']) {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     await page.setViewportSize({ width: 430, height: 860 });
-    await page.goto(`/?sim=1&room=${room}&bot=1&speed=4&fixed=1&seed=3`);
+    await page.goto(`/?sim=1&room=${room}&bot=1&speed=4&fixed=1&seed=3&lod=low`);
     await waitPhase(page, ['roam']);
     await page.waitForTimeout(800);
     await page.screenshot({ path: `artifacts/sim-${room}-1-roam.png` });

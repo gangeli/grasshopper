@@ -29,6 +29,8 @@ export interface GameEvents {
   onMessage?: (msg: string) => void;
   onGiggle?: (pos: THREE.Vector3, loud: boolean) => void;
   onFound?: (info: FoundInfo) => void;
+  /** An idle fidget started while roaming (for voice flavour). */
+  onFidget?: (action: string) => void;
 }
 
 export interface FoundInfo {
@@ -355,6 +357,7 @@ export class HideAndSeek {
     const r = this.rng.next();
     const fidget = r < 0.25 ? 'lookAround' : r < 0.45 ? 'sniff' : r < 0.55 ? 'wave' : 'idle';
     this.pet.perform(fidget, 0.3);
+    this.events.onFidget?.(fidget);
     this.pet.arriveAction = fidget;
     this.pet.arriveYaw = Math.atan2(view.pos.x - this.pet.pos.x, view.pos.z - this.pet.pos.z);
     this.pet.state = 'idle';

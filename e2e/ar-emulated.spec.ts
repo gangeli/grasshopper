@@ -21,7 +21,7 @@ for (const profile of ['phone', 'quest']) {
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     await page.setViewportSize({ width: 430, height: 860 });
-    await page.goto(`/?emulate=${profile}&room=living&seed=3&record=1`);
+    await page.goto(`/?emulate=${profile}&room=living&seed=3&record=1&lod=low`);
     await expect(page.locator('#btn-ar')).toBeVisible({ timeout: 20_000 });
     await page.locator('#btn-ar').click();
     await expect.poll(() => ev(page, () => !!(window.__hopper?.ar as { session: unknown } | undefined)?.session), { timeout: 20_000 }).toBe(true);

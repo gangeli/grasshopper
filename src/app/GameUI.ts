@@ -13,6 +13,12 @@ export class GameUI {
     const { game, pet } = stack;
     game.events.onMessage = (m) => hud.say(m, 6);
     game.events.onGiggle = (_p, loud) => voice.giggle(loud);
+    game.events.onFidget = (a) => {
+      const r = Math.random();
+      if (a === 'sniff' && r < 0.35) setTimeout(() => voice.sneeze(), 700);
+      else if (a === 'idle' && r < 0.2) voice.purr();
+      else if (a === 'lookAround' && r < 0.1) voice.yawn();
+    };
     game.events.onFound = (info) => {
       if (!info.revealed) {
         voice.surprised();

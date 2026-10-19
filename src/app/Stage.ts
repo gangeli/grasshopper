@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { applyPetEnvironment } from '../pet/lighting';
 import type { GameStack } from '../game/stack';
 import { Occluder } from './Occluder';
 
@@ -32,7 +33,8 @@ export class Stage {
     container.appendChild(this.renderer.domElement);
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.02, 40);
 
-    this.hemi = new THREE.HemisphereLight(0xfffaf0, 0x8d8475, 1.5);
+    applyPetEnvironment(this.renderer, this.scene, opts.ar ? 0.6 : 0.8);
+    this.hemi = new THREE.HemisphereLight(0xfffaf0, 0x8d8475, 0.9);
     this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xffffff, 2.0);
     this.sun.castShadow = true;

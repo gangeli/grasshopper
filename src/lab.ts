@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { buildPet } from './pet/PetModel';
 import { Animator, type ActionName } from './pet/Animator';
+import { applyPetEnvironment } from './pet/lighting';
 
 /**
  * Pose lab: renders Hopper in a grid of actions × times (and optional camera
@@ -12,6 +13,9 @@ const actions = (q.get('actions') ?? 'idle,hop,jumpCrouch,jumpAir,land,hide,hide
 const times = (q.get('times') ?? '0.15,0.45,0.8').split(',').map(Number);
 const yaws = (q.get('yaw') ?? '0.5').split(',').map(Number);
 const cell = Number(q.get('size') ?? 200);
+const dist = Number(q.get('dist') ?? 0.95);
+const camY = Number(q.get('camY') ?? 0.32);
+const lookY = Number(q.get('lookY') ?? 0.15);
 const cols = times.length * yaws.length;
 const rows = actions.length;
 
@@ -22,9 +26,11 @@ renderer.setScissorTest(true);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const scene = new THREE.Scene();
-scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7f72, 1.6));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+applyPetEnvironment(renderer, scene);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7f72, 0.6));
+const sun = new THREE.DirectionalLight(0xfff4e6, 2.0);
 sun.position.set(0.6, 1.4, 0.9);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
@@ -36,8 +42,10 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const rig = buildPet((q.get('palette') as 'mint') ?? 'mint');
+const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', q.has('fur') ? { furShells: Number(q.get('fur')) } : {});
 scene.add(rig.group);
+if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
+if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshNormalMaterial()));
 const anim = new Animator(rig, 3);
 const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 10);
 
@@ -62,9 +70,8 @@ for (const action of actions) {
   for (const t of times) {
     for (const yaw of yaws) {
       poseAt(action, t);
-      const dist = 0.95;
-      camera.position.set(Math.sin(yaw) * dist, 0.32, Math.cos(yaw) * dist);
-      camera.lookAt(0, 0.15, 0);
+      camera.position.set(Math.sin(yaw) * dist, camY, Math.cos(yaw) * dist);
+      camera.lookAt(0, lookY, 0);
       anim.lookTarget = camera.position.clone();
       renderer.setViewport(c * cell, H - (r + 1) * cell, cell, cell);
       renderer.setScissor(c * cell, H - (r + 1) * cell, cell, cell);
