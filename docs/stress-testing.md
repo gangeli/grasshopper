@@ -92,6 +92,43 @@ Clean rooms with an ARCore-like sensor (`arcore`) have essentially zero collisio
 bad landings. With the deliberately awful `harsh` profile, Hopper stays safe but gets only 2–4m² in
 some rooms.
 
+## Phones without a depth sensor: depth from the camera
+
+Most phones have no depth sensor; ARCore computes depth from camera motion and
+WebXR hands the app that (densified) result. To test that regime honestly:
+
+- **`src/sim/CameraSim.ts`** renders the simulated rooms as a phone camera sees them: textured
+  furniture, nearly blank walls and floors, dark fabric, see-through glass with faint reflections,
+  mirrors, ceiling lights with shadows, lagging auto-exposure, shot/read noise, vignetting, motion
+  blur (shutter centred on the frame time) and 8-bit quantisation. Poses come from the same tracking
+  error model, with VIO-like smooth short-term error (~1% of the distance moved).
+- **`src/world/StereoDepth.ts`** is plane-sweep motion stereo on those frames: census matching over
+  up to four nearby frames, cost aggregation, sub-sample refinement, and strict acceptance
+  (uniqueness, texture, the aperture problem — texture parallel to the epipolar line can't fix
+  depth — baseline geometry, angular speed, number of views). It reports a per-pixel σ that the
+  mapper uses instead of its generic noise model. An optional ARCore-like edge-aware densification
+  produces the dense depth WebXR actually delivers.
+- **`DepthConsistency`** (`src/world/DepthFrame.ts`) keeps only depth pixels that another recent view
+  supports and none sees through: interpolated fills move with the viewpoint, real surfaces don't.
+
+| 12 dressed rooms, `real` profile | camera-only stereo | depth-sensor model |
+|---|---|---|
+| False-free (solid believed seen-empty) | **0.4%** | 1.1% |
+| Paths brushing furniture (max penetration) | 4.4% (5cm) | 5.8% (5cm) |
+| Jump landings on nothing | **0 / 645** | 1 / 877 |
+| Walkable area (mean) | 6.8 m² | 12.0 m² |
+
+Camera depth is at least as safe but maps less: blank floors and walls give no matches. A fully
+textureless floor (room r29) is close to unplayable from the camera alone — the game tells the
+player to point at the floor in better light rather than inventing ground.
+
+**Real camera images (TUM fr1/room colour frames, Kinect as reference)**, after undistortion: motion
+stereo has a median error of 4.3% (signed −1.2%), 6% of pixels off by >25%. Mapping from *dense*
+(filled) stereo without the consistency gate puts phantom surfaces on 31% of held-out rays and real
+objects inside the pet's body at 2.1% of nodes; with the gate those drop to 10% and 0.3% (Kinect-built
+map: 9% and 0.2%). Coverage on that sequence is low (1.6 m² vs 8.2 m² from the Kinect), because the
+camera mostly looks at desks and the floor is only glimpsed.
+
 ## What the stress tests found (and what changed)
 
 Ordered roughly by impact:

@@ -68,6 +68,8 @@ export class WorldModel {
   private floorPlanes = new Map<string, { y: number; area: number }>();
   private pendingFloorOffset: number | null = null;
   private histRefined = false;
+  /** Allow the early ±3cm depth-histogram floor refinement (see refineFloor). */
+  histogramRefine = false;
   /** Set false once play starts: rebuilding the map mid-round would be disruptive. */
   allowFloorRefine = true;
   /** Number of depth points integrated so far (diagnostics/HUD). */
@@ -852,6 +854,10 @@ export class WorldModel {
       this.relevelFloor(this.floorY + off);
       return true;
     }
+    // Depth-only refinement is biased by a few cm on blank floors (it moved
+    // floors 3cm the wrong way in tests); the health monitor handles depth
+    // evidence with stricter rules. Off unless asked for.
+    if (!this.histogramRefine) return false;
     if (this.floorSamples < minSamples) return false;
     let best = 0;
     for (let b = 1; b < this.floorHist.length; b++) if (this.floorHist[b] > this.floorHist[best]) best = b;

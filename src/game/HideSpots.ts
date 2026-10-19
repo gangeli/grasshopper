@@ -156,7 +156,14 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
   type Cand = { a: number; p: Vec3; hiddenNow: number; pre: number; cls: ReturnType<typeof classifySpot>; pts: Vec3[] };
   const cands: Cand[] = [];
   const J = 0.15;
-  const jitterEyes = [seekerEye, ...[[J, 0], [-J, 0], [0, J], [0, -J]].map(([dx, dz]) => ({ x: seekerEye.x + dx, y: seekerEye.y, z: seekerEye.z + dz }))];
+  // ...and ±10cm up/down: rays that just graze the top edge of a seat or table
+  // are exactly where a 5cm map is least sure.
+  const jitterEyes = [
+    seekerEye,
+    ...[[J, 0], [-J, 0], [0, J], [0, -J]].map(([dx, dz]) => ({ x: seekerEye.x + dx, y: seekerEye.y, z: seekerEye.z + dz })),
+    { x: seekerEye.x, y: seekerEye.y + 0.1, z: seekerEye.z },
+    { x: seekerEye.x, y: seekerEye.y - 0.1, z: seekerEye.z },
+  ];
   for (let a = 0; a < nav.count; a++) {
     if (!(cost[a] <= opts.maxPathCost)) continue;
     if ((nav.ni[a] + 2 * nav.nk[a]) % 2 !== 0) continue; // thin out

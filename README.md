@@ -31,8 +31,11 @@ src/
     WorldModel     fuses hit-tests, planes (+semantic labels), room meshes and depth into the grid
     NavGrid        2.5D navigation: multi-level surfaces, crawl spaces, lazily built parabolic jump links, A*
     Segmentation   "object detection": connected footprints → table / couch / chair / basket / shelf …
+    StereoDepth    motion stereo (depth from a moving camera) — used to test phones without depth
+    DriftMonitor   notices the tracking frame sliding against the map and realigns it
   pet/
-    PetModel       procedurally built, skinned and rigged creature (38 bones, no external assets)
+    PetModel       sculpted (SDF → surface nets) furry creature: auto-skinned to 38 bones, shell fur,
+                   textured eyes with cornea/lids/lashes, painted mouth; no external assets
     Animator       layered procedural animation: 16 actions, cross-fades, look-at, blinking,
                    spring-driven antennae/ears/tail, analytic 2-bone leg IK keeping feet planted
     PetController  path following: hop-walk cycle, turn → crouch → leap along a parabola → land
@@ -41,6 +44,8 @@ src/
                    standing/crouching viewpoints, cosiness (under/inside/corner), novelty, distance
     Visibility     is Hopper on screen and not occluded by the mapped world?
     HideAndSeek    the game state machine (roam → countdown → seek → found)
+    Health         the "immune system": detects impossible or contradictory states and recovers
+                   (see "Staying unstuck" below)
   app/            browser shell: Stage (renderer, shadows, occluder), HUD, synthesized Voice,
                   ArMode (WebXR), SimMode (virtual room)
   sim/            test harness: procedural rooms, simulated sensors (depth/planes/mesh),
@@ -58,6 +63,28 @@ real furniture hides the pet; devices with GPU depth also get three.js' depth oc
 **The creature** is built in code rather than loaded from a rigged asset. That gives full control over
 the rig for procedural motion: jumps of any height or distance, peeking around arbitrary edges,
 squeezing under furniture. Everything is skinned or bone-parented and animated procedurally.
+
+## Staying unstuck
+
+Real sensors drift, jump and lie. A wrong guess is bad; getting stuck in a broken state is worse. So
+the map lives in its own *map frame* (kept glued to the room by WebXR anchors and by self-registration
+against recent depth), and a health monitor watches for states that shouldn't happen:
+
+| Symptom | Recovery |
+|---|---|
+| Tracking lost / orientation-only / NaN poses | the game freezes, the HUD explains; nothing is mapped meanwhile |
+| The world frame jumped after a loss | realign the map if two looks agree on the correction; otherwise age the map, and if it moved a lot, clear it and bring Hopper back to you |
+| Slow drift | small, well-supported corrections (never from a single view, a moving person or a blank wall) |
+| The floor itself shows up as an obstacle (floor estimate too low) or Hopper floats (too high) | relevel the floor from floor planes + depth (keeping the rest of the map), undo if fresh evidence disagrees |
+| Hopper inside an obstacle, floating, under the floor, NaN, off the map | hop to the nearest valid spot or come back to the player |
+| Walking without getting anywhere, phases that never end | stop and replan; move the game along |
+| Covered camera, garbage depth | frames rejected |
+| Nothing to play on for 30 s | tell the player what to do (or tap ↻ rescan / move) |
+
+`test/health.test.ts` breaks each of these on purpose; `scripts/soak-batch.sh` plays 12 × 5 minutes
+with random faults every minute or so (relocalisation jumps, wrong floors, map wipes, covered camera,
+NaN poses, the pet dropped inside furniture…) and reports stalls, time spent inside real furniture and
+map precision.
 
 ## Testing without humans
 

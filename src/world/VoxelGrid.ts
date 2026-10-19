@@ -204,8 +204,17 @@ export class VoxelGrid {
    * fighting with stale, confident ones. The solid below-floor layers stay.
    */
   ageEvidence(factor: number, fromLayer: number): void {
+    // Keep every voxel's class (an obstacle stays an obstacle, free stays
+    // free) and only shrink the margin, so fresh observations flip it
+    // quickly. Scaling raw log-odds would push confident obstacles under the
+    // occupancy threshold: they'd vanish, and the pet could be "seen" through
+    // (or walk through) furniture that's really there.
     const layer = this.nx * this.nz;
-    for (let n = fromLayer * layer; n < this.data.length; n++) this.data[n] = Math.round(this.data[n] * factor);
+    for (let n = fromLayer * layer; n < this.data.length; n++) {
+      const v = this.data[n];
+      if (v > OCC_THRESHOLD) this.data[n] = OCC_THRESHOLD + 1 + Math.round((v - OCC_THRESHOLD - 1) * factor);
+      else if (v < 0) this.data[n] = Math.min(-1, Math.round(v * factor));
+    }
     this.transient.clear();
     this.version++;
   }
