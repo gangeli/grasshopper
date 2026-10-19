@@ -433,9 +433,7 @@ export class WorldModel {
       return false;
     }
     if (this.grid && !this.replaying && (!this.snapshots.length || t - this.snapshots[this.snapshots.length - 1].t >= this.snapshotEvery || t < this.snapshots[this.snapshots.length - 1].t)) {
-      const g = this.grid;
-      this.snapshots.push({ t, data: g.data.slice(), observed: g.observed.slice(), underside: g.underside.slice(), topFrac: g.topFrac.slice(), floorY: this.floorY, epoch: this.epoch });
-      if (this.snapshots.length > 3) this.snapshots.shift();
+      this.takeSnapshot(t);
     }
     // Let old floor evidence fade (half-life ~7s).
     if (Number.isFinite(this.floorWatchT) && t > this.floorWatchT) {
@@ -456,6 +454,49 @@ export class WorldModel {
   }
 
   /**
+   * Keep a copy of the grid (the newest 3, every `snapshotEvery` s). A full
+   * copy is ~9MB, so the buffers of the snapshot that drops out are reused,
+   * and the rarely-changing underside / sub-voxel height layers are shared
+   * with the previous snapshot while they are unchanged (snapshots are never
+   * written to, only copied from).
+   */
+  private takeSnapshot(t: number): void {
+    const g = this.grid!;
+    const prev = this.snapshots.length ? this.snapshots[this.snapshots.length - 1] : null;
+    const old = this.snapshots.length >= 3 ? this.snapshots.shift()! : null;
+    const owned = (a: Uint8Array | Int8Array) => !this.snapshots.some((s) => s.data === a || s.observed === a || s.underside === a || s.topFrac === a);
+    const copy = <A extends Int8Array | Uint8Array>(src: A, reuse: A | undefined, share: A | undefined): A => {
+      if (share && share.length === src.length && sameBytes(share, src)) return share;
+      if (reuse && reuse.length === src.length && owned(reuse)) {
+        reuse.set(src);
+        return reuse;
+      }
+      return src.slice() as A;
+    };
+    this.snapshots.push({
+      t,
+      data: copy(g.data, old?.data, undefined),
+      observed: copy(g.observed, old?.observed, undefined),
+      underside: copy(g.underside, old?.underside, prev?.underside),
+      topFrac: copy(g.topFrac, old?.topFrac, prev?.topFrac),
+      floorY: this.floorY,
+      epoch: this.epoch,
+    });
+  }
+
+  /** Memory held by the grid copies kept for recovery (bytes, shared buffers counted once). */
+  snapshotBytes(): number {
+    const seen = new Set<ArrayBufferLike>();
+    let n = 0;
+    const add = (a: { buffer: ArrayBufferLike; byteLength: number }) => {
+      if (!seen.has(a.buffer)) (seen.add(a.buffer), (n += a.byteLength));
+    };
+    for (const s of this.snapshots) for (const a of [s.data, s.observed, s.underside, s.topFrac]) add(a);
+    if (this.eventSnapshot) add(this.eventSnapshot.data);
+    return n;
+  }
+
+  /**
    * Integrate a set of depth samples taken from `eye`. Points near the floor
    * mark the floor as observed; others mark occupancy and carve free space.
    */
@@ -465,6 +506,8 @@ export class WorldModel {
     const r = g.res;
     if (!this.replaying) this.remember(eye, points, sigmas, t);
     let rays = 0, conflicted = 0, carved = 0;
+    // Scratch ray end point (no object per reading).
+    const tgt = this._tgt;
     for (let q = 0; q < points.length; q++) {
       const p = points[q];
       const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z);
@@ -498,13 +541,18 @@ export class WorldModel {
         const stopY = !lowBand && sigma <= 0.03 ? this.floorY + 0.02 : this.floorY + floorTol;
         if (dirY < -0.05) {
           const t = (stopY - eye.y) / dirY;
-          g.integrateRay(eye, { x: eye.x + ((p.x - eye.x) / d) * t, y: stopY, z: eye.z + ((p.z - eye.z) / d) * t }, false, 0, -3, 0);
+          tgt.x = eye.x + ((p.x - eye.x) / d) * t;
+          tgt.y = stopY;
+          tgt.z = eye.z + ((p.z - eye.z) / d) * t;
+          g.integrateRay(eye, tgt, false, 0, -3, 0);
         }
         continue;
       }
       if (far) {
-        const target = { x: eye.x + ((p.x - eye.x) * maxRange) / d, y: eye.y + ((p.y - eye.y) * maxRange) / d, z: eye.z + ((p.z - eye.z) * maxRange) / d };
-        g.integrateRay(eye, target, false, 0, -1, 3 * sigma);
+        tgt.x = eye.x + ((p.x - eye.x) * maxRange) / d;
+        tgt.y = eye.y + ((p.y - eye.y) * maxRange) / d;
+        tgt.z = eye.z + ((p.z - eye.z) * maxRange) / d;
+        g.integrateRay(eye, tgt, false, 0, -1, 3 * sigma);
         continue;
       }
       // Change detection: a reading inside space we're confident is empty
@@ -551,9 +599,16 @@ export class WorldModel {
     }
   }
 
+  private readonly _tgt: Vec3 = { x: 0, y: 0, z: 0 };
+
   private remember(eye: Vec3, points: Vec3[], sigmas: number[] | undefined, t: number): void {
     const pts = new Float32Array(points.length * 3);
-    points.forEach((p, q) => pts.set([p.x, p.y, p.z], q * 3));
+    for (let q = 0; q < points.length; q++) {
+      const p = points[q];
+      pts[q * 3] = p.x;
+      pts[q * 3 + 1] = p.y;
+      pts[q * 3 + 2] = p.z;
+    }
     this.replay.push({ eye: { ...eye }, pts, sig: sigmas ? Float32Array.from(sigmas) : null, t });
     this.replayPoints += points.length;
     while (this.replayPoints > this.replayBudget && this.replay.length > 1) this.replayPoints -= this.replay.shift()!.pts.length / 3;
@@ -1053,4 +1108,19 @@ function xform(M: ArrayLike<number>, p: Vec3, w: number): Vec3 {
     y: M[1] * p.x + M[5] * p.y + M[9] * p.z + M[13] * w,
     z: M[2] * p.x + M[6] * p.y + M[10] * p.z + M[14] * w,
   };
+}
+
+/** Byte-wise equality of two same-length typed arrays (word at a time where aligned). */
+function sameBytes(a: Int8Array | Uint8Array, b: Int8Array | Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  const n = a.length;
+  let q = 0;
+  if (a.byteOffset % 4 === 0 && b.byteOffset % 4 === 0) {
+    const w = n >> 2;
+    const A = new Int32Array(a.buffer, a.byteOffset, w), B = new Int32Array(b.buffer, b.byteOffset, w);
+    for (let i = 0; i < w; i++) if (A[i] !== B[i]) return false;
+    q = w << 2;
+  }
+  for (; q < n; q++) if (a[q] !== b[q]) return false;
+  return true;
 }

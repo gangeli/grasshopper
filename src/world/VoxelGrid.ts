@@ -180,17 +180,54 @@ export class VoxelGrid {
     // Stop carving short of the endpoint (by more for noisier readings) so a
     // reading that lands behind a surface doesn't carve into the object.
     const carveLen = Math.max(0, len - carveShort);
-    this.traverse(from, { x: dx / len, y: dy / len, z: dz / len }, carveLen, (i, j, k) => {
-      if (i === ti && j === tj && k === tk) return true;
-      // Asymmetric update: rays grazing past a confidently occupied voxel
-      // erode it only slowly, so small real objects survive many near-misses.
-      const v = this.data[this.idx(i, j, k)];
-      if (v > STRONG_OCC) conflicts++;
-      // Precise rays (missDelta ≤ -3: close, sharp readings) erode a little faster, so stale obstacles
-      // left by a tracking jump don't linger; noisy ones barely touch confident voxels.
-      this.add(i, j, k, v > OCC_THRESHOLD && this.stickyOccupied ? Math.max(missDelta, missDelta <= -3 ? -2 : -1) : missDelta);
-      return false;
-    });
+    // Asymmetric update: rays grazing past a confidently occupied voxel
+    // erode it only slowly, so small real objects survive many near-misses.
+    // Precise rays (missDelta ≤ -3: close, sharp readings) erode a little faster, so stale obstacles
+    // left by a tracking jump don't linger; noisy ones barely touch confident voxels.
+    const occMiss = this.stickyOccupied ? Math.max(missDelta, missDelta <= -3 ? -2 : -1) : missDelta;
+    // The voxel walk of traverse(), inlined (this is the mapper's hot loop:
+    // no closure or direction object per ray; same arithmetic, same order).
+    const dX = dx / len, dY = dy / len, dZ = dz / len;
+    const r = this.res, o = this.origin;
+    const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
+    let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
+    const stepX = dX > 0 ? 1 : dX < 0 ? -1 : 0;
+    const stepY = dY > 0 ? 1 : dY < 0 ? -1 : 0;
+    const stepZ = dZ > 0 ? 1 : dZ < 0 ? -1 : 0;
+    let tMaxX = stepX ? (o.x + (i + (stepX > 0 ? 1 : 0)) * r - from.x) / dX : Infinity;
+    let tMaxY = stepY ? (o.y + (j + (stepY > 0 ? 1 : 0)) * r - from.y) / dY : Infinity;
+    let tMaxZ = stepZ ? (o.z + (k + (stepZ > 0 ? 1 : 0)) * r - from.z) / dZ : Infinity;
+    const tDX = stepX ? r / Math.abs(dX) : Infinity;
+    const tDY = stepY ? r / Math.abs(dY) : Infinity;
+    const tDZ = stepZ ? r / Math.abs(dZ) : Infinity;
+    let t = 0;
+    const maxIter = Math.ceil(carveLen / r) * 3 + 3;
+    for (let n = 0; n < maxIter && t <= carveLen; n++) {
+      if (i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz) {
+        if (i === ti && j === tj && k === tk) break;
+        const q = (j * nz + k) * nx + i;
+        const v = data[q];
+        if (v > STRONG_OCC) conflicts++;
+        let nv = v + (v > OCC_THRESHOLD ? occMiss : missDelta);
+        if (nv > MAX_LO) nv = MAX_LO;
+        if (nv < MIN_LO) nv = MIN_LO;
+        data[q] = nv;
+        if (cls(v) !== cls(nv)) this.version++;
+      }
+      if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+        t = tMaxX;
+        tMaxX += tDX;
+        i += stepX;
+      } else if (tMaxY < tMaxZ) {
+        t = tMaxY;
+        tMaxY += tDY;
+        j += stepY;
+      } else {
+        t = tMaxZ;
+        tMaxZ += tDZ;
+        k += stepZ;
+      }
+    }
     if (hit) {
       this.add(ti, tj, tk, hitDelta);
       this.noteHeight(ti, tj, tk, to.y);
