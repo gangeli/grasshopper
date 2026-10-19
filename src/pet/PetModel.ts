@@ -161,14 +161,14 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // ?fur=N and ?lod=low override the defaults, e.g. for slow devices or software-rendered tests.
   const url = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
   const low = url?.get('lod') === 'low';
-  const bodyGeo = creatureGeometry(pal, opts.meshResolution ?? (low ? 0.0045 : 0.0028));
+  // Phones and headsets get a lighter mesh and fewer shells: each shell redraws the whole body.
+  const mobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|Quest|OculusBrowser/.test(navigator.userAgent);
+  const bodyGeo = creatureGeometry(pal, opts.meshResolution ?? (low ? 0.0045 : mobile ? 0.0034 : 0.0028));
   const body = addSkinned(bodyGeo, skin, 'body');
   body.castShadow = true;
   const furOpts: FurOptions = { ...DEFAULT_FUR, ...opts.fur };
-  // Phones and headsets get fewer shells: each one redraws the whole body.
-  const mobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|Quest|OculusBrowser/.test(navigator.userAgent);
   const urlFur = url?.get('fur') ?? null;
-  const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 8 : furOpts.shells);
+  const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
   for (let q = 1; q <= shells; q++) {
     const mat = makeFurShellMaterial(q / shells, furOpts, skin);
     materials.push(mat);

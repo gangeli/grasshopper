@@ -118,6 +118,21 @@ export function worldNoise(x: number, y: number, z: number): number {
   );
 }
 
+/** Camera-to-world (column-major) for a camera with a tracking error applied. */
+export function poseMatrix(cam: SimCamera, pose: { yaw: number; pitch: number; x: number; y: number; z: number }): number[] {
+  const { forward, right, up } = cameraBasis(cam);
+  const est = (v: Vec3) => applyPoseError(pose, { x: 0, y: 0, z: 0 }, v);
+  const X = est(right), Y = est(up), Zb = est({ x: -forward.x, y: -forward.y, z: -forward.z });
+  const T = applyPoseError(pose, cam.pos, cam.pos);
+  return [X.x, X.y, X.z, 0, Y.x, Y.y, Y.z, 0, Zb.x, Zb.y, Zb.z, 0, T.x, T.y, T.z, 1];
+}
+
+/** Inverse of a standard perspective projection (near 0.1, far 100) for this camera. */
+export function invProjFor(cam: { fovY: number; aspect: number }): number[] {
+  const n = 0.1, f = 100, ty = Math.tan(cam.fovY / 2), tx = ty * cam.aspect;
+  return [tx, 0, 0, 0, 0, ty, 0, 0, 0, 0, 0, (n - f) / (2 * f * n), 0, 0, -1, (f + n) / (2 * f * n)];
+}
+
 function applyPoseError(e: { yaw: number; pitch: number; x: number; y: number; z: number }, c: Vec3, p: Vec3): Vec3 {
   // Rotate about the camera, then translate.
   const dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
@@ -276,15 +291,17 @@ export class SimSensor {
         if (!(z > 0.2) || z > N.maxRange) continue; // no reading
         out[(h - 1 - py) * w + px] = z; // image row 0 = top
       }
-    // Camera pose as tracked (true pose with this frame's tracking error).
-    const est = (v: Vec3) => applyPoseError(pose, { x: 0, y: 0, z: 0 }, v);
-    const X = est(right), Y = est(up), Zb = est({ x: -forward.x, y: -forward.y, z: -forward.z });
-    const T = applyPoseError(pose, cam.pos, cam.pos);
-    const camToWorld = [X.x, X.y, X.z, 0, Y.x, Y.y, Y.z, 0, Zb.x, Zb.y, Zb.z, 0, T.x, T.y, T.z, 1];
-    // Inverse of a standard perspective projection (near 0.1, far 100).
-    const n = 0.1, f = 100, ty = Math.tan(cam.fovY / 2), tx = ty * cam.aspect;
-    const invProj = [tx, 0, 0, 0, 0, ty, 0, 0, 0, 0, 0, (n - f) / (2 * f * n), 0, 0, -1, (f + n) / (2 * f * n)];
-    return { w, h, depth: out, invProj, camToWorld };
+    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: poseMatrix(cam, pose) };
+  }
+
+  /**
+   * The camera pose the tracker reports for this frame (column-major
+   * camera-to-world, three.js convention). Visual-inertial tracking is much
+   * smoother frame to frame than the depth-registration jitter modelled in
+   * depthImage(), so camera frames get a fraction of that jitter.
+   */
+  trackedCamToWorld(cam: SimCamera, jitterScale = 0.4): number[] {
+    return poseMatrix(cam, this.stepPoseError(jitterScale));
   }
 
   /** Floor height as measured by the placement hit-test (with error). */
@@ -326,7 +343,7 @@ export class SimSensor {
     e.yaw += this.gauss() * (N.relocRot ?? 0);
   }
 
-  private stepPoseError() {
+  private stepPoseError(jitterScale = 1) {
     const N = this.noise, e = this.poseErr, dt = 1 / 10;
     const k = 0.05; // reversion per frame
     e.yaw += -k * e.yaw + this.gauss() * N.driftRot * Math.sqrt(dt);
@@ -335,11 +352,11 @@ export class SimSensor {
     e.y += -k * e.y + this.gauss() * N.driftPos * 0.5 * Math.sqrt(dt);
     e.z += -k * e.z + this.gauss() * N.driftPos * Math.sqrt(dt);
     const j = this.poseJit;
-    j.yaw = e.yaw + this.gauss() * N.jitterRot;
-    j.pitch = e.pitch + this.gauss() * N.jitterRot;
-    j.x = e.x + this.gauss() * N.jitterPos;
-    j.y = e.y + this.gauss() * N.jitterPos;
-    j.z = e.z + this.gauss() * N.jitterPos;
+    j.yaw = e.yaw + this.gauss() * N.jitterRot * jitterScale;
+    j.pitch = e.pitch + this.gauss() * N.jitterRot * jitterScale;
+    j.x = e.x + this.gauss() * N.jitterPos * jitterScale;
+    j.y = e.y + this.gauss() * N.jitterPos * jitterScale;
+    j.z = e.z + this.gauss() * N.jitterPos * jitterScale;
     return j;
   }
 

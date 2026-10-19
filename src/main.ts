@@ -97,7 +97,6 @@ function startShowcase() {
   document.body.prepend(renderer.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1f2a33);
-  applyPetEnvironment(renderer, scene);
   scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 0.8));
   const sun = new THREE.DirectionalLight(0xffffff, 2.2);
   sun.position.set(0.5, 1.5, 1);
@@ -108,6 +107,7 @@ function startShowcase() {
   scene.add(disc);
   const rig = buildPet('mint');
   scene.add(rig.group);
+  applyPetEnvironment(renderer, rig);
   const anim = new Animator(rig, 7);
   const cam = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.01, 10);
   const portrait = innerHeight > innerWidth;

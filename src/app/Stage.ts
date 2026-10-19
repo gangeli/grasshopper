@@ -33,7 +33,6 @@ export class Stage {
     container.appendChild(this.renderer.domElement);
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.02, 40);
 
-    applyPetEnvironment(this.renderer, this.scene, opts.ar ? 0.6 : 0.8);
     this.hemi = new THREE.HemisphereLight(0xfffaf0, 0x8d8475, 0.9);
     this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xffffff, 2.0);
@@ -77,6 +76,7 @@ export class Stage {
 
   addPet(stack: GameStack) {
     this.scene.add(stack.rig.group);
+    applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
   }
 
   /** Keep the key light and shadow catcher centred on the pet. */

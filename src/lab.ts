@@ -28,7 +28,6 @@ document.body.appendChild(renderer.domElement);
 
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const scene = new THREE.Scene();
-applyPetEnvironment(renderer, scene);
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7f72, 0.6));
 const sun = new THREE.DirectionalLight(0xfff4e6, 2.0);
 sun.position.set(0.6, 1.4, 0.9);
@@ -44,6 +43,7 @@ scene.add(ground);
 
 const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', q.has('fur') ? { furShells: Number(q.get('fur')) } : {});
 scene.add(rig.group);
+applyPetEnvironment(renderer, rig);
 if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
 if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshNormalMaterial()));
 const anim = new Animator(rig, 3);

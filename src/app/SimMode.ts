@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { applyPetEnvironment } from '../pet/lighting';
 import { Simulation } from '../sim/Simulation';
 import { SeekerBot } from '../sim/SeekerBot';
 import { cameraBasis } from '../sim/SimSensor';
@@ -42,6 +43,7 @@ export class SimMode {
     this.bot = opts.bot ? new SeekerBot(this.sim) : null;
     this.ui = new GameUI(this.sim, hud, voice);
     stage.scene.add(this.sim.rig.group);
+    applyPetEnvironment(stage.renderer, this.sim.rig);
     this.buildRoom(this.sim.room);
     stage.scene.add(this.roomGroup);
     stage.scene.background = new THREE.Color(0x202430);
