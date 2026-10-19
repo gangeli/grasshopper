@@ -65,7 +65,7 @@ export function addSocketFade(
   shader.uniforms.uEyeSquint = eyeSquint;
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec3 socket;\nuniform float uEyeClosed;\nuniform float uEyeFill;\nuniform float uEyeSquint;\nvarying float vSocketK;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed * step(0.001, socket.x));\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.006 + max(0.0, socket.x * socket.x - socket.z) * uEyeSquint * 0.004);');
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed);\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.008 + max(0.0, socket.x * socket.x - socket.z) * uEyeSquint * 0.004);');
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', '#include <common>\nvarying float vSocketK;')
     .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vSocketK;');
@@ -103,6 +103,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         attribute float shellH;
         #else
         attribute vec3 flow;
+        attribute float silk;
         #endif
         uniform float uShellH;
         varying float vShellH;
@@ -110,7 +111,8 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         uniform float uLenScale;
         varying vec3 vRest;
         varying float vFurLen;
-        varying vec3 vStrand;`,
+        varying vec3 vStrand;
+        varying float vSilk;`,
       )
       .replace(
         '#include <begin_vertex>',
@@ -118,7 +120,9 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #ifdef SHELL_ATTR
         float sh = shellH;
         vec3 comb = vec3(0.0);
+        vSilk = 0.0;
         #else
+        vSilk = silk;
         float sh = uShellH;
         // Combed: only the tangential part of the groom direction bends the strands.
         vec3 comb = flow - normal * dot(flow, normal);
@@ -151,6 +155,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         varying vec3 vRest;
         varying float vFurLen;
         varying vec3 vStrand;
+        varying float vSilk;
         vec3 furHash(vec3 p) {
           p = fract(p * vec3(0.1031, 0.1030, 0.0973));
           p += dot(p, p.yxz + 33.33);
@@ -187,16 +192,17 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         }
         bool strand = best < 0.38 * pow(1.0 - hh, 0.6);
         // Short fur (face, paws) is a fine even velvet; locks form where the coat is long.
-        float lockAmt = smoothstep(0.003, 0.01, vFurLen);
+        // Silky fur (the tail brush) stays a fine even fuzz too, however long.
+        float lockAmt = smoothstep(0.003, 0.01, vFurLen) * (1.0 - vSilk);
         // Solid lock cores, strand-y lock edges, and a dense undercoat near the skin.
         if (!(dc < lockR * 0.58 * lockAmt || (dc < mix(9.0, lockR, lockAmt) && strand) || (hh < 0.28 && strand))) discard;
         // Deep in the coat between locks it is dark; each lock is a slightly different tone.
-        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * (0.5 + 0.5 * lockAmt);
+        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * (0.5 + 0.5 * lockAmt) * (1.0 - 0.7 * vSilk);
         // Dither the root-to-tip ramp a little so few shells don't band.
         float hd = clamp(uShellH + (furHash(floor(vRest * uDensity * 2.0)).x - 0.5) * 0.15, 0.0, 1.0);
         diffuseColor.rgb *= mix(0.45, 1.06, pow(hd, 0.8)) * (1.0 - 0.28 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
         // Tips a little paler, as if lightly sun-bleached.
-        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh);`,
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh * (1.0 - 0.7 * vSilk));`,
       )
       .replace(
         '#include <opaque_fragment>',

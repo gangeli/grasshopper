@@ -655,15 +655,15 @@ export class Animator {
     if (face.eyeSquint) face.eyeSquint.value = smoothstep(1.0, 0.15, lo);
     // A closed eye sinks into the face, so the lid reads as a soft fold in the
     // fur rather than a dome standing proud of it.
-    face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.2 * shut);
+    face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.3 * shut);
     // When happy the lower lid grows over the upper one, so its arched lash
     // line is the one that shows.
     // Closed lids also widen a touch so their edge tucks under the face fur
     // (no visible seam / socket ring around a sleeping eye).
-    const grow = 1 + 0.04 * closed;
+    const grow = 1 + 0.04 * closed + 0.04 * shut;
     face.lidUpL.scale.setScalar(grow);
     face.lidUpR.scale.setScalar(grow);
-    const ls = (0.99 + 0.07 * smoothstep(0.2, 0.8, happy)) * grow;
+    const ls = (0.99 + 0.12 * smoothstep(0.2, 0.8, happy)) * grow;
     face.lidLoL.scale.set(ls, -ls, ls);
     face.lidLoR.scale.set(ls, -ls, ls);
     const ps = clamp(P.pupilSize, 0.5, 1.5);
