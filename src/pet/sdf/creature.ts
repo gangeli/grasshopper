@@ -179,11 +179,11 @@ export const FUR_LENGTH: Record<Region, number> = {
   shin: 0.005,
   foot: 0.0028,
   toe: 0.0016,
-  arm: 0.005,
+  arm: 0.0065,
   hand: 0.002,
   finger: 0.0009,
   tail: 0.008,
-  tuft: 0.02,
+  tuft: 0.016,
 };
 
 export { mirror };

@@ -42,11 +42,13 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
+const tBuild = performance.now();
 const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', {
   ...(q.has('fur') ? { furShells: Number(q.get('fur')) } : {}),
   ...(q.has('res') ? { meshResolution: Number(q.get('res')) } : {}),
 });
 scene.add(rig.group);
+console.log(`pet build ${(performance.now() - tBuild).toFixed(0)} ms`);
 applyPetEnvironment(renderer, rig);
 if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
 if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshNormalMaterial()));

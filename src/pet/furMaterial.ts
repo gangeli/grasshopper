@@ -187,8 +187,8 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         // Solid lock cores, strand-y lock edges, and a dense undercoat near the skin.
         if (!(dc < lockR * 0.58 * lockAmt || (dc < mix(9.0, lockR, lockAmt) && strand) || (hh < 0.28 && strand))) discard;
         // Deep in the coat between locks it is dark; each lock is a slightly different tone.
-        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * lockAmt;
-        diffuseColor.rgb *= mix(0.5, 1.08, pow(uShellH, 0.8)) * (1.0 - 0.22 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
+        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * (0.5 + 0.5 * lockAmt);
+        diffuseColor.rgb *= mix(0.45, 1.06, pow(uShellH, 0.8)) * (1.0 - 0.28 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
         // Tips a little paler, as if lightly sun-bleached.
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh);`,
       )
