@@ -13,6 +13,8 @@ export interface FurOptions {
   density: number;
   /** Downward droop of tips (fraction of fur length). */
   gravity: number;
+  /** Lock (clump) cells per metre: strands gather into locks this size that taper to points. */
+  clump: number;
 }
 
 /**
@@ -67,12 +69,18 @@ export function addSocketFade(
     .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vSocketK;');
 }
 
-export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.35 };
+export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.3, clump: 200 };
 
 /**
  * h is the shell height in (0, 1]. With h < 0 the height comes from a
  * per-vertex `shellH` attribute instead, so several shells can be merged into
  * one geometry and drawn in a single call (used for small rigid parts like eyelids).
+ *
+ * The coat is groomed rather than a uniform pile: strands gather into locks
+ * (clumps a few mm across) that taper to points and vary in length, so the
+ * tips break the silhouette into wisps; the shells lean along a per-vertex
+ * `flow` direction (combed down the body, back over the head, out along the
+ * limbs and tail), and a Kajiya-Kay style highlight runs across the strands.
  */
 export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.MeshStandardMaterial, eye?: { closed: { value: number }; fill: { value: number }; squint: { value: number } }): THREE.MeshStandardMaterial {
   const m = base.clone();
@@ -81,6 +89,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
   m.onBeforeCompile = (shader) => {
     shader.uniforms.uShellH = { value: h };
     shader.uniforms.uDensity = { value: opts.density };
+    shader.uniforms.uClump = { value: opts.clump };
     shader.uniforms.uGravity = { value: opts.gravity };
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -89,20 +98,26 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         attribute float furLen;
         #ifdef SHELL_ATTR
         attribute float shellH;
+        #else
+        attribute vec3 flow;
         #endif
         uniform float uShellH;
         varying float vShellH;
         uniform float uGravity;
         varying vec3 vRest;
-        varying float vFurLen;`,
+        varying float vFurLen;
+        varying vec3 vStrand;`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         #ifdef SHELL_ATTR
         float sh = shellH;
+        vec3 comb = vec3(0.0);
         #else
         float sh = uShellH;
+        // Combed: only the tangential part of the groom direction bends the strands.
+        vec3 comb = flow - normal * dot(flow, normal);
         #endif
         vShellH = sh;
         vRest = position;
@@ -112,26 +127,26 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         fLen *= mix(1.0, 1.0 / max(0.3, 1.0 - 0.85 * socket.x), uEyeClosed);
         #endif
         vFurLen = fLen;
-        // Push out along the rest normal; tips droop a little (in pet space).
-        transformed += normal * fLen * sh;
+        // Strands leave the skin, then lay over along the groom; tips droop a little.
+        transformed += normal * fLen * sh + comb * fLen * (0.3 * sh + 0.65 * sh * sh);
         transformed.y -= fLen * uGravity * sh * sh;
-        #ifndef SHELL_ATTR
-        // Combed: on the head fur flows back from the muzzle, on the body it
-        // lies down and back. Only the tangential part bends the strands.
-        vec3 flow = position.y > 0.19 ? normalize(position - vec3(0.0, 0.225, 0.11)) : normalize(vec3(0.0, -1.0, -0.45));
-        flow -= normal * dot(flow, normal);
-        transformed += flow * fLen * 0.55 * sh * sh;
-        #endif`,
+        vec3 strandObj = normal + comb * (0.3 + 1.3 * sh) - vec3(0.0, 2.0 * uGravity * sh, 0.0);
+        #ifdef USE_SKINNING
+        strandObj = (skinMatrix * vec4(strandObj, 0.0)).xyz;
+        #endif
+        vStrand = normalMatrix * strandObj;`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
         `#include <common>
         uniform float uDensity;
+        uniform float uClump;
         varying float vShellH;
         #define uShellH vShellH
         varying vec3 vRest;
         varying float vFurLen;
+        varying vec3 vStrand;
         vec3 furHash(vec3 p) {
           p = fract(p * vec3(0.1031, 0.1030, 0.0973));
           p += dot(p, p.yxz + 33.33);
@@ -143,8 +158,22 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         `#include <color_fragment>
         // Where fur is very short (muzzle, paw pads) the shells just fade out.
         if (vFurLen < 0.0012 && uShellH > 0.25) discard;
-        // Strands: three interleaved jittered lattices in rest space, each strand
-        // a round, tapering column kept inside its cell (so no square clipping).
+        // Locks: nearest centre of three interleaved jittered lattices.
+        vec3 qc = vRest * uClump;
+        float dc = 9.0;
+        vec3 cid = vec3(0.0);
+        for (int i = 0; i < 3; i++) {
+          vec3 c = qc + vec3(0.271, 0.618, 0.333) * float(i);
+          vec3 cell = floor(c) + float(i) * 23.0;
+          float d = length(fract(c) - (0.28 + 0.44 * furHash(cell)));
+          if (d < dc) { dc = d; cid = cell; }
+        }
+        vec3 lockRnd = furHash(cid * 1.37 + 5.3);
+        // Locks vary in length, so the outline breaks into wisps.
+        float hh = uShellH / mix(0.55, 1.0, lockRnd.x);
+        if (hh > 1.0) discard;
+        float lockR = 0.62 * pow(1.0 - hh, 0.85);
+        // Fine strands: round, tapering columns kept inside their cells.
         vec3 q = vRest * uDensity;
         float best = 9.0;
         for (int i = 0; i < 3; i++) {
@@ -152,22 +181,42 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
           vec3 r = 0.36 + 0.28 * furHash(floor(c) + float(i) * 17.0);
           best = min(best, length(fract(c) - r));
         }
-        float radius = 0.36 * pow(1.0 - uShellH, 0.7);
-        if (best > radius) discard;
-        // Root shadowing and slightly lighter, warmer tips.
-        diffuseColor.rgb *= mix(0.58, 1.12, uShellH);`,
+        bool strand = best < 0.38 * pow(1.0 - hh, 0.6);
+        // Solid lock cores, strand-y lock edges, and a dense undercoat near the skin.
+        if (!(dc < lockR * 0.58 || (dc < lockR && strand) || (hh < 0.28 && strand))) discard;
+        // Deep in the coat between locks it is dark; each lock is a slightly different tone.
+        float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05));
+        diffuseColor.rgb *= mix(0.5, 1.08, pow(uShellH, 0.8)) * (1.0 - 0.22 * gap * (1.0 - hh)) * (0.9 + 0.2 * lockRnd.y);
+        // Tips a little paler, as if lightly sun-bleached.
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.3, hh * hh);`,
       )
       .replace(
         '#include <opaque_fragment>',
-        `// Backlit fuzz: strand tips glow a little along the silhouette.
-        float furRim = 1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition)));
-        outgoingLight += diffuseColor.rgb * pow(furRim, 3.0) * 0.45 * uShellH;
+        `// Strand highlights run across the hairs (Kajiya-Kay): a sharp white one and a broad tinted one.
+        {
+          vec3 T = normalize(vStrand);
+          vec3 Vd = normalize(vViewPosition);
+          vec3 kk = vec3(0.0);
+          #if NUM_DIR_LIGHTS > 0
+          for (int i = 0; i < NUM_DIR_LIGHTS; i++) {
+            vec3 L = directionalLights[i].direction;
+            float th = dot(T, normalize(L + Vd));
+            float s = sqrt(max(0.0, 1.0 - th * th));
+            float wrap = clamp(dot(normal, L) * 0.6 + 0.4, 0.0, 1.0);
+            kk += directionalLights[i].color * wrap * (0.06 * pow(s, 80.0) + 0.12 * pow(s, 14.0) * diffuseColor.rgb);
+          }
+          #endif
+          outgoingLight += kk * (0.25 + 0.75 * uShellH);
+          // Backlit fuzz: strand tips glow a little along the silhouette.
+          float furRim = 1.0 - abs(dot(normalize(vNormal), Vd));
+          outgoingLight += diffuseColor.rgb * pow(furRim, 3.0) * 0.45 * uShellH;
+        }
         #include <opaque_fragment>`,
       );
     if (h >= 0) addTranslucency(shader);
     if (eye) addSocketFade(shader, eye.closed, eye.fill, eye.squint);
   };
   if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
-  m.customProgramCacheKey = () => `fur-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.gravity}${eye ? '-sock' : ''}`;
+  m.customProgramCacheKey = () => `fur2-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
   return m;
 }
