@@ -81,7 +81,9 @@ export class DriftMonitor {
   /** Just after a loss, or a jump looks likely and nothing says the map still fits. */
   get suspicious(): boolean {
     if (!this.inEvent) return false;
-    return this.world.now - this.world.lastTrackingEvent < 4 || (this.votes.length > 0 && this.against === 0);
+    // A jump vote keeps it suspicious only while votes keep coming.
+    const lastVote = this.votes.length ? this.votes[this.votes.length - 1].t : -Infinity;
+    return this.world.now - this.world.lastTrackingEvent < 4 || (this.votes.length > 0 && this.against === 0 && this.lastT - lastVote < 6);
   }
 
   /**

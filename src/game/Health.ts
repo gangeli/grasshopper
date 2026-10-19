@@ -28,6 +28,8 @@ import type { ViewPose } from './Visibility';
  */
 export type HealthIssue =
   | 'drift'
+  | 'petReanchored'
+  | 'unsettledTimeout'
   | 'mapContradictory'
   | 'mapReset'
   | 'floorTooLow'
@@ -103,7 +105,28 @@ export class HealthMonitor {
 
   /** The map is under suspicion (just after a tracking loss): don't plan anything big on it. */
   get unsettled(): boolean {
-    return this.drift.suspicious;
+    return this.unsettledNow;
+  }
+  private unsettledNow = false;
+  private unsettledSince: number | null = null;
+  private ignoreSuspicionUntil = -Infinity;
+  /**
+   * Holding off is a precaution, never a reason to stop playing: if tracking
+   * keeps dropping out (or looks keep half-suggesting a jump) for more than a
+   * few seconds, go ahead anyway for a while.
+   */
+  private updateUnsettled() {
+    const sus = this.drift.suspicious && this.t >= this.ignoreSuspicionUntil;
+    if (!sus) this.unsettledSince = null;
+    else if (this.unsettledSince === null) this.unsettledSince = this.t;
+    else if (this.t - this.unsettledSince > 12) {
+      this.ignoreSuspicionUntil = this.t + 30;
+      this.unsettledSince = null;
+      this.report('unsettledTimeout', 'tracking kept looking shaky for 12s: playing on anyway');
+      this.unsettledNow = false;
+      return;
+    }
+    this.unsettledNow = sus;
   }
 
   /** Called every frame by the game (view already in the map frame). */
@@ -117,6 +140,7 @@ export class HealthMonitor {
     if (this.t - this.lastCheck < 0.33) return;
     this.lastCheck = this.t;
     this.checkDrift();
+    this.updateUnsettled();
     this.checkFloor();
     this.checkPetPlace(view);
     this.checkMotion();
@@ -151,6 +175,15 @@ export class HealthMonitor {
         this.report('mapContradictory', 'after a tracking loss the map no longer matched what the camera sees: evidence aged');
         this.game.mapChanged();
       }
+    }
+    if (verdict?.verdict === 'unknown' && this.game.mappedArea() < 2 && this.game.phase === 'roam') {
+      // A tracking loss we had too little depth to judge (camera-only depth in
+      // a bare room): the frame may have jumped with nothing to show it. Bring
+      // the pet back in front of the player rather than leave it somewhere
+      // that may now be inside furniture. (The map is kept: wiping a small map
+      // on every loss could stop a bare room from ever getting mapped.)
+      this.report('petReanchored', 'after a tracking loss there was too little depth to check the map: pet brought back into view');
+      this.game.reanchorPet();
     }
     if (fixed) {
       this.lastRealign = this.t;
