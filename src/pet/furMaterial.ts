@@ -29,13 +29,13 @@ export function addTranslucency(shader: { vertexShader: string; fragmentShader: 
     .replace(
       '#include <opaque_fragment>',
       `if (vThin > 0.001) {
-        vec3 through = vec3(0.35);
+        vec3 through = vec3(0.28);
         #if NUM_DIR_LIGHTS > 0
         for (int i = 0; i < NUM_DIR_LIGHTS; i++) through += directionalLights[i].color * pow(max(0.0, dot(-normal, directionalLights[i].direction)), 1.5);
         #endif
         // Thin edges seen at a grazing angle glow a little too.
         float graze = 1.0 - abs(dot(normal, normalize(vViewPosition)));
-        vec3 tint = mix(diffuseColor.rgb, vec3(1.0, 0.42, 0.36), 0.6) * vec3(1.0, 0.7, 0.66);
+        vec3 tint = mix(diffuseColor.rgb, vec3(1.0, 0.55, 0.58), 0.8) * vec3(1.0, 0.72, 0.74);
         outgoingLight += vThin * tint * (through * 0.6 + 0.5 * graze * graze);
       }
       #include <opaque_fragment>`,

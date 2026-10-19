@@ -756,7 +756,7 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
     c.setRGB(0.72, 0.72, 0.72).lerp(new THREE.Color(1, 1, 1), smooth(d / 0.9));
     const rim = smooth((d - 0.78) / 0.2);
     c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35));
-    return [c.r, c.g, c.b, Math.min(1, 0.55 + 0.4 * k + 0.25 * (1 - smooth(d / 0.35)) + 0.2 * rim)];
+    return [c.r, c.g, c.b, Math.min(1, 0.46 + 0.45 * k + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim)];
   });
 }
 

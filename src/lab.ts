@@ -7,7 +7,7 @@ import { applyPetEnvironment } from './pet/lighting';
  * Pose lab: renders Hopper in a grid of actions × times (and optional camera
  * angles) so automated tests and humans can review the model and animation at
  * a glance. URL params: actions=a,b,c  times=0.1,0.5  yaw=0.6  size=220  palette=mint
- * dist/camY/lookY (camera), fur=N, look=0 (don't look at the camera)
+ * dist/camY/lookY (camera), fur=N, res=0.0034 (mesh), look=0 (don't look at the camera)
  */
 const q = new URLSearchParams(location.search);
 const actions = (q.get('actions') ?? 'idle,hop,jumpCrouch,jumpAir,land,hide,hideLow,peek,giggle,surprised,celebrate,wave,lookAround,sniff,coverEyes,sleep').split(',') as ActionName[];
@@ -42,7 +42,10 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', q.has('fur') ? { furShells: Number(q.get('fur')) } : {});
+const rig = buildPet((q.get('palette') as 'mint') ?? 'mint', {
+  ...(q.has('fur') ? { furShells: Number(q.get('fur')) } : {}),
+  ...(q.has('res') ? { meshResolution: Number(q.get('res')) } : {}),
+});
 scene.add(rig.group);
 applyPetEnvironment(renderer, rig);
 if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
