@@ -61,6 +61,10 @@
   #landing .cta { position: relative; padding: 17px 34px; font-size: 19px; font-weight: 600; border-radius: 999px; color: #10261d;
     background: linear-gradient(180deg, #8ff0c3, #4cc995); box-shadow: 0 10px 30px rgba(76,201,149,.45), inset 0 1px 0 rgba(255,255,255,.6);
     animation: breathe 2.8s ease-in-out infinite; font-family: inherit; }
+  a.cta { text-decoration: none; display: inline-block; }
+  #landing .row2 { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #landing .row2 .cta { padding: 15px 22px; font-size: 17px; }
+  #landing .cta.ghost { background: rgba(255,255,255,.1); color: #eaf7f1; box-shadow: inset 0 0 0 1.5px rgba(143,240,195,.7); animation: none; }
   #landing .cta:active { transform: scale(.97); }
   @keyframes breathe { 50% { box-shadow: 0 10px 42px rgba(76,201,149,.7), inset 0 1px 0 rgba(255,255,255,.6); } }
   @media (prefers-reduced-motion: reduce) { #landing .cta { animation: none; } }
@@ -109,6 +113,10 @@
     <li><b>3</b>Find where Hopper hid</li>
   </ol>
   <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
+  <div class="row2" id="chrome-row" style="display:none">
+    <a id="btn-chrome" class="cta">Open in Chrome</a>
+    <a id="btn-chrome-install" class="cta ghost">Install the app</a>
+  </div>
   <button id="btn-cam" class="cta" style="display:none">Start with camera</button>
   <button id="btn-sim" class="alt">or play in a virtual room</button>
   <small id="support-note"></small>
