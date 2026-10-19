@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { applyPetEnvironment } from '../pet/lighting';
 import type { GameStack } from '../game/stack';
 import { Occluder } from './Occluder';
+import { PerfMonitor, petScreenCoverage } from './Perf';
 
 /**
  * Renderer, scene and the always-present scene furniture for the pet:
@@ -29,6 +30,10 @@ export class Stage {
   private debugBuiltEpoch = -1;
   private readonly _v = new THREE.Vector3();
   debug = false;
+  /** Frame profiler (?perf=1: detailed sections, overlay and console log). */
+  readonly perf: PerfMonitor;
+  private petRig: GameStack['rig'] | null = null;
+  private readonly _c = new THREE.Vector3();
 
   constructor(container: HTMLElement, opts: { ar: boolean }) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: opts.ar, preserveDrawingBuffer: true });
@@ -40,6 +45,8 @@ export class Stage {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
+    this.perf = PerfMonitor.fromUrl(container);
+    this.perf.enableGpuTimer(this.renderer.getContext());
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.02, 40);
 
     this.hemi = new THREE.HemisphereLight(0xfffaf0, 0x8d8475, 0.9);
@@ -86,6 +93,7 @@ export class Stage {
   }
 
   addPet(stack: GameStack) {
+    this.petRig = stack.rig;
     this.mapRoot.add(stack.rig.group);
     applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
   }
@@ -170,8 +178,40 @@ export class Stage {
     }
   }
 
+  /** The pet rig whose fragment load the profiler estimates (SimMode adds its own). */
+  setPetRig(rig: GameStack['rig']) {
+    this.petRig = rig;
+  }
+
   render() {
+    const p = this.perf;
+    p.gpuBegin();
+    const t0 = performance.now();
     this.renderer.render(this.scene, this.camera);
+    p.add('render', performance.now() - t0);
+    p.gpuEnd();
+    const info = this.renderer.info;
+    const ri = p.renderInfo;
+    ri.calls = info.render.calls;
+    ri.triangles = info.render.triangles;
+    ri.programs = info.programs?.length ?? 0;
+    ri.geometries = info.memory.geometries;
+    ri.textures = info.memory.textures;
+    if (p.detailed && this.petRig) this.estimateFragments(this.petRig);
+  }
+
+  /** Profiler: drawing-buffer pixels, the pet's screen coverage and how many layers shade it. */
+  private estimateFragments(rig: GameStack['rig']) {
+    const r = this.renderer;
+    const cam = r.xr.isPresenting ? r.xr.getCamera() : this.camera;
+    const size = r.getDrawingBufferSize(new THREE.Vector2());
+    let layers = 0;
+    rig.group.traverseVisible((o) => {
+      if ((o as THREE.Mesh).isMesh && /^(body|fur\d+)$/.test(o.name)) layers++;
+    });
+    rig.bones.chest.getWorldPosition(this._c);
+    const cov = rig.group.visible ? petScreenCoverage(this._c, 0.16 * rig.group.scale.y, cam) : 0;
+    this.perf.frag = { pixels: size.x * size.y, coverage: cov, layers };
   }
 }
 

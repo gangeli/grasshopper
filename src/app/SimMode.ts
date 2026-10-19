@@ -55,6 +55,16 @@ export class SimMode {
     this.bot = opts.bot ? new SeekerBot(this.sim) : null;
     this.ui = new GameUI(this.sim, hud, voice);
     stage.scene.add(this.sim.rig.group);
+    stage.setPetRig(this.sim.rig);
+    const perf = stage.perf;
+    perf.attachOverlay(hud.root);
+    perf.instrument(this.sim.world, 'ingestDepthImage', 'world.ingestDepth');
+    perf.instrument(this.sim.sensor, 'depthImage', 'sim.sensorDepth');
+    perf.instrument(this.sim.game, 'update', 'game.update');
+    perf.instrument(this.sim.game, 'refreshNav', 'game.refreshNav');
+    perf.instrument(this.sim.game.health, 'update', 'game.health');
+    perf.instrument(this.sim.anim, 'update', 'game.anim');
+    perf.instrument(this.ui, 'update', 'ui');
     applyPetEnvironment(stage.renderer, this.sim.rig);
     if (this.camera) {
       // Video shows through the transparent canvas; keep the grounding shadow.
@@ -98,10 +108,22 @@ export class SimMode {
   }
 
   private frame(t: number) {
+    const perf = this.stage.perf;
+    perf.beginFrame(t);
+    try {
+      this.frameBody(t);
+    } finally {
+      perf.endFrame();
+    }
+  }
+
+  private frameBody(t: number) {
     const real = this.lastT ? Math.min(0.05, (t - this.lastT) / 1000) : 1 / 60;
     this.lastT = t;
     const dt = this.opts.fixed ? 1 / 30 : real;
+    const t0 = performance.now();
     for (let s = 0; s < this.opts.speed; s++) this.step(dt);
+    this.stage.perf.add('sim.step*', performance.now() - t0);
     this.frames++;
     const cam = this.stage.camera;
     const c = this.sim.cam;

@@ -8,6 +8,8 @@ import type { Hud } from './Hud';
 import type { Stage } from './Stage';
 import type { Voice } from './Voice';
 import { GameUI } from './GameUI';
+import { NavGrid } from '../world/NavGrid';
+import { VoxelGrid } from '../world/VoxelGrid';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -123,6 +125,21 @@ export class ArMode {
 
   constructor(readonly stage: Stage, readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     this.ui = new GameUI(stack, hud, voice);
+    // Profiler (?perf=1): the overlay must live in the dom-overlay root to show in AR.
+    const perf = stage.perf;
+    perf.attachOverlay(hud.root);
+    perf.instrument(stack.world, 'ingestDepthImage', 'world.ingestDepth');
+    perf.instrument(stack.world, 'ingestPlane', 'world.ingestPlane');
+    perf.instrument(stack.world, 'ingestMesh', 'world.ingestMesh');
+    perf.instrument(stack.game, 'refreshNav', 'game.refreshNav');
+    perf.instrument(NavGrid.prototype, 'build', 'nav.build');
+    perf.instrument(VoxelGrid.prototype, 'updateShadow', 'grid.updateShadow');
+    perf.instrument(stack.game.health, 'update', 'game.health');
+    perf.instrument(stack.anim, 'update', 'game.anim');
+    perf.instrument(stack.pet, 'update', 'game.pet');
+    perf.instrument(stack.game, 'start', 'game.start(plan)');
+    perf.instrument(stage, 'updateOccluder', 'occluder');
+    perf.instrument(this.ui, 'update', 'ui');
   }
 
   static async supported(): Promise<boolean> {
@@ -244,12 +261,15 @@ export class ArMode {
 
   /** Run one part of the frame; an exception is logged and counted, never propagated. */
   private guard(where: string, fn: () => void): boolean {
+    const t0 = performance.now();
     try {
       fn();
       return true;
     } catch (e) {
       this.recordError(where, e);
       return false;
+    } finally {
+      this.stage.perf.add(`${where}*`, performance.now() - t0);
     }
   }
 
@@ -431,6 +451,16 @@ export class ArMode {
 
   private onFrame(t: number, frame?: XRFrame) {
     if (!frame) return; // only render from the XR session's frames
+    const perf = this.stage.perf;
+    perf.beginFrame(t);
+    try {
+      this.frameBody(t, frame);
+    } finally {
+      perf.endFrame();
+    }
+  }
+
+  private frameBody(t: number, frame: XRFrame) {
     const dt = clampDt(this.lastT, t);
     this.lastT = t;
     this.now = t / 1000;
@@ -728,7 +758,9 @@ export class ArMode {
     if (!info) return;
     this.stats.depthFrames++;
     // Same front end as the simulator: discontinuity filter + tracking gate.
+    const t0 = performance.now();
     const img = sampleDepthImage(info, view, 40, 30);
+    this.stage.perf.add('depth.sample', performance.now() - t0);
     let valid = 0;
     for (let q = 0; q < img.depth.length; q++) if (img.depth[q] > 0) valid++;
     if (valid < img.depth.length * 0.01) {

@@ -1,5 +1,5 @@
 import type { Vec3 } from '../core/math';
-import type { VoxelGrid } from './VoxelGrid';
+import { OCC_THRESHOLD, SOFT_SOLID, type VoxelGrid } from './VoxelGrid';
 import type { WorldModel } from './WorldModel';
 
 /**
@@ -94,163 +94,26 @@ export class NavGrid {
   }
 
   build(): void {
-    const g = this.g, p = this.p, r = g.res;
-    const floorTopJ = this.world.floorLayer - 1;
-    const rad = Math.ceil(p.radius / r);
-    const stepCells = p.maxStep / r;
-    const crawlCells = Math.ceil(p.crawlHeight / r);
-    const capCells = Math.ceil(0.5 / r);
-    g.updateShadow();
-    // With depth sensing we only trust space we've actually seen to be empty;
-    // otherwise the inside of a box whose top we never saw would look walkable.
-    const requireSeen = this.world.depthPoints > 0;
+    const res = computeNav(this.g, this.world, this.p, this.colStart, this.colCount, this.scratch);
+    this.adopt(res, this.g.version);
+  }
 
-    // Pass 1: candidate surfaces per column.
-    const candI: number[] = [], candK: number[] = [], candJ: number[] = [], candH: number[] = [];
-    this.colCount.fill(0);
-    for (let k = 0; k < g.nz; k++)
-      for (let i = 0; i < g.nx; i++) {
-        const col = k * g.nx + i;
-        this.colStart[col] = candI.length;
-        for (let j = floorTopJ; j < g.ny - 1; j++) {
-          if (!g.solid(i, j, k) || g.solid(i, j + 1, k)) continue;
-          if (j === floorTopJ && !g.isObserved(i, k)) continue;
-          // Only real observations can hold the pet up; guessed ("soft") or
-          // shadow-inferred cells only block.
-          if (j !== floorTopJ && !g.occ(i, j, k)) continue;
-          // Low "platforms" (a few cm up to ~12cm) are mostly depth noise on
-          // the floor, or toys: walk around them, never stand on them.
-          if (j !== floorTopJ) {
-            const hAbove = g.surfaceY(i, j, k) - this.world.floorY;
-            if (hAbove > p.maxStep && hAbove < p.minPlatform) continue;
-          }
-          if (g.underside[g.idx(i, j, k)] === 1) continue;
-          if (j * r > p.maxSurfaceHeight) break;
-          // Headroom.
-          let h = 0;
-          while (h < capCells && j + 1 + h < g.ny && !g.solid(i, j + 1 + h, k)) h++;
-          if (h < crawlCells) continue;
-          if (requireSeen && !this.seenFree(i, j, k)) continue;
-          candI.push(i);
-          candK.push(k);
-          candJ.push(j);
-          candH.push(h * r);
-          this.colCount[col]++;
-          if (this.colCount[col] >= 6) break;
-        }
-      }
-
-    // Pass 2: clearance and support filtering.
-    const n0 = candI.length;
-    const keep = new Uint8Array(n0);
-    const wd = new Float32Array(n0);
-    for (let q = 0; q < n0; q++) {
-      const i = candI[q], k = candK[q], j = candJ[q];
-      const needCells = Math.min(Math.round(candH[q] / r), Math.ceil(p.standHeight / r));
-      let ok = true;
-      let nearest = 9;
-      let seen = 0, total = 0;
-      for (let dk = -rad - 1; dk <= rad + 1 && ok; dk++)
-        for (let di = -rad - 1; di <= rad + 1 && ok; di++) {
-          const d2 = di * di + dk * dk;
-          const ii = i + di, kk = k + dk;
-          const inDisc = d2 <= rad * rad;
-          // Obstacle check: anything solid in the body's height band.
-          let blocked = false;
-          for (let jj = j + 1 + Math.floor(stepCells); jj <= j + needCells; jj++) {
-            if (g.solid(ii, jj, kk)) {
-              blocked = true;
-              break;
-            }
-            if (inDisc && requireSeen) {
-              total++;
-              if (g.data[g.idx(ii, jj, kk)] <= -2) seen++;
-            }
-          }
-          if (blocked) {
-            const d = Math.sqrt(d2);
-            if (inDisc) ok = false;
-            else nearest = Math.min(nearest, d);
-          }
-          // Support check: immediate 4-neighbourhood must have ground near this height.
-          if (ok && d2 === 1) {
-            let support = false;
-            for (let jj = j - Math.ceil(stepCells); jj <= j + Math.floor(stepCells); jj++)
-              if (g.solid(ii, jj, kk) && !g.solid(ii, jj + 1, kk)) {
-                if (jj === floorTopJ && !g.isObserved(ii, kk)) continue;
-                if (jj !== floorTopJ && !g.occ(ii, jj, kk)) continue;
-                support = true;
-                break;
-              }
-            if (!support) ok = false;
-          }
-        }
-      // With depth sensing, most of the body's footprint must have been seen
-      // empty: unseen space (e.g. a pot hidden under foliage) isn't trusted.
-      if (ok && requireSeen && total > 0 && seen < total * p.knownFreeMin) ok = false;
-      if (ok) {
-        keep[q] = 1;
-        wd[q] = Math.min(nearest, 9) * r;
-      }
-    }
-
-    // Compact.
-    let n = 0;
-    for (let q = 0; q < n0; q++) if (keep[q]) n++;
-    this.ni = new Int32Array(n);
-    this.nk = new Int32Array(n);
-    this.ny = new Float32Array(n);
-    this.headroom = new Float32Array(n);
-    this.wallDist = new Float32Array(n);
-    this.colCount.fill(0);
-    let w = 0;
-    let lastCol = -1;
-    for (let q = 0; q < n0; q++) {
-      if (!keep[q]) continue;
-      const col = candK[q] * g.nx + candI[q];
-      if (col !== lastCol) {
-        this.colStart[col] = w;
-        lastCol = col;
-      }
-      this.colCount[col]++;
-      this.ni[w] = candI[q];
-      this.nk[w] = candK[q];
-      // Floor nodes sit exactly on the floor; others at the observed sub-voxel surface height.
-      this.ny[w] = candJ[q] === floorTopJ ? this.world.floorY : g.surfaceY(candI[q], candJ[q], candK[q]);
-      this.headroom[w] = candH[q];
-      this.wallDist[w] = wd[q];
-      w++;
-    }
-    this.count = n;
+  /** Install a computed graph (from build(), or from a background build of a grid snapshot taken at `version`). */
+  adopt(res: NavArrays, version: number): void {
+    this.ni = res.ni;
+    this.nk = res.nk;
+    this.ny = res.ny;
+    this.headroom = res.headroom;
+    this.wallDist = res.wallDist;
+    this.edgeFlag = res.edgeFlag;
+    if (res.colStart !== this.colStart) this.colStart.set(res.colStart);
+    if (res.colCount !== this.colCount) this.colCount.set(res.colCount);
+    this.count = res.count;
     this.jumpCache.clear();
     this.jumpLift.clear();
-
-    // Edge nodes: next to a height discontinuity → candidates for jump links.
-    this.edgeFlag = new Uint8Array(n);
-    for (let a = 0; a < n; a++) {
-      for (let d = 0; d < 8; d++) {
-        const ii = this.ni[a] + DI[d], kk = this.nk[a] + DK[d];
-        if (this.neighborAt(ii, kk, this.ny[a]) === NONE) {
-          this.edgeFlag[a] = 1;
-          break;
-        }
-      }
-    }
-    this.builtVersion = g.version;
+    this.builtVersion = version;
   }
-
-  /** Some voxel in the body band of this column (or a 4-neighbour) was carved free by depth. */
-  /**
-   * The body space right above this surface has actually been observed empty
-   * (carved by depth rays) in this very column — not just next to it, and not
-   * merely assumed.
-   */
-  private seenFree(i: number, j: number, k: number): boolean {
-    const g = this.g;
-    let n = 0;
-    for (let jj = j + 1; jj <= j + 5; jj++) if (g.inBounds(i, jj, k) && g.data[g.idx(i, jj, k)] < -2) n++;
-    return n >= this.p.seenFreeMin;
-  }
+  private scratch: NavScratch = { colMask: null };
 
   pos(a: number): Vec3 {
     return { x: this.g.centerX(this.ni[a]), y: this.ny[a], z: this.g.centerZ(this.nk[a]) };
@@ -665,4 +528,251 @@ class MinHeap {
     }
     return top;
   }
+}
+
+/** A computed navigation graph (struct of arrays); see NavGrid. */
+export interface NavArrays {
+  ni: Int32Array;
+  nk: Int32Array;
+  ny: Float32Array;
+  headroom: Float32Array;
+  wallDist: Float32Array;
+  edgeFlag: Uint8Array;
+  colStart: Int32Array;
+  colCount: Uint8Array;
+  count: number;
+  /** Expired dynamic-obstacle cells the build queried (VoxelGrid.isTransient deleted them). */
+  expired: number[];
+}
+
+export interface NavScratch {
+  colMask: Uint8Array | null;
+}
+
+/** What the build needs from the world model. */
+export interface NavWorldInfo {
+  floorLayer: number;
+  floorY: number;
+  depthPoints: number;
+}
+
+/**
+ * The graph build (NavGrid.build), as a function of the grid and the world's
+ * floor, so it can also run on a copy of the grid in a worker. Writes
+ * colStart/colCount in place.
+ */
+export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colStart: Int32Array, colCount: Uint8Array, scratch: NavScratch): NavArrays {
+    const r = g.res;
+    const floorTopJ = world.floorLayer - 1;
+    const rad = Math.ceil(p.radius / r);
+    const stepCells = p.maxStep / r;
+    const crawlCells = Math.ceil(p.crawlHeight / r);
+    const capCells = Math.ceil(0.5 / r);
+    const sh = g.updateShadow();
+    const expired: number[] = [];
+    // With depth sensing we only trust space we've actually seen to be empty;
+    // otherwise the inside of a box whose top we never saw would look walkable.
+    const requireSeen = world.depthPoints > 0;
+    // The scans below walk columns (bottom to top), but the grid is stored
+    // layer by layer: snapshot what they need into a column-major bit mask
+    // first (one pass in memory order), so they read contiguous bytes.
+    //   1 = solid (occupied, soft solid or shadowed), 2 = data <= -2,
+    //   4 = occupied (> OCC_THRESHOLD), 8 = data < -2.
+    // Dynamic obstacles (VoxelGrid.isTransient): 16 = a live one (solid),
+    // 32 = an expired one, which VoxelGrid.solid() would delete when it is
+    // queried (bumping the grid version), so the first query still goes there.
+    const nx = g.nx, ny = g.ny, nz = g.nz;
+    const T = columnMask(g, sh, scratch);
+    const inb = (i: number, j: number, k: number) => i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz;
+    const solid = (i: number, j: number, k: number) => {
+      if (!inb(i, j, k)) return false;
+      const o = (k * nx + i) * ny + j, b = T[o];
+      if (b & 17) return true;
+      if (b & 32) {
+        T[o] = b & ~32;
+        const n = g.idx(i, j, k);
+        expired.push(n);
+        return g.isTransient(n);
+      }
+      return false;
+    };
+    // (Out of the grid, the original index arithmetic is kept as it was.)
+    const seenEmpty = (i: number, j: number, k: number) => (inb(i, j, k) ? (T[(k * nx + i) * ny + j] & 2) !== 0 : g.data[g.idx(i, j, k)] <= -2);
+    const occ = (i: number, j: number, k: number) => inb(i, j, k) && (T[(k * nx + i) * ny + j] & 4) !== 0;
+
+    // Pass 1: candidate surfaces per column.
+    const candI: number[] = [], candK: number[] = [], candJ: number[] = [], candH: number[] = [];
+    colCount.fill(0);
+    for (let k = 0; k < g.nz; k++)
+      for (let i = 0; i < g.nx; i++) {
+        const col = k * g.nx + i;
+        colStart[col] = candI.length;
+        for (let j = floorTopJ; j < g.ny - 1; j++) {
+          if (!solid(i, j, k) || solid(i, j + 1, k)) continue;
+          if (j === floorTopJ && !g.isObserved(i, k)) continue;
+          // Only real observations can hold the pet up; guessed ("soft") or
+          // shadow-inferred cells only block.
+          if (j !== floorTopJ && !occ(i, j, k)) continue;
+          // Low "platforms" (a few cm up to ~12cm) are mostly depth noise on
+          // the floor, or toys: walk around them, never stand on them.
+          if (j !== floorTopJ) {
+            const hAbove = g.surfaceY(i, j, k) - world.floorY;
+            if (hAbove > p.maxStep && hAbove < p.minPlatform) continue;
+          }
+          if (g.underside[g.idx(i, j, k)] === 1) continue;
+          if (j * r > p.maxSurfaceHeight) break;
+          // Headroom.
+          let h = 0;
+          while (h < capCells && j + 1 + h < g.ny && !solid(i, j + 1 + h, k)) h++;
+          if (h < crawlCells) continue;
+          if (requireSeen && !seenFree(g, i, j, k, T, p.seenFreeMin)) continue;
+          candI.push(i);
+          candK.push(k);
+          candJ.push(j);
+          candH.push(h * r);
+          colCount[col]++;
+          if (colCount[col] >= 6) break;
+        }
+      }
+
+    // Pass 2: clearance and support filtering.
+    const n0 = candI.length;
+    const keep = new Uint8Array(n0);
+    const wd = new Float32Array(n0);
+    for (let q = 0; q < n0; q++) {
+      const i = candI[q], k = candK[q], j = candJ[q];
+      const needCells = Math.min(Math.round(candH[q] / r), Math.ceil(p.standHeight / r));
+      let ok = true;
+      let nearest = 9;
+      let seen = 0, total = 0;
+      for (let dk = -rad - 1; dk <= rad + 1 && ok; dk++)
+        for (let di = -rad - 1; di <= rad + 1 && ok; di++) {
+          const d2 = di * di + dk * dk;
+          const ii = i + di, kk = k + dk;
+          const inDisc = d2 <= rad * rad;
+          // Obstacle check: anything solid in the body's height band.
+          let blocked = false;
+          for (let jj = j + 1 + Math.floor(stepCells); jj <= j + needCells; jj++) {
+            if (solid(ii, jj, kk)) {
+              blocked = true;
+              break;
+            }
+            if (inDisc && requireSeen) {
+              total++;
+              if (seenEmpty(ii, jj, kk)) seen++;
+            }
+          }
+          if (blocked) {
+            const d = Math.sqrt(d2);
+            if (inDisc) ok = false;
+            else nearest = Math.min(nearest, d);
+          }
+          // Support check: immediate 4-neighbourhood must have ground near this height.
+          if (ok && d2 === 1) {
+            let support = false;
+            for (let jj = j - Math.ceil(stepCells); jj <= j + Math.floor(stepCells); jj++)
+              if (solid(ii, jj, kk) && !solid(ii, jj + 1, kk)) {
+                if (jj === floorTopJ && !g.isObserved(ii, kk)) continue;
+                if (jj !== floorTopJ && !occ(ii, jj, kk)) continue;
+                support = true;
+                break;
+              }
+            if (!support) ok = false;
+          }
+        }
+      // With depth sensing, most of the body's footprint must have been seen
+      // empty: unseen space (e.g. a pot hidden under foliage) isn't trusted.
+      if (ok && requireSeen && total > 0 && seen < total * p.knownFreeMin) ok = false;
+      if (ok) {
+        keep[q] = 1;
+        wd[q] = Math.min(nearest, 9) * r;
+      }
+    }
+
+    // Compact.
+    let n = 0;
+    for (let q = 0; q < n0; q++) if (keep[q]) n++;
+    const ni = new Int32Array(n);
+    const nk = new Int32Array(n);
+    const ny_ = new Float32Array(n);
+    const headroom = new Float32Array(n);
+    const wallDist = new Float32Array(n);
+    colCount.fill(0);
+    let w = 0;
+    let lastCol = -1;
+    for (let q = 0; q < n0; q++) {
+      if (!keep[q]) continue;
+      const col = candK[q] * g.nx + candI[q];
+      if (col !== lastCol) {
+        colStart[col] = w;
+        lastCol = col;
+      }
+      colCount[col]++;
+      ni[w] = candI[q];
+      nk[w] = candK[q];
+      // Floor nodes sit exactly on the floor; others at the observed sub-voxel surface height.
+      ny_[w] = candJ[q] === floorTopJ ? world.floorY : g.surfaceY(candI[q], candJ[q], candK[q]);
+      headroom[w] = candH[q];
+      wallDist[w] = wd[q];
+      w++;
+    }
+
+    // Edge nodes: next to a height discontinuity → candidates for jump links.
+    const edgeFlag = new Uint8Array(n);
+    for (let a = 0; a < n; a++) {
+      for (let d = 0; d < 8; d++) {
+        const ii = ni[a] + DI[d], kk = nk[a] + DK[d];
+        if (columnNeighbor(g, colStart, colCount, ny_, ii, kk, ny_[a], p.maxStep + 1e-4) === NONE) {
+          edgeFlag[a] = 1;
+          break;
+        }
+      }
+    }
+    return { ni, nk, ny: ny_, headroom, wallDist, edgeFlag, colStart, colCount, count: n, expired };
+  }
+
+/**
+ * The body space right above this surface has actually been observed empty
+ * (carved by depth rays) in this very column — not just next to it, and not
+ * merely assumed.
+ */
+function seenFree(g: VoxelGrid, i: number, j: number, k: number, T: Uint8Array, seenFreeMin: number): boolean {
+  let n = 0;
+  for (let jj = j + 1; jj <= j + 5; jj++) if (g.inBounds(i, jj, k) && (T[(k * g.nx + i) * g.ny + jj] & 8) !== 0) n++;
+  return n >= seenFreeMin;
+}
+
+/** NavGrid.neighborAt on raw arrays. */
+function columnNeighbor(g: VoxelGrid, colStart: Int32Array, colCount: Uint8Array, ny: Float32Array, i: number, k: number, y: number, tol: number): number {
+  if (i < 0 || k < 0 || i >= g.nx || k >= g.nz) return NONE;
+  const col = k * g.nx + i;
+  const s = colStart[col], c = colCount[col];
+  let best = NONE, bd = tol;
+  for (let q = s; q < s + c; q++) {
+    const d = Math.abs(ny[q] - y);
+    if (d <= bd) {
+      bd = d;
+      best = q;
+    }
+  }
+  return best;
+}
+
+/** Column-major per-voxel bits for computeNav (see there). */
+function columnMask(g: VoxelGrid, sh: Uint8Array, scratch: NavScratch): Uint8Array {
+  const ny = g.ny, layer = g.nx * g.nz;
+  const T = scratch.colMask && scratch.colMask.length === layer * ny ? scratch.colMask : (scratch.colMask = new Uint8Array(layer * ny));
+  const data = g.data;
+  for (let j = 0; j < ny; j++) {
+    const base = j * layer;
+    for (let c = 0, o = j; c < layer; c++, o += ny) {
+      const v = data[base + c];
+      T[o] = (v >= SOFT_SOLID || sh[base + c] === 1 ? 1 : 0) | (v <= -2 ? 2 : 0) | (v > OCC_THRESHOLD ? 4 : 0) | (v < -2 ? 8 : 0);
+    }
+  }
+  for (const [n, until] of g.transientEntries()) {
+    const j = Math.floor(n / layer), c = n - j * layer;
+    T[c * ny + j] |= until < g.now ? 32 : 16;
+  }
+  return T;
 }

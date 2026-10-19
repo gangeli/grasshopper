@@ -313,26 +313,32 @@ export class VoxelGrid {
   updateShadow(): Uint8Array {
     if (this.shadow && this.shadowVersion === this.version) return this.shadow;
     const s = this.shadow ?? new Uint8Array(this.data.length);
-    s.fill(0);
-    for (let k = 0; k < this.nz; k++)
-      for (let i = 0; i < this.nx; i++) {
-        let shadowing = false;
-        for (let j = this.ny - 1; j >= 0; j--) {
-          const n = (j * this.nz + k) * this.nx + i;
-          const v = this.data[n];
-          if (v > OCC_THRESHOLD) {
-            shadowing = this.underside[n] !== 1;
-          } else if (v < 0) {
-            shadowing = false;
-          } else if (shadowing) {
-            s[n] = 1;
-          }
-        }
+    // Walk all columns at once, layer by layer from the top: the same
+    // per-column scan, but in memory order (a column walk strides a whole
+    // layer per step and thrashes the cache on a phone).
+    const layer = this.nx * this.nz;
+    const shadowing = (this._shadowCols ??= new Uint8Array(layer));
+    shadowing.fill(0);
+    const data = this.data, under = this.underside;
+    for (let j = this.ny - 1; j >= 0; j--) {
+      const base = j * layer;
+      for (let c = 0; c < layer; c++) {
+        const n = base + c;
+        const v = data[n];
+        if (v > OCC_THRESHOLD) {
+          shadowing[c] = under[n] !== 1 ? 1 : 0;
+          s[n] = 0;
+        } else if (v < 0) {
+          shadowing[c] = 0;
+          s[n] = 0;
+        } else s[n] = shadowing[c];
       }
+    }
     this.shadow = s;
     this.shadowVersion = this.version;
     return s;
   }
+  private _shadowCols: Uint8Array | null = null;
 
   /** Same rule as updateShadow, for one voxel (walks its column from the top; no full-grid pass). */
   shadowAt(i: number, j: number, k: number): boolean {
@@ -416,6 +422,11 @@ export class VoxelGrid {
   pruneTransient(): void {
     for (const [n, until] of this.transient) if (until < this.now) (this.transient.delete(n), this.version++);
     for (const [n, s] of this.surprise) if (this.now - s.t > 1) this.surprise.delete(n);
+  }
+
+  /** Dynamic-obstacle cells and their expiry times (read only; see isTransient). */
+  transientEntries(): IterableIterator<[number, number]> {
+    return this.transient.entries();
   }
 
   get transientCount(): number {
