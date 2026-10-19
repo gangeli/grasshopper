@@ -422,7 +422,11 @@ export class HideAndSeek {
     this.guardTimer = 0.3;
     if (this.pathAheadClear()) return;
     this.stats.blockedReplans++;
-    const nav = this.refreshNav(true);
+    // Replan on the graph we have (a forced rebuild here stalled the frame for
+    // ~200ms on phones, every 0.3s while blocked); the background refresh
+    // brings in the new obstacle within a moment, and until then the guard
+    // keeps Hopper from walking into it.
+    const nav = this.refreshNav();
     const m = this.move;
     const path = nav?.findPath(this.pet.pos, m.goal);
     if (path && path.length) this.pet.follow(path, m.cruise, m.action, m.yaw);

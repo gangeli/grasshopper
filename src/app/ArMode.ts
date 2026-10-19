@@ -60,6 +60,7 @@ export class ArMode {
   // Weak: the device drops plane/mesh objects as it merges and replaces them.
   private planeTimes = new WeakMap<XRPlane, number>();
   private meshTimes = new WeakMap<XRMesh, number>();
+  private planeIngestAt = new WeakMap<XRPlane, number>();
   private lastHit: Hit | null = null;
   private ui: GameUI;
   private lastT = 0;
@@ -723,6 +724,11 @@ export class ArMode {
         else if (area > 0.25 && y < camY - 0.5) lowest = lowest === null ? y : Math.min(lowest, y);
       }
       if (!ready || this.planeTimes.get(plane) === plane.lastChangedTime) continue;
+      // ARCore refines plane outlines nearly every frame; re-rasterizing each
+      // change cost ~1.4ms/frame on phones. Planes evolve slowly: twice a second is plenty.
+      const now = performance.now();
+      if (now - (this.planeIngestAt.get(plane) ?? -Infinity) < 500) continue;
+      this.planeIngestAt.set(plane, now);
       this.planeTimes.set(plane, plane.lastChangedTime);
       const polygon: Vec3[] = plane.polygon.map((p) => {
         const v = new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(m);

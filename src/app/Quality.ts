@@ -41,6 +41,22 @@ export const QUALITY_LEVELS: QualityLevel[] = [
 
 /** Known display / XR frame rates (ms per frame). */
 const RATES = [1000 / 120, 1000 / 90, 1000 / 72, 1000 / 60, 1000 / 45, 1000 / 30, 1000 / 20];
+/**
+ * The cadence frames actually arrive at: the most common rate bucket. (Not
+ * the fastest frames: an AR session paced by a 30fps camera delivers a fast
+ * frame right after every late one, which looks like a 45Hz display.)
+ */
+function dominantRate(intervals: number[]): number {
+  const counts = new Map<number, number>();
+  for (const v of intervals) {
+    const r = quantize(v);
+    counts.set(r, (counts.get(r) ?? 0) + 1);
+  }
+  let best = RATES[3], n = -1;
+  for (const [r, c] of counts) if (c > n || (c === n && r < best)) [best, n] = [r, c];
+  return best;
+}
+
 function quantize(ms: number): number {
   let best = RATES[0];
   for (const r of RATES) if (Math.abs(Math.log(ms / r)) < Math.abs(Math.log(ms / best))) best = r;
@@ -63,7 +79,9 @@ export class QualityGovernor {
   private lastChange = 0;
   private upBlockedUntil = 0;
   private lateEvals = 0;
-  private trial: { from: number; until: number; kind: 'up' | 'probe'; base: number } | null = null;
+  private trial: { from: number; until: number; kind: 'up' | 'probe' | 'down'; base: number; p50: number } | null = null;
+  /** Stepping down didn't speed frames up (camera-paced or bound elsewhere): don't try again for a while. */
+  private downBlockedUntil = 0;
   /** The display really runs at the slower rate (a probe found no faster one). */
   private rateLocked = false;
   private frame = 0;
@@ -181,8 +199,8 @@ export class QualityGovernor {
     const all = this.intervals.slice().sort((a, b) => a - b);
     const recent = this.intervals.slice(-Math.min(30, this.fresh)).sort((a, b) => a - b);
     const q = (a: number[], p: number) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
-    // The display's interval: what the fastest regular frames achieve.
-    this.base = quantize(q(all, 0.1));
+    // The cadence frames arrive at (see dominantRate).
+    this.base = dominantRate(all);
     const p50 = q(recent, 0.5), p90 = q(recent, 0.9);
     const tr = this.trial;
     if (tr && now >= tr.until) {
@@ -194,6 +212,13 @@ export class QualityGovernor {
           this.rateLocked = true;
           this.setLevel(tr.from, now, `probe: the display runs at ${(1000 / tr.base).toFixed(0)}Hz anyway`);
         }
+      } else if (tr.kind === 'down') {
+        // Cheaper frames that don't arrive any sooner buy nothing: give the detail back.
+        if (p50 > tr.p50 * 0.9) {
+          this.setLevel(tr.from, now, `step down didn't help (p50 ${p50.toFixed(1)}ms vs ${tr.p50.toFixed(1)}ms)`);
+          this.downBlockedUntil = now + 60000;
+          this.upBlockedUntil = now + 60000;
+        }
       } else if (p50 > this.base * 1.2) {
         this.setLevel(tr.from, now, 'step up did not hold');
         this.upBlockedUntil = now + 30000;
@@ -203,22 +228,26 @@ export class QualityGovernor {
     if (tr) return;
     const late = p50 > this.base * 1.25 || p90 > this.base * 1.8;
     this.lateEvals = late ? this.lateEvals + 1 : 0;
-    if (this.lateEvals >= 2 && this.level < QUALITY_LEVELS.length - 1) {
+    if (this.lateEvals >= 2 && this.level < QUALITY_LEVELS.length - 1 && now >= this.downBlockedUntil) {
+      const from = this.level;
       this.setLevel(this.level + 1, now, `frames late (p50 ${p50.toFixed(1)}ms, p90 ${p90.toFixed(1)}ms vs ${this.base.toFixed(1)}ms)`);
       this.upBlockedUntil = Math.max(this.upBlockedUntil, now + 5000);
+      this.trial = { from, until: now + 3000, kind: 'down', base: this.base, p50 };
       return;
     }
     // Locked at a low rate (every frame ~2× the fastest known display rate)?
     if (!this.rateLocked && this.base >= 1000 / 45 && this.level < QUALITY_LEVELS.length - 1 && now - this.lastChange > 3000) {
+      // Probe at the lightest level: one level lighter may not be enough to
+      // reveal a faster display (60Hz shown as 30Hz by a frame a bit too heavy).
       const from = this.level;
-      this.setLevel(this.level + 1, now, 'probe: is the low frame rate ours?');
-      this.trial = { from, until: now + 2500, kind: 'probe', base: this.base };
+      this.setLevel(QUALITY_LEVELS.length - 1, now, 'probe: is the low frame rate ours?');
+      this.trial = { from, until: now + 2500, kind: 'probe', base: this.base, p50 };
       return;
     }
     if (this.level > 0 && !late && p90 <= this.base * 1.15 && now > this.upBlockedUntil && now - this.lastChange > 6000) {
       const from = this.level;
       this.setLevel(this.level - 1, now, 'frames on time');
-      this.trial = { from, until: now + 3000, kind: 'up', base: this.base };
+      this.trial = { from, until: now + 3000, kind: 'up', base: this.base, p50 };
     }
   }
 
