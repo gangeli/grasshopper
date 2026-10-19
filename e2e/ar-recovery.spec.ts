@@ -102,6 +102,9 @@ test('AR recovers from bad situations: placement, tracking, visibility, errors, 
   await emu(page, 'setTracking', 'ok');
   await expectRunning(page);
   await expect.poll(() => alertText(page)).toBe('');
+  // The world model was told about the loss and the regain (world.noteTrackingEvent).
+  expect(await num(page, 'trackingEvents')).toBeGreaterThanOrEqual(2);
+  expect((await num(page, 'trackingEvents')) % 2).toBe(0);
 
   // Orientation-only tracking (emulatedPosition) is also a freeze.
   await emu(page, 'setTracking', 'limited');
@@ -121,9 +124,9 @@ test('AR recovers from bad situations: placement, tracking, visibility, errors, 
   });
   expect(sane).toBe(true);
 
-  // Relocalisation jump: the viewer snaps 1.5m; the game pauses briefly to settle, then carries on.
+  // Relocalisation jump: the viewer snaps 2.5m; the game pauses briefly to settle, then carries on.
   const jumps = await num(page, 'frames');
-  await setPose(page, 1.5, 1.45, 0.6, 0, -0.6);
+  await setPose(page, 2.5, 1.45, 0.6, 0, -0.6);
   await expect.poll(() => ev(page, () => (window.__hopper?.ar as { tracking: { jumps: number } }).tracking.jumps)).toBeGreaterThan(0);
   expect(await num(page, 'frames')).toBeGreaterThan(jumps);
   await expectRunning(page);

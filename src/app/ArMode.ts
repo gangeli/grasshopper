@@ -70,6 +70,9 @@ export class ArMode {
   private lastAutoRecoverT = -Infinity;
   private sessionVisibility: XRVisibilityState = 'visible';
   private wasPaused = false;
+  /** In a tracking-loss episode reported to the world (noteTrackingEvent). */
+  private lossNoted = false;
+  private lastJumps = 0;
   /** Re-placing Hopper (the "move" button). */
   replacing = false;
   private pendingRaised: { y: number; t: number } | null = null;
@@ -111,6 +114,8 @@ export class ArMode {
     anchor: 'none' as string,
     anchorUpdates: 0,
     anchorCorrection: null as number[] | null,
+    /** noteTrackingEvent calls (loss + regain). */
+    trackingEvents: 0,
   };
   onExit: ((reason?: string) => void) | null = null;
   /** Session recorder (?record=1): depth + poses for offline evaluation. */
@@ -453,6 +458,7 @@ export class ArMode {
         }
       });
       this.tracking.update(this.now, sample, vpos);
+      this.noteTracking(frame);
     }
     let view: ViewPose | null = null;
     if (!paused && !this.tracking.frozen)
@@ -508,6 +514,31 @@ export class ArMode {
       this.stage.render();
     });
   }
+
+  /**
+   * Tell the world model when tracking is lost (null / orientation-only /
+   * broken pose, or a relocalisation jump) and when it is regained (after the
+   * settle period): it snapshots the map at the loss and checks for a
+   * relocalisation jump afterwards.
+   */
+  private noteTracking(frame: XRFrame) {
+    const note = (this.stack.world as unknown as { noteTrackingEvent?: (t: number) => void }).noteTrackingEvent;
+    const t = frame.predictedDisplayTime / 1000;
+    const jumped = this.tracking.jumps !== this.lastJumps;
+    this.lastJumps = this.tracking.jumps;
+    const bad = this.tracking.frozen && (this.tracking.badFor > 0 || jumped || this.lossNoted);
+    if (!this.lossNoted && this.tracking.frozen && (jumped || this.tracking.losses > this.lossesNoted)) {
+      this.lossNoted = true;
+      this.lossesNoted = this.tracking.losses;
+      this.stats.trackingEvents++;
+      if (Number.isFinite(t)) note?.call(this.stack.world, t);
+    } else if (this.lossNoted && !bad) {
+      this.lossNoted = false;
+      this.stats.trackingEvents++;
+      if (Number.isFinite(t)) note?.call(this.stack.world, t);
+    }
+  }
+  private lossesNoted = 0;
 
   /** The pet must stay finite: if the game ever produces NaN, put it back where it last was fine. */
   private checkPet() {

@@ -68,11 +68,11 @@ describe('pose and frame sanity', () => {
     expect(classifyViewerPose({ transform: { matrix: bad } })).toBe('invalid');
   });
 
-  it('clamps frame time and turns gaps into a nominal frame', () => {
+  it('clamps frame time (gaps never become one huge step)', () => {
     expect(clampDt(0, 1000)).toBeCloseTo(1 / 60);
     expect(clampDt(1000, 1016)).toBeCloseTo(0.016);
     expect(clampDt(1000, 1100)).toBe(0.05);
-    expect(clampDt(1000, 31000)).toBeCloseTo(1 / 60); // backgrounded for 30s
+    expect(clampDt(1000, 31000)).toBe(0.05); // backgrounded for 30s
     expect(clampDt(1000, 900)).toBeCloseTo(1 / 60); // clock went backwards
     expect(clampDt(1000, NaN)).toBeCloseTo(1 / 60);
   });

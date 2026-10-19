@@ -39,9 +39,21 @@ export class TrackingMonitor {
   jumps = 0;
   private badSince = -1;
   private goodRun = 0;
+  private goodSince = -1;
   private lastPos: Vec3 | null = null;
+  private lastT = -1;
 
-  constructor(readonly settleFrames = 8, readonly showAfter = 0.6, readonly maxStep = 0.35) {}
+  /**
+   * @param settleFrames good frames needed to resume (or `settleTime` seconds of them, whichever comes first, minimum 2 frames)
+   * @param maxStep / maxSpeed a viewer move larger than maxStep + maxSpeed·dt between frames is a jump
+   */
+  constructor(
+    readonly settleFrames = 8,
+    readonly showAfter = 0.6,
+    readonly maxStep = 0.35,
+    readonly maxSpeed = 3,
+    readonly settleTime = 0.15,
+  ) {}
 
   /** Feed one frame. `now` in seconds; `pos` is the viewer position for 'ok' samples. */
   update(now: number, sample: TrackSample, pos?: Vec3): void {
@@ -58,7 +70,8 @@ export class TrackingMonitor {
     }
     if (this.lastPos) {
       const d = Math.hypot(pos.x - this.lastPos.x, pos.y - this.lastPos.y, pos.z - this.lastPos.z);
-      if (d > this.maxStep) {
+      const dt = Math.max(0, Math.min(0.5, now - this.lastT));
+      if (d > this.maxStep + this.maxSpeed * dt) {
         // Relocalisation snapped the pose: let it settle before the game sees it.
         this.jumps++;
         this.goodRun = 0;
@@ -67,8 +80,10 @@ export class TrackingMonitor {
       }
     }
     this.lastPos = { x: pos.x, y: pos.y, z: pos.z };
+    this.lastT = now;
+    if (this.goodRun === 0) this.goodSince = now;
     this.goodRun++;
-    if (this.frozen && this.goodRun >= this.settleFrames) this.frozen = false;
+    if (this.frozen && this.goodRun >= 2 && (this.goodRun >= this.settleFrames || now - this.goodSince >= this.settleTime)) this.frozen = false;
     if (!this.frozen) {
       this.badSince = -1;
       this.badFor = 0;
@@ -92,13 +107,15 @@ export class TrackingMonitor {
 
 /**
  * Frame time in seconds from two rAF timestamps (ms). Gaps (backgrounded,
- * a long stall) must never reach the simulation as one huge step: anything
- * over `gap` is treated as a resume and replaced by a nominal frame.
+ * a long stall) must never reach the simulation as one huge step: the step
+ * is capped at `max` (the game then runs slower than real time on a very
+ * slow device instead of jumping). Garbage (non-finite, clock going
+ * backwards) becomes a nominal frame.
  */
-export function clampDt(prevMs: number, nowMs: number, max = 0.05, gap = 0.25): number {
+export function clampDt(prevMs: number, nowMs: number, max = 0.05): number {
   if (!prevMs) return 1 / 60;
   const dt = (nowMs - prevMs) / 1000;
-  if (!Number.isFinite(dt) || dt <= 0 || dt > gap) return 1 / 60;
+  if (!Number.isFinite(dt) || dt <= 0) return 1 / 60;
   return Math.min(max, dt);
 }
 
