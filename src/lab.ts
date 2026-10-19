@@ -85,6 +85,8 @@ console.log(`lab: pet build ${(performance.now() - tBuild).toFixed(0)} ms`);
 applyPetEnvironment(renderer, rig);
 if (q.get('debug') === 'basic') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshBasicMaterial({ vertexColors: true })));
 if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && ((o as THREE.Mesh).material = new THREE.MeshNormalMaterial()));
+// hide=name,name: hide parts of the rig by object name (to see what a patch belongs to).
+for (const n of q.get('hide')?.split(',') ?? []) rig.group.traverse((o) => o.name === n && (o.visible = false));
 const anim = new Animator(rig, 3);
 const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 10);
 

@@ -533,7 +533,7 @@ class Jiggle {
     }
     // Bend the chain about its base so the tip moves towards the lagging point
     // (the stretch component along the chain is ignored).
-    this.chain[0].getWorldPosition(_j3);
+    _j3.setFromMatrixPosition(this.chain[0].matrixWorld);
     const r = _j3.subVectors(T, _j3);
     const rl = r.length();
     if (rl < 1e-4) return;
@@ -857,7 +857,11 @@ export class Animator {
     const shut = smoothstep(-0.25, 0.38, up);
     if (face.eyeClosed) face.eyeClosed.value = closed;
     if (face.eyeFill) face.eyeFill.value = shut;
-    if (face.eyeSquint) face.eyeSquint.value = smoothstep(1.0, 0.15, lo);
+    const squint = smoothstep(1.0, 0.15, lo);
+    if (face.eyeSquint) face.eyeSquint.value = squint;
+    // A raised lower lid shows mostly its darker margin; lift its tone so a
+    // "^^" squint doesn't sit in a darker disc (a "goggle") on the face.
+    if (face.lidMats) for (const m of face.lidMats) m.color.setScalar(1 + 0.17 * squint);
     // A closed eye sinks into the face, so the lid reads as a soft fold in the
     // fur rather than a dome standing proud of it.
     face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.3 * shut);

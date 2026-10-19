@@ -17,6 +17,11 @@ export interface FurOptions {
   clump: number;
   /** Fur length multiplier (fewer shells → shorter fur, so the layers don't show). */
   lengthScale?: number;
+  /**
+   * Brightness multiplier for the shells. With few shells the dark roots get
+   * fewer layers, so the coat reads lighter than with many; this evens it out.
+   */
+  tone?: number;
 }
 
 /**
@@ -94,6 +99,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
     shader.uniforms.uClump = { value: opts.clump };
     shader.uniforms.uGravity = { value: opts.gravity };
     shader.uniforms.uLenScale = { value: opts.lengthScale ?? 1 };
+    shader.uniforms.uTone = { value: opts.tone ?? 1 };
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -150,6 +156,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         `#include <common>
         uniform float uDensity;
         uniform float uClump;
+        uniform float uTone;
         varying float vShellH;
         #define uShellH vShellH
         varying vec3 vRest;
@@ -200,7 +207,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * (0.5 + 0.5 * lockAmt) * (1.0 - 0.7 * vSilk);
         // Dither the root-to-tip ramp a little so few shells don't band.
         float hd = clamp(uShellH + (furHash(floor(vRest * uDensity * 2.0)).x - 0.5) * 0.15, 0.0, 1.0);
-        diffuseColor.rgb *= mix(0.45, 1.06, pow(hd, 0.8)) * (1.0 - 0.28 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
+        diffuseColor.rgb *= uTone * mix(0.45, 1.06, pow(hd, 0.8)) * (1.0 - 0.28 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
         // Tips a little paler, as if lightly sun-bleached.
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh * (1.0 - 0.7 * vSilk));`,
       )
@@ -231,6 +238,6 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
     if (eye) addSocketFade(shader, eye.closed, eye.fill, eye.squint);
   };
   if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
-  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
+  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${opts.tone ?? 1}-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
   return m;
 }
