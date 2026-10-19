@@ -498,6 +498,14 @@ function pupilIrisMaterial(base: THREE.MeshStandardMaterial): THREE.MeshStandard
   return mat;
 }
 
+/** Procedural textures are shared by every pet that needs the same one (they're never disposed). */
+const textureCache = new Map<string, THREE.DataTexture>();
+const cachedTexture = (key: string, make: () => THREE.DataTexture) => {
+  let t = textureCache.get(key);
+  if (!t) textureCache.set(key, (t = make()));
+  return t;
+};
+
 let rng = 1;
 const rand = () => ((rng = (rng * 16807) % 2147483647) - 1) / 2147483646;
 
@@ -519,6 +527,10 @@ function dataTexture(size: number, fn: (u: number, v: number) => [number, number
 
 /** Radial iris: dark limbal ring, fibrous streaks, a warm ring around the pupil. */
 function irisTexture(hex: number): THREE.DataTexture {
+  return cachedTexture(`iris${hex}`, () => makeIrisTexture(hex));
+}
+
+function makeIrisTexture(hex: number): THREE.DataTexture {
   rng = 7;
   // Vivid, light irises read as friendly; the dark eye colour only tints them.
   const hsl = new THREE.Color(hex).getHSL({ h: 0, s: 0, l: 0 });
@@ -628,7 +640,12 @@ function scleraMaterial(skin: THREE.Color): THREE.MeshPhysicalMaterial {
 
 /** Painted open-mouth cavity: dark palate, tongue with a groove, two tiny fangs, lip rim. */
 function mouthTexture(): THREE.DataTexture {
+  return cachedTexture('mouth', () => makeMouthTexture());
+}
+
+function makeMouthTexture(): THREE.DataTexture {
   const c = new THREE.Color(), deep = new THREE.Color(0.16, 0.03, 0.06), warm = new THREE.Color(0.5, 0.13, 0.19);
+  const tmp = new THREE.Color();
   const tongue = new THREE.Color(1.0, 0.52, 0.58), lip = new THREE.Color(0.34, 0.11, 0.16), tooth = new THREE.Color(0.98, 0.96, 0.92);
   return dataTexture(128, (u, v) => {
     const x = u * 2 - 1, y = v * 2 - 1;
@@ -638,7 +655,7 @@ function mouthTexture(): THREE.DataTexture {
     const tx = x / 0.72, ty = (y + 0.66) / 0.52;
     const tr = Math.hypot(tx, ty);
     if (tr < 1.05) {
-      const t = tongue.clone().multiplyScalar(0.72 + 0.32 * smooth((ty + 0.2) / 1.1));
+      const t = tmp.copy(tongue).multiplyScalar(0.72 + 0.32 * smooth((ty + 0.2) / 1.1));
       t.multiplyScalar(1 - 0.22 * (1 - smooth(Math.abs(x) / 0.07)) * smooth((ty + 0.6) / 0.6));
       c.lerp(t, smooth((1.05 - tr) / 0.14));
     }
@@ -647,7 +664,7 @@ function mouthTexture(): THREE.DataTexture {
       const h = (0.86 - y) / 0.34; // 0 at the gum, 1 at the tip
       if (h > 0 && h < 1) {
         const w = 0.12 * (1 - h);
-        c.lerp(tooth.clone().multiplyScalar(0.82 + 0.18 * (1 - h)), smooth((w - Math.abs(x - sx)) / 0.03));
+        c.lerp(tmp.copy(tooth).multiplyScalar(0.82 + 0.18 * (1 - h)), smooth((w - Math.abs(x - sx)) / 0.03));
       }
     }
     // Lip rim.
@@ -671,6 +688,10 @@ function hornGeometry(root: THREE.Color, tip: THREE.Color): THREE.BufferGeometry
 
 /** Soft round falloff (white, alpha = falloff) for blush decals. */
 function radialTexture(): THREE.DataTexture {
+  return cachedTexture('radial', () => makeRadialTexture());
+}
+
+function makeRadialTexture(): THREE.DataTexture {
   return dataTexture(64, (u, v) => {
     const r = Math.hypot(u * 2 - 1, v * 2 - 1);
     return [1, 1, 1, Math.pow(Math.max(0, 1 - r), 1.6)];
@@ -679,6 +700,10 @@ function radialTexture(): THREE.DataTexture {
 
 /** Wing membrane: translucent, with veins radiating from the root, a crossing vein and a darker rim (alpha in A). */
 function wingTexture(vein: THREE.Color): THREE.DataTexture {
+  return cachedTexture(`wing${vein.getHex()}`, () => makeWingTexture(vein));
+}
+
+function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
   const c = new THREE.Color();
   const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.25);
   return dataTexture(128, (u, v) => {
