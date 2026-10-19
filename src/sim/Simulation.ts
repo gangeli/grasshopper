@@ -8,7 +8,9 @@ import type { WorldModel } from '../world/WorldModel';
 import { createStack } from '../game/stack';
 import { roomFromName, type SimRoom } from './SimRoom';
 import { cameraBasis, SimSensor, type NoiseName, type NoiseProfile, type SensorCaps, type SimCamera } from './SimSensor';
-import { senseFrame } from './scan';
+import { CameraDepthSource, senseFrame } from './scan';
+import type { CameraOptions } from './CameraSim';
+import type { StereoOptions } from '../world/StereoDepth';
 import type { Vec3 } from '../core/math';
 
 /**
@@ -26,6 +28,13 @@ export interface SimOptions {
   palette?: keyof typeof PALETTES;
   /** Sensor realism: 'ideal', 'arcore' or 'harsh' (or a custom profile). */
   noise?: NoiseName | NoiseProfile;
+  /**
+   * Where depth comes from: the depth-sensor model, or rendered camera images
+   * through motion stereo (a phone without a depth sensor).
+   */
+  depthFrom?: 'sensor' | 'camera';
+  camera?: Partial<CameraOptions>;
+  stereo?: Partial<StereoOptions>;
 }
 
 export class Simulation {
@@ -53,7 +62,10 @@ export class Simulation {
     this.world.setFloor(this.sensor.floorEstimate(), { x: 0, y: 0, z: 0 });
     if (this.sensor.caps.mesh) for (const m of this.sensor.meshes()) this.world.ingestMesh(m);
     this.senseEvery = opts.senseEvery ?? 3;
+    if (opts.depthFrom === 'camera') this.camera = new CameraDepthSource(this.room, this.sensor, { camera: opts.camera, stereo: opts.stereo, seed: opts.seed, every: 1 });
   }
+  /** Camera + motion-stereo depth, when simulating a phone without a depth sensor. */
+  readonly camera: CameraDepthSource | null = null;
 
   /** Injected faults (see sim/Faults.ts). */
   readonly faults = { coveredUntil: -1, nanViewUntil: -1 };
@@ -80,16 +92,18 @@ export class Simulation {
     if (lost !== this.trackingLost) {
       this.trackingLost = lost;
       this.world.noteTrackingEvent(this.room.time);
+      if (lost) this.camera?.lost();
     }
     if (!ok) return;
     if (this.time < this.faults.coveredUntil) {
       // A hand over the lens / phone face down: everything ~15cm away.
       const img = this.sensor.depthImage(this.cam);
       img.depth.fill(0.15);
+      this.camera?.lost();
       this.world.ingestDepthImage(img, this.room.time);
       return;
     }
-    senseFrame(this.world, this.sensor, this.cam);
+    senseFrame(this.world, this.sensor, this.cam, undefined, this.camera ?? undefined);
   }
 
   /** Spawn the pet on the floor in front of the camera. */

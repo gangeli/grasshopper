@@ -1,3 +1,4 @@
+import { BoxBVH } from './BoxBVH';
 import { Rng } from '../core/rng';
 import type { Vec3 } from '../core/math';
 
@@ -48,6 +49,14 @@ export class SimRoom {
   floorMaterial: Material = 'matte';
   constructor(readonly width: number, readonly depth: number, readonly wallHeight = 2.4) {}
 
+  private bvhCache: BoxBVH | null = null;
+  /** Acceleration structure over `boxes` (rebuilt when pieces are added). */
+  get bvh(): BoxBVH {
+    if (!this.bvhCache || this.bvhCache.boxes.length !== this.boxes.length) this.bvhCache = new BoxBVH(this.boxes.slice());
+    return this.bvhCache;
+  }
+  private static readonly isGlass = (b: SimBox) => b.material === 'glass';
+
   /** Room spans x ∈ [-w/2, w/2], z ∈ [-d/2, d/2], floor at y=0. */
   get halfW() {
     return this.width / 2;
@@ -87,13 +96,11 @@ export class SimRoom {
         normal = { x: 0, y: 1, z: 0 };
       }
     }
-    for (const b of this.boxes) {
-      const r = rayBox(o, d, b.min, b.max);
-      if (r && r.t < best) {
-        best = r.t;
-        hitBox = b;
-        normal = r.normal;
-      }
+    const bvh = this.bvh;
+    if (bvh.nearest(o.x, o.y, o.z, d.x, d.y, d.z, best, -1)) {
+      best = bvh.t;
+      hitBox = bvh.hit;
+      normal = axisNormal(bvh.axis, bvh.sign);
     }
     return { t: best >= maxDist ? Infinity : best, box: hitBox, normal };
   }
@@ -113,14 +120,11 @@ export class SimRoom {
         const t = -origin.y / dir.y;
         if (t > 1e-4 && t < best) best = t;
       }
-      for (const b of this.boxes) {
-        if (b.material === 'glass') continue;
-        const r = rayBox(origin, dir, b.min, b.max);
-        if (r && r.t > 1e-4 && r.t < best) {
-          best = r.t;
-          mat = b.material ?? 'matte';
-          normal = r.normal;
-        }
+      const bvh = this.bvh;
+      if (bvh.nearest(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, best, 1e-4, SimRoom.isGlass)) {
+        best = bvh.t;
+        mat = bvh.hit!.material ?? 'matte';
+        normal = axisNormal(bvh.axis, bvh.sign);
       }
       for (const dyn of this.dynamic) {
         const f = dyn.at(this.time);
@@ -161,12 +165,7 @@ export class SimRoom {
     const len = Math.hypot(dx, dy, dz);
     const d = { x: dx / len, y: dy / len, z: dz / len };
     if (d.y < -1e-6 && -a.y / d.y < len - 1e-3 && -a.y / d.y > 0) return false; // floor
-    for (const box of this.boxes) {
-      if (box.material === 'glass') continue;
-      const r = rayBox(a, d, box.min, box.max);
-      if (r && r.t < len - 1e-3) return false;
-    }
-    return true;
+    return !this.bvh.nearest(a.x, a.y, a.z, d.x, d.y, d.z, len - 1e-3, -1, SimRoom.isGlass);
   }
 
   pieceAt(p: Vec3, pad = 0.05): SimPiece | null {
@@ -176,6 +175,10 @@ export class SimRoom {
     }
     return null;
   }
+}
+
+export function axisNormal(axis: number, sign: number): Vec3 {
+  return { x: axis === 0 ? sign : 0, y: axis === 1 ? sign : 0, z: axis === 2 ? sign : 0 };
 }
 
 export function rayBox(o: Vec3, d: Vec3, mn: Vec3, mx: Vec3): { t: number; normal: Vec3 } | null {

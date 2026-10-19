@@ -1,6 +1,8 @@
 import { Rng } from '../core/rng';
 import type { Vec3 } from '../core/math';
-import { rayBox, type Material, type SimBox, type SimRoom } from './SimRoom';
+import { axisNormal, rayBox, type Material, type SimBox, type SimRoom } from './SimRoom';
+
+const isGlass = (b: SimBox) => b.material === 'glass';
 import { cameraBasis, type SimCamera } from './SimSensor';
 
 /**
@@ -53,16 +55,23 @@ export interface CameraOptions {
  */
 export const PHONE_CAMERA: CameraOptions = { h: 192, blurSamples: 3, shutter: 0.25, readNoise: 0.006, shotNoise: 0.012, vignette: 0.35 };
 
+/** Hash of integer lattice coordinates to [0,1). */
+function hash3(a: number, b: number, c: number): number {
+  let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul(c | 0, 0x61c88647);
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+  h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+  return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
+}
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
 /** Smooth value noise in [0,1]. */
 function vnoise(x: number, y: number, z: number): number {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const fx = x - xi, fy = y - yi, fz = z - zi;
   const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy), w = fz * fz * (3 - 2 * fz);
-  const h = (a: number, b: number, c: number) => {
-    const n = Math.sin(a * 127.1 + b * 311.7 + c * 74.7) * 43758.5453;
-    return n - Math.floor(n);
-  };
-  const l = (a: number, b: number, t: number) => a + (b - a) * t;
+  const h = hash3, l = lerp;
   return l(
     l(l(h(xi, yi, zi), h(xi + 1, yi, zi), u), l(h(xi, yi + 1, zi), h(xi + 1, yi + 1, zi), u), v),
     l(l(h(xi, yi, zi + 1), h(xi + 1, yi, zi + 1), u), l(h(xi, yi + 1, zi + 1), h(xi + 1, yi + 1, zi + 1), u), v),
@@ -81,6 +90,39 @@ export class CameraSim {
     this.opts = { ...PHONE_CAMERA, ...opts };
     this.rng = new Rng(seed);
   }
+
+  private glassBoxes: SimBox[] | null = null;
+  private glassFor = -1;
+  /** Glass boxes (see-through: tinted, not hit). */
+  private glass(): SimBox[] {
+    if (!this.glassBoxes || this.glassFor !== this.room.boxes.length) {
+      this.glassBoxes = this.room.boxes.filter(isGlass);
+      this.glassFor = this.room.boxes.length;
+    }
+    return this.glassBoxes;
+  }
+
+  /**
+   * Is the surface point in shadow from light li? Lights and furniture don't
+   * move, so answers are cached per 1cm surface cell (and face direction).
+   */
+  private shadowed(li: number, p: Vec3, n: Vec3, o: Vec3, dir: Vec3, ld: number): boolean {
+    if (this.shadowFor !== this.room.boxes.length) {
+      this.shadowCache.clear();
+      this.shadowFor = this.room.boxes.length;
+    }
+    const face = n.x > 0.5 ? 0 : n.x < -0.5 ? 1 : n.y > 0.5 ? 2 : n.y < -0.5 ? 3 : n.z > 0.5 ? 4 : 5;
+    const key = (((Math.round(p.x * 100) + 2000) * 4000 + (Math.round(p.y * 100) + 2000)) * 4000 + (Math.round(p.z * 100) + 2000)) * 16 + face * 2 + li;
+    let v = this.shadowCache.get(key);
+    if (v === undefined) {
+      v = this.room.bvh.nearest(o.x, o.y, o.z, dir.x, dir.y, dir.z, ld, 1e-4, isGlass);
+      if (this.shadowCache.size > 4_000_000) this.shadowCache.clear();
+      this.shadowCache.set(key, v);
+    }
+    return v;
+  }
+  private readonly shadowCache = new Map<number, boolean>();
+  private shadowFor = -1;
 
   /** Where the room's ceiling lights are. */
   private lights(): Vec3[] {
@@ -129,19 +171,16 @@ export class CameraSim {
       const t = -o.y / d.y;
       if (t > 1e-4 && t < best) best = t;
     }
-    for (const b of room.boxes) {
+    const bvh = room.bvh;
+    if (bvh.nearest(o.x, o.y, o.z, d.x, d.y, d.z, best, 1e-4, isGlass)) {
+      best = bvh.t;
+      hitBox = bvh.hit;
+      normal = axisNormal(bvh.axis, bvh.sign);
+      mat = hitBox!.material ?? 'matte';
+    }
+    for (const b of this.glass()) {
       const r = rayBox(o, d, b.min, b.max);
-      if (!r || r.t <= 1e-4) continue;
-      if (b.material === 'glass') {
-        glassT = Math.min(glassT, r.t);
-        continue;
-      }
-      if (r.t < best) {
-        best = r.t;
-        hitBox = b;
-        normal = r.normal;
-        mat = b.material ?? 'matte';
-      }
+      if (r && r.t > 1e-4) glassT = Math.min(glassT, r.t);
     }
     // People walking through wear textured clothes.
     for (const dyn of room.dynamic) {
@@ -166,22 +205,16 @@ export class CameraSim {
       const alb = this.albedo(p, normal, hitBox, mat);
       // Ambient (sky-ish fill) + ceiling lights with shadows.
       let E = 0.25 + 0.1 * normal.y;
-      for (const l of this.lights()) {
+      const lights = this.lights();
+      for (let li = 0; li < lights.length; li++) {
+        const l = lights[li];
         const lx = l.x - p.x, ly = l.y - p.y, lz = l.z - p.z;
         const ld = Math.hypot(lx, ly, lz);
         const cos = (lx * normal.x + ly * normal.y + lz * normal.z) / ld;
         if (cos <= 0) continue;
         const dir = { x: lx / ld, y: ly / ld, z: lz / ld };
         const o2 = { x: p.x + normal.x * 1e-3, y: p.y + normal.y * 1e-3, z: p.z + normal.z * 1e-3 };
-        let shadow = false;
-        for (const b of room.boxes) {
-          if (b.material === 'glass') continue;
-          const r = rayBox(o2, dir, b.min, b.max);
-          if (r && r.t > 1e-4 && r.t < ld) {
-            shadow = true;
-            break;
-          }
-        }
+        const shadow = this.shadowed(li, p, normal, o2, dir, ld);
         if (!shadow) E += (1.6 * cos) / (1 + 0.25 * ld * ld);
       }
       L = alb * E;
@@ -202,7 +235,12 @@ export class CameraSim {
     const acc = new Float32Array(w * h);
     const truth = opts.truth ? new Float32Array(w * h) : undefined;
     const prev = this.prev ?? cam;
-    const n = Math.max(1, blurSamples);
+    // Motion during the exposure, in pixels: below ~half a pixel one sample
+    // gives the same image, so only spend extra samples when there's blur.
+    const fpx = h / 2 / Math.tan(cam.fovY / 2);
+    const moveRad = Math.abs(angleDiff(cam.yaw, prev.yaw)) + Math.abs(cam.pitch - prev.pitch) + Math.hypot(cam.pos.x - prev.pos.x, cam.pos.y - prev.pos.y, cam.pos.z - prev.pos.z) / 1.5;
+    const blurPx = moveRad * shutter * fpx;
+    const n = Math.max(1, Math.min(blurSamples, Math.ceil(blurPx * 2)));
     for (let s = 0; s < n; s++) {
       // Sub-frame poses across the open shutter, centred on the frame pose (frame
       // timestamps and tracked poses refer to mid-exposure); extrapolated forward.
