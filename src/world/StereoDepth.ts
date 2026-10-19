@@ -72,6 +72,42 @@ export interface StereoOptions {
   fill: boolean;
   /** Frames kept for source selection. */
   history: number;
+  /**
+   * Floor-plane hypotheses (needs `MotionStereo.floorY`). Fronto-parallel
+   * sweep planes aggregate badly on a floor seen at a glancing angle, and a
+   * floor patch with weak or one-directional texture rarely passes the
+   * two-sided uniqueness test. Here every pixel is also matched on a few
+   * horizontal planes just around the floor height (a plane-induced sweep that
+   * aggregates correctly on the floor), and accepted as floor when that fits
+   * at least as well as any fronto-parallel depth and clearly better than
+   * every depth *nearer* than the floor. Farther alternatives don't matter:
+   * nothing is visible below the floor, and what matters for safety is ruling
+   * out an object in front of it. Accepted only within floorMaxDepth, at most
+   * floorMaxHeight above the floor, inside `floorRegion` when given, and not
+   * next to pixels that show something standing on the floor (floorGuard).
+   */
+  floorPrior: boolean;
+  /** Heights (m, relative to floorY) of the floor-plane hypotheses. */
+  floorHeights: number[];
+  /** Required margin of the floor cost below the best cost of all nearer depths. */
+  floorUniqueness: number;
+  /** Nearer depths start this far (relative inverse depth) in front of the floor. */
+  floorNearRel: number;
+  /** The floor cost may exceed the best fronto-parallel cost by this fraction. */
+  floorSlack: number;
+  floorMinTexture: number;
+  floorMinEpiGrad: number;
+  floorMaxRelSigma: number;
+  /** Floor is not accepted within this many output pixels of an object pixel. */
+  floorGuard: number;
+  /**
+   * Highest accepted floor height (m above floorY). Above it the floor
+   * hypothesis may be the side of a toy whose top didn't match; the mapper
+   * itself treats readings above ~2.5cm as possible obstacles.
+   */
+  floorMaxHeight: number;
+  /** Floor hypotheses are only accepted this close (far away, an object's base and the floor behind it can't be told apart). */
+  floorMaxDepth: number;
 }
 
 export const DEFAULT_STEREO: StereoOptions = {
@@ -97,6 +133,18 @@ export const DEFAULT_STEREO: StereoOptions = {
   maxOutputDepth: 3.5,
   fill: false,
   history: 24,
+  floorPrior: true,
+  floorHeights: [-0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06],
+  floorUniqueness: 0.3,
+  floorNearRel: 0.06,
+  floorSlack: 0.05,
+  // The one-sided cost test is the real check here; texture and aperture only skip hopeless pixels.
+  floorMinTexture: 1.2,
+  floorMinEpiGrad: 0.8,
+  floorMaxRelSigma: 0.1,
+  floorMaxDepth: 2.5,
+  floorMaxHeight: 0.015,
+  floorGuard: 1,
 };
 
 interface Prepared extends StereoFrame {
@@ -120,13 +168,26 @@ export interface StereoResult {
   image: DepthImage;
   /** Uniqueness margin per output pixel (0 where rejected). */
   confidence: Float32Array;
+  /** Per output pixel: 0 accepted, 1 texture, 2 cost, 3 uniqueness, 4 geometry, 5 aperture, 6 accepted as floor. */
+  reason: Uint8Array;
   sources: number;
-  stats: { candidates: number; accepted: number; rejectedTexture: number; rejectedUnique: number; rejectedCost: number; rejectedGeometry: number; rejectedAperture: number };
+  stats: { candidates: number; accepted: number; rejectedTexture: number; rejectedUnique: number; rejectedCost: number; rejectedGeometry: number; rejectedAperture: number; floor: number };
 }
 
 export class MotionStereo {
   readonly opts: StereoOptions;
   private frames: Prepared[] = [];
+  /** World floor height for the floor-plane hypotheses (null = unknown). */
+  floorY: number | null = null;
+  /**
+   * Where the floor is known to extend (x, z polygons of detected floor
+   * planes), or null to accept floor anywhere. A mirror shows the floor as a
+   * perfectly consistent horizontal plane *behind the wall*; detected floor
+   * planes don't extend there.
+   */
+  floorRegion: { x: number; z: number }[][] | null = null;
+  /** Frames without depth: turning too fast (blur), or too few usable source frames. */
+  skipped = { blur: 0, sources: 0 };
   constructor(opts: Partial<StereoOptions> = {}) {
     this.opts = { ...DEFAULT_STEREO, ...opts };
   }
@@ -171,9 +232,15 @@ export class MotionStereo {
   /** Depth for the newest frame, or null if no usable sources (e.g. pure rotation). */
   compute(): StereoResult | null {
     const ref = this.frames[this.frames.length - 1];
-    if (!ref || ref.angVel > this.opts.maxAngVel) return null;
+    if (!ref || ref.angVel > this.opts.maxAngVel) {
+      this.skipped.blur++;
+      return null;
+    }
     const srcs = this.chooseSources(ref);
-    if (srcs.length < this.opts.minSources) return null;
+    if (srcs.length < this.opts.minSources) {
+      this.skipped.sources++;
+      return null;
+    }
     const O = this.opts, { w, h, fx, fy, cx, cy } = ref;
     const D = O.depths;
     const rhoMin = 1 / O.maxDepth, rhoMax = 1 / O.minDepth;
@@ -182,15 +249,29 @@ export class MotionStereo {
     const rel = srcs.map((s) => mulRigid(s.inv, ref.camToWorld));
     // 1. Full-resolution cost volume [k][pixel]: mean of the best two sources' census mismatch.
     const N = w * h;
-    const cost = new Float32Array(D * N);
+    const M = ref.camToWorld;
+    const FH = O.floorPrior && this.floorY !== null ? O.floorHeights : [];
+    const F = FH.length, DL = D + F;
+    // Per-pixel inverse depth of each floor-plane hypothesis (0 = the ray doesn't reach it in range).
+    const rhoF = new Float32Array(F * N);
+    const cost = new Float32Array(DL * N);
     const per = new Float32Array(srcs.length);
     for (let v = 0; v < h; v++)
       for (let u = 0; u < w; u++) {
         const i = v * w + u;
         const rx = (u + 0.5 - cx) / fx, ry = -(v + 0.5 - cy) / fy, rz = -1;
         const cRef = ref.census[i];
-        for (let k = 0; k < D; k++) {
-          const rho = rhoAt(k);
+        const dirY = M[1] * rx + M[5] * ry + M[9] * rz;
+        for (let f = 0; f < F; f++) {
+          const dz = dirY < -1e-3 ? (this.floorY! + FH[f] - M[13]) / dirY : 0;
+          rhoF[f * N + i] = dz > O.minDepth && dz < O.maxDepth ? 1 / dz : 0;
+        }
+        for (let k = 0; k < DL; k++) {
+          const rho = k < D ? rhoAt(k) : rhoF[(k - D) * N + i];
+          if (!(rho > 0)) {
+            cost[k * N + i] = 24;
+            continue;
+          }
           let n = 0;
           for (let s = 0; s < srcs.length; s++) {
             const R = rel[s];
@@ -220,10 +301,11 @@ export class MotionStereo {
           cost[k * N + i] = c;
         }
       }
+    const st = O.step, gw = Math.floor(w / st), gh = Math.floor(h / st), G = gw * gh;
     // 2. Box aggregation per depth layer (separable).
     const r = O.aggRadius;
     const tmp = new Float32Array(N);
-    for (let k = 0; k < D; k++) {
+    for (let k = 0; k < DL; k++) {
       const L = cost.subarray(k * N, (k + 1) * N);
       for (let v = 0; v < h; v++) {
         let acc = 0;
@@ -243,15 +325,42 @@ export class MotionStereo {
       }
     }
     // 3. Winner-takes-all on the output grid, with sub-sample refinement and checks.
-    const st = O.step, gw = Math.floor(w / st), gh = Math.floor(h / st);
-    const depth = new Float32Array(gw * gh), confidence = new Float32Array(gw * gh), sigma = new Float32Array(gw * gh);
-    const stats = { candidates: gw * gh, accepted: 0, rejectedTexture: 0, rejectedUnique: 0, rejectedCost: 0, rejectedGeometry: 0, rejectedAperture: 0 };
+    const depth = new Float32Array(gw * gh), confidence = new Float32Array(gw * gh), sigma = new Float32Array(gw * gh), reason = new Uint8Array(gw * gh);
+    const stats = { candidates: gw * gh, accepted: 0, rejectedTexture: 0, rejectedUnique: 0, rejectedCost: 0, rejectedGeometry: 0, rejectedAperture: 0, floor: 0 };
+    // Geometry: how many pixels does a small change of inverse depth move the
+    // match in the best-placed source? Too few → the depth is not resolved.
+    // Returns σ(ρ) at 0.5px matching error and the epipolar direction.
+    const geom = (rx: number, ry: number, rho: number) => {
+      let J = 0, ex = 1, ey = 0;
+      for (const R of rel) {
+        const pr = (rr: number) => {
+          const qx = R[0] * rx + R[4] * ry - R[8] + R[12] * rr;
+          const qy = R[1] * rx + R[5] * ry - R[9] + R[13] * rr;
+          const qz = R[2] * rx + R[6] * ry - R[10] + R[14] * rr;
+          return [(fx * qx) / -qz, (-fy * qy) / -qz];
+        };
+        const a = pr(rho), b = pr(rho * 1.01);
+        const du = b[0] - a[0], dv = b[1] - a[1], m = Math.hypot(du, dv);
+        if (m / (rho * 0.01) > J) {
+          J = m / (rho * 0.01);
+          // Image y grows downwards; (du, -dv) in image axes.
+          ex = du / (m || 1);
+          ey = -dv / (m || 1);
+        }
+      }
+      return { sigmaRho: 0.5 / Math.max(J, 1e-9), ex, ey };
+    };
+    // Aperture: gradient energy along the epipolar direction (~ the same in the
+    // reference image for the small rotations between nearby frames).
+    const epiGrad = (i: number, ex: number, ey: number) => Math.sqrt(Math.max(0, ex * ex * ref.sxx[i] + 2 * ex * ey * ref.sxy[i] + ey * ey * ref.syy[i]) / 25);
+    const fctx: FloorCtx = { cost, rhoF, N, D, F, FH, rhoAt, geom, epiGrad, eyeY: M[13], M };
     for (let gy = 0; gy < gh; gy++)
       for (let gx = 0; gx < gw; gx++) {
         const u = gx * st + (st - 1) / 2, v = gy * st + (st - 1) / 2;
         const i = v * w + u;
         if (ref.texture[i] < O.minTexture) {
           stats.rejectedTexture++;
+          reason[gy * gw + gx] = 1;
           continue;
         }
         let best = 0, c1 = Infinity;
@@ -266,11 +375,13 @@ export class MotionStereo {
         for (let k = 0; k < D; k++) if (Math.abs(k - best) > 2) c2 = Math.min(c2, cost[k * N + i]);
         if (c1 / 24 > O.maxCost) {
           stats.rejectedCost++;
+          reason[gy * gw + gx] = 2;
           continue;
         }
         const margin = (c2 - c1) / Math.max(c2, 1e-3);
         if (!(margin > O.uniqueness) || best === 0 || best === D - 1) {
           stats.rejectedUnique++;
+          reason[gy * gw + gx] = 3;
           continue;
         }
         // Parabola through the neighbours for a sub-sample inverse depth.
@@ -281,45 +392,80 @@ export class MotionStereo {
         const d = 1 / rho;
         if (d > O.maxOutputDepth) {
           stats.rejectedGeometry++;
+          reason[gy * gw + gx] = 4;
           continue;
         }
-        // Geometry: how many pixels does a small change of inverse depth move the
-        // match in the best-placed source? Too few → the depth is not resolved.
-        const rx = (u + 0.5 - cx) / fx, ry = -(v + 0.5 - cy) / fy;
-        let J = 0, ex = 1, ey = 0;
-        for (const R of rel) {
-          const pr = (rr: number) => {
-            const qx = R[0] * rx + R[4] * ry - R[8] + R[12] * rr;
-            const qy = R[1] * rx + R[5] * ry - R[9] + R[13] * rr;
-            const qz = R[2] * rx + R[6] * ry - R[10] + R[14] * rr;
-            return [(fx * qx) / -qz, (-fy * qy) / -qz];
-          };
-          const a = pr(rho), b = pr(rho * 1.01);
-          const du = b[0] - a[0], dv = b[1] - a[1], m = Math.hypot(du, dv);
-          if (m / (rho * 0.01) > J) {
-            J = m / (rho * 0.01);
-            // Image y grows downwards; (du, -dv) in image axes.
-            ex = du / (m || 1);
-            ey = -dv / (m || 1);
-          }
-        }
-        const sigmaRho = 0.5 / Math.max(J, 1e-9);
+        const { sigmaRho, ex, ey } = geom((u + 0.5 - cx) / fx, -(v + 0.5 - cy) / fy, rho);
         if ((sigmaRho * d * d) / d > O.maxRelSigma) {
           stats.rejectedGeometry++;
+          reason[gy * gw + gx] = 4;
           continue;
         }
-        // Aperture: gradient energy along the epipolar direction (~ the same in the
-        // reference image for the small rotations between nearby frames).
-        const epi = Math.sqrt(Math.max(0, ex * ex * ref.sxx[i] + 2 * ex * ey * ref.sxy[i] + ey * ey * ref.syy[i]) / 25);
-        if (epi < O.minEpiGrad) {
+        if (epiGrad(i, ex, ey) < O.minEpiGrad) {
           stats.rejectedAperture++;
+          reason[gy * gw + gx] = 5;
           continue;
         }
+        const sd = Math.hypot(sigmaRho * d * d, O.poseRelErr * d);
         depth[gy * gw + gx] = d;
-        sigma[gy * gw + gx] = Math.hypot(sigmaRho * d * d, O.poseRelErr * d);
+        sigma[gy * gw + gx] = sd;
         confidence[gy * gw + gx] = margin;
         stats.accepted++;
       }
+    // 4. Floor hypotheses. They replace the match above where it is missing or
+    // is itself on the floor (within its noise). Pixels showing something in
+    // front of the floor (a match above the floor band, a nearer depth fitting
+    // as well as the floor, or a best height at the top of the band) are
+    // "object", and floor isn't accepted within floorGuard output pixels of
+    // them: small things (toys, a basket's rim) are easily covered by the
+    // aggregation window of a floor that fits well around them, and rays to
+    // that floor would clear them from the map.
+    if (F > 0) {
+      const fd = new Float32Array(G), fs = new Float32Array(G), fm = new Float32Array(G), object = new Uint8Array(G);
+      for (let gy = 0; gy < gh; gy++)
+        for (let gx = 0; gx < gw; gx++) {
+          const u = gx * st + (st - 1) / 2, v = gy * st + (st - 1) / 2, i = v * w + u, o = gy * gw + gx;
+          const rx = (u + 0.5 - cx) / fx, ry = -(v + 0.5 - cy) / fy;
+          if (depth[o] > 0) {
+            const dirY = M[1] * rx + M[5] * ry - M[9];
+            const above = M[13] + dirY * depth[o] - this.floorY!;
+            if (above > O.floorMaxHeight + 2 * sigma[o] * Math.abs(dirY)) {
+              object[o] = 1;
+              continue;
+            }
+          }
+          if (ref.texture[i] < O.floorMinTexture) continue;
+          const f = this.floorHypothesis(i, rx, ry, fctx);
+          if (f === 'near') object[o] = 1;
+          else if (f) {
+            fd[o] = f.d;
+            fs[o] = f.sigma;
+            fm[o] = f.margin;
+          }
+        }
+      const R = O.floorGuard;
+      for (let gy = 0; gy < gh; gy++)
+        for (let gx = 0; gx < gw; gx++) {
+          const o = gy * gw + gx;
+          if (!(fd[o] > 0)) continue;
+          let near = false;
+          for (let dy = -R; dy <= R && !near; dy++)
+            for (let dx = -R; dx <= R; dx++) {
+              const x = gx + dx, y = gy + dy;
+              if (x >= 0 && y >= 0 && x < gw && y < gh && object[y * gw + x]) {
+                near = true;
+                break;
+              }
+            }
+          if (near) continue;
+          if (!(depth[o] > 0)) stats.accepted++;
+          depth[o] = fd[o];
+          sigma[o] = fs[o];
+          confidence[o] = fm[o];
+          reason[o] = 6;
+          stats.floor++;
+        }
+    }
     // Inverse projection of the output grid, including an off-centre principal point:
     // NDC (nx, ny) -> view-space point (a·nx + b, c·ny + e, -1).
     const W = gw * st, H = gh * st;
@@ -333,10 +479,89 @@ export class MotionStereo {
           guide[gy * gw + gx] = a / (st * st);
         }
       const dense = densify(depth, guide, gw, gh);
-      return { image: { w: gw, h: gh, depth: dense, invProj, camToWorld: ref.camToWorld }, confidence, sources: srcs.length, stats };
+      return { image: { w: gw, h: gh, depth: dense, invProj, camToWorld: ref.camToWorld }, confidence, reason, sources: srcs.length, stats };
     }
-    return { image: { w: gw, h: gh, depth, invProj, camToWorld: ref.camToWorld, sigma }, confidence, sources: srcs.length, stats };
+    return { image: { w: gw, h: gh, depth, invProj, camToWorld: ref.camToWorld, sigma }, confidence, reason, sources: srcs.length, stats };
   }
+  /**
+   * Floor-plane hypothesis test for camera pixel i (camera ray (rx, ry, -1)):
+   * the floor depth there, 'near' when a nearer depth fits at least as well (an
+   * object in front of the floor), or null.
+   */
+  private floorHypothesis(i: number, rx: number, ry: number, c: FloorCtx): { d: number; sigma: number; margin: number } | 'near' | null {
+    const O = this.opts, { cost, rhoF, N, D, F, FH, rhoAt } = c;
+    let fb = -1, cF = Infinity;
+    for (let f = 0; f < F; f++) {
+      if (!(rhoF[f * N + i] > 0)) continue;
+      const x = cost[(D + f) * N + i];
+      if (x < cF) {
+        cF = x;
+        fb = f;
+      }
+    }
+    // The best height must be bracketed: at the end of the range the surface may lie beyond it.
+    if (cF / 24 > O.maxCost || fb <= 0) return null;
+    // Best at the top of the band: something stands above the floor here.
+    if (fb >= F - 1) return 'near';
+    // Best fronto-parallel cost overall, and over depths clearly nearer than the floor.
+    const rhoNear = rhoF[fb * N + i] * (1 + O.floorNearRel);
+    let c1 = Infinity, cNear = Infinity;
+    for (let k = 0; k < D; k++) {
+      const x = cost[k * N + i];
+      if (x < c1) c1 = x;
+      if (rhoAt(k) > rhoNear && x < cNear) cNear = x;
+    }
+    if (cF > c1 * (1 + O.floorSlack)) return cNear <= cF && cNear / 24 <= O.maxCost ? 'near' : null;
+    const margin = (cNear - cF) / Math.max(cNear, 1e-3);
+    if (!(margin > O.floorUniqueness)) return cNear <= cF && cNear / 24 <= O.maxCost ? 'near' : null;
+    // Sub-step height from a parabola through the neighbouring hypotheses.
+    let hgt = FH[fb];
+    if (rhoF[(fb - 1) * N + i] > 0 && rhoF[(fb + 1) * N + i] > 0) {
+      const cm = cost[(D + fb - 1) * N + i], cp = cost[(D + fb + 1) * N + i];
+      const den = cm - 2 * cF + cp;
+      const off = den > 1e-6 ? Math.max(-0.5, Math.min(0.5, (0.5 * (cm - cp)) / den)) : 0;
+      hgt += off * (FH[fb + 1] - FH[fb]);
+    }
+    // Only clearly-floor heights: a toy's top a few cm up must not be taken for floor
+    // (the mapper would clear the space above it).
+    if (hgt > O.floorMaxHeight) return 'near';
+    // Depth along the ray scales with the plane's height below the eye.
+    const d = ((this.floorY! + hgt - c.eyeY) / (this.floorY! + FH[fb] - c.eyeY)) / rhoF[fb * N + i];
+    if (!(d > O.minDepth) || d > O.floorMaxDepth) return null;
+    if (this.floorRegion) {
+      const M = c.M;
+      const px = M[0] * rx * d + M[4] * ry * d - M[8] * d + M[12], pz = M[2] * rx * d + M[6] * ry * d - M[10] * d + M[14];
+      if (!this.floorRegion.some((poly) => insidePolygonXZ(poly, px, pz))) return null;
+    }
+    const { sigmaRho, ex, ey } = c.geom(rx, ry, 1 / d);
+    if (sigmaRho * d > O.floorMaxRelSigma) return null;
+    if (c.epiGrad(i, ex, ey) < O.floorMinEpiGrad) return null;
+    return { d, sigma: Math.hypot(sigmaRho * d * d, O.poseRelErr * d), margin };
+  }
+}
+
+interface FloorCtx {
+  cost: Float32Array;
+  rhoF: Float32Array;
+  N: number;
+  D: number;
+  F: number;
+  FH: number[];
+  rhoAt: (k: number) => number;
+  geom: (rx: number, ry: number, rho: number) => { sigmaRho: number; ex: number; ey: number };
+  epiGrad: (i: number, ex: number, ey: number) => number;
+  eyeY: number;
+  M: ArrayLike<number>;
+}
+
+/** Even-odd point-in-polygon test on the x/z coordinates. */
+export function insidePolygonXZ(poly: { x: number; z: number }[], x: number, z: number): boolean {
+  let inside = false;
+  for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
+    const A = poly[a], B = poly[b];
+    if (A.z > z !== B.z > z && x < ((B.x - A.x) * (z - A.z)) / (B.z - A.z) + A.x) inside = !inside;
+  }
+  return inside;
 }
 
 const clampI = (x: number, n: number) => (x < 0 ? 0 : x >= n ? n - 1 : x);

@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { roomFromName } from '../src/sim/SimRoom';
+import { roomFromName, rayBox } from '../src/sim/SimRoom';
 import { dressRoom, humanScanPath } from '../src/sim/Realism';
 import { SimSensor, cameraBasis, type NoiseName } from '../src/sim/SimSensor';
 import { CameraSim } from '../src/sim/CameraSim';
@@ -13,8 +13,26 @@ const CANON = ['living', 'bedroom', 'r3', 'r7', 'r11', 'r19', 'r23', 'r29', 'r31
 const room = dressRoom(roomFromName(name), CANON.indexOf(name) + 1);
 const sensor = new SimSensor(room, { depth: true, planes: true, mesh: false }, 3, prof);
 const cam = new CameraSim(room, process.env.CLEAN ? { blurSamples: 1, readNoise: 0, shotNoise: 0 } : process.env.CAM ? JSON.parse(process.env.CAM) : {});
-const stereo = new MotionStereo();
+const stereo = new MotionStereo(JSON.parse(process.env.STEREO ?? '{}'));
+stereo.floorY = 0;
 const path = humanScanPath(room, 3, 30);
+/** Label (and material) of what the true camera ray through pixel (px, py) hits first. */
+function truthLabel(c: typeof path[number]['cam'], frame: { w: number; h: number }, px: number, py: number): string {
+  const { forward, right, up } = cameraBasis(c);
+  const ty = Math.tan(c.fovY / 2), tx = (ty * frame.w) / frame.h;
+  const nx = (px / frame.w) * 2 - 1, ny = 1 - (py / frame.h) * 2;
+  const x = forward.x + right.x * nx * tx + up.x * ny * ty, y = forward.y + right.y * nx * tx + up.y * ny * ty, z = forward.z + right.z * nx * tx + up.z * ny * ty;
+  const L = Math.hypot(x, y, z), dir = { x: x / L, y: y / L, z: z / L };
+  let bt = dir.y < 0 ? -c.pos.y / dir.y : Infinity, lab = 'floor';
+  for (const b of room.boxes) {
+    const q = rayBox(c.pos, dir, b.min, b.max);
+    if (q && q.t < bt) {
+      bt = q.t;
+      lab = `${room.pieces[b.piece].label}:${b.material ?? 'matte'}`;
+    }
+  }
+  return lab;
+}
 let k = 0;
 const errs: number[] = [];
 const signed: number[] = [];
@@ -23,6 +41,9 @@ const bins = new Map<string, number[]>();
 const addBin = (k: string, e: number) => { if (!bins.has(k)) bins.set(k, [0, 0]); const b = bins.get(k)!; b[0]++; if (e > 0.25) b[1]++; };
 let floorPx = 0, floorShort = 0;
 let acc = 0, cand = 0;
+const reasons: Record<string, number[]> = {};
+const tooFar: Record<string, number[]> = {};
+const labels: Record<string, number> = {};
 for (const step of path) {
   if (k >= nFrames) break;
   room.time = step.t;
@@ -39,7 +60,34 @@ for (const step of path) {
   const fe: number[] = [];
   for (let gy = 0; gy < image.h; gy++) for (let gx = 0; gx < image.w; gx++) {
     const d = image.depth[gy * image.w + gx];
+    {
+      const { forward, right, up } = cameraBasis(step.cam);
+      const ty = Math.tan(step.cam.fovY / 2), tx = (ty * frame.w) / frame.h;
+      const nx = ((gx * st + 1.5) / frame.w) * 2 - 1, ny = 1 - ((gy * st + 1.5) / frame.h) * 2;
+      const dy = forward.y + right.y * nx * tx + up.y * ny * ty;
+      const tr0 = frame.truthDepth![(gy * st + 1) * frame.w + gx * st + 1];
+      const isFloor = step.cam.pos.y + dy * tr0 < 0.005 && tr0 < 3.5;
+      const key = (isFloor ? 'floor' : 'other') + (tr0 < 1.5 ? '<1.5' : '<3.5');
+      if (tr0 < 3.5) { reasons[key] ??= [0, 0, 0, 0, 0, 0, 0]; reasons[key][res.reason[gy * image.w + gx]]++; }
+    }
     if (!d) continue;
+    {
+      // Accepted pixels that lie beyond the true surface (they would carve through it), by source.
+      const tr1 = frame.truthDepth![(gy * st + 1) * frame.w + gx * st + 1];
+      const kind = res.reason[gy * image.w + gx] === 6 ? 'floorPrior' : 'standard';
+      const far = d > tr1 * 1.05 + 0.03;
+      tooFar[kind] ??= [0, 0, 0];
+      tooFar[kind][0]++;
+      if (far) tooFar[kind][1]++;
+      if (d > tr1 * 1.15 + 0.05) tooFar[kind][2]++;
+      // LABELS=1: what accepted pixels really see; DEBUGFAR=1: list the too-far ones.
+      if (process.env.LABELS || (process.env.DEBUGFAR && far)) {
+        const lab = truthLabel(step.cam, frame, gx * st + 1.5, gy * st + 1.5);
+        const key = `${kind} sees ${lab}${far ? ' TOO FAR' : ''}`;
+        labels[key] = (labels[key] ?? 0) + 1;
+        if (process.env.DEBUGFAR && far) console.log(`  far ${kind} px frame ${k} (${gx},${gy}) ${lab} d ${d.toFixed(2)} truth ${tr1.toFixed(2)} conf ${res.confidence[gy * image.w + gx].toFixed(2)} gray ${frame.gray[(gy * st + 1) * frame.w + gx * st + 1]}`);
+      }
+    }
     const tr = frame.truthDepth![(gy * st + 1) * frame.w + gx * st + 1];
     fe.push(Math.abs(d - tr) / tr);
     signed.push((d - tr) / tr);
@@ -79,6 +127,9 @@ for (const step of path) {
     writeFileSync(`artifacts/cam/${name}-${k}.pgm`, Buffer.concat([Buffer.from(`P5 ${W} ${H} 255\n`), buf]));
   }
 }
+for (const [k, v] of Object.entries(reasons).sort()) { const n = v.reduce((a, b) => a + b, 0); console.log(`reasons ${k.padEnd(10)} n=${n} ` + ['ok', 'texture', 'cost', 'unique', 'geom', 'aperture', 'floorOk'].map((r, i) => `${r} ${(v[i] / n * 100).toFixed(0)}%`).join(' ')); }
+for (const [k, v] of Object.entries(tooFar)) console.log(`too far (beyond the true surface): ${k} n=${v[0]} >5%+3cm ${(v[1] / v[0] * 100).toFixed(2)}% >15%+5cm ${(v[2] / v[0] * 100).toFixed(2)}%`);
+for (const [k, v] of Object.entries(labels).sort((a, b) => b[1] - a[1])) console.log(`labels ${k}: ${v}`);
 errs.sort((a, b) => a - b);
 signed.sort((a, b) => a - b);
 floorErr.sort((a, b) => a - b);

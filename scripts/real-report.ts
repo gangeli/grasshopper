@@ -5,8 +5,11 @@ import { NavGrid } from '../src/world/NavGrid';
 import { WorldModel } from '../src/world/WorldModel';
 import { evaluateMap } from '../src/sim/MapMetrics';
 import type { NoiseName } from '../src/sim/SimSensor';
+import { DepthConsistency } from '../src/world/DepthFrame';
 // Realistic conditions: dressed rooms + human scanning + 'real' sensor profile.
 // Usage: npx tsx scripts/real-report.ts [profile] [rooms] [seconds]
+// Env: CAMERA=1 (motion stereo from the simulated camera), CAMERA_EVERY, STEREO / WORLD / NAV (JSON
+// options), MULTIVIEW=1 or JSON (multi-view consistency gate), PATHS (sampled paths per room, default 100).
 const prof = (process.argv[2] ?? 'real') as NoiseName;
 const rooms = (process.argv[3] ?? 'living,bedroom,r3,r7,r11,r19,r23,r29,r31,r37,r41,r43').split(',');
 const secs = Number(process.argv[4] ?? 45);
@@ -21,11 +24,12 @@ for (const [pos, name] of rooms.entries()) {
   const room = dressRoom(roomFromName(name), idx + 1);
   const w0 = new WorldModel();
   Object.assign(w0, JSON.parse(process.env.WORLD ?? '{}'));
+  if (process.env.MULTIVIEW) w0.multiView = new DepthConsistency(JSON.parse(process.env.MULTIVIEW === '1' ? '{}' : process.env.MULTIVIEW));
   const { world, eyes, frames, dropped, camera } = scanRoomHuman(room, { seed: idx + 3, noise: prof, seconds: secs, world: w0, cameraDepth: !!process.env.CAMERA, cameraEvery: Number(process.env.CAMERA_EVERY ?? 2), stereo: JSON.parse(process.env.STEREO ?? '{}') });
-  if (camera) console.log(`  camera: ${camera.frames} frames, ${camera.depthFrames} with stereo depth`);
+  if (camera) console.log(`  camera: ${camera.frames} frames, ${camera.depthFrames} with stereo depth (skipped: ${camera.stereo.skipped.blur} blur, ${camera.stereo.skipped.sources} too few sources)`);
   room.time = 1e6; // the walker has left
   const nav = new NavGrid(world, JSON.parse(process.env.NAV ?? '{}'));
-  const m = evaluateMap(world, nav, room, { paths: 100, eyes });
+  const m = evaluateMap(world, nav, room, { paths: Number(process.env.PATHS ?? 100), eyes });
   agg.ff += m.falseFree; agg.coll += m.pathsColliding / Math.max(1, m.pathsTested); agg.pen.push(m.pathMaxPenetration); agg.bad += m.jumpsBadLanding; agg.jumps += m.jumpsTested; agg.area += m.walkableArea; agg.err95 += m.surfErrP95; agg.nodesColl += m.nodesColliding; agg.nodes += m.nodeCount; agg.unsup += m.nodesUnsupported; agg.gateRej += world.poseGate.rejected; agg.gateAll += world.poseGate.rejected + world.poseGate.accepted;
   console.log(`${name.padEnd(8)} ${String(frames).padStart(4)}(${String(dropped).padStart(3)}) |      ${cm(m.surfErrMedian)} ${cm(m.surfErrP95)} ${pc(m.surfErrOver5)} ${pc(m.surfErrOver10)} |    ${pc(m.falseFree)}      ${pc(m.missedLow)} | ${String(m.nodeCount).padStart(5)} ${String(m.nodesColliding).padStart(3)}(${f(m.nodeMaxPenetration)}) ${String(m.nodesUnsupported).padStart(5)} | ${String(m.pathsTested).padStart(4)} ${String(m.pathsColliding).padStart(3)}(${f(m.pathMaxPenetration)}) ${String(m.jumpsTested).padStart(4)} ${String(m.jumpsBadLanding).padStart(4)} | ${f(m.walkableArea)}`);
 }
