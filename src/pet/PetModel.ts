@@ -17,8 +17,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 
 import { BONES, type BoneName } from './skeleton';
 import { creatureGeometry, furLengthAt, surfaceAt } from './sdf/meshCreature';
-import { EYE, EYE_RADIUS, MOUTH, NOSE } from './sdf/creature';
-import { DEFAULT_FUR, makeFurShellMaterial, type FurOptions } from './furMaterial';
+import { EYE, EYE_RADIUS, MOUTH, NOSE, TOE_DX } from './sdf/creature';
+import { addTranslucency, DEFAULT_FUR, makeFurShellMaterial, type FurOptions } from './furMaterial';
 export { HEAD_CENTER, HEAD_RADIUS, type BoneName } from './skeleton';
 
 export interface PetPalette {
@@ -108,6 +108,9 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
 
   // --- Materials --------------------------------------------------------------
   const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
+  // Ears are thin: backlight glows through them (fur shells add the same term).
+  skin.onBeforeCompile = (shader) => addTranslucency(shader);
+  skin.customProgramCacheKey = () => 'skin-thin';
   const glowMaterial = new THREE.MeshStandardMaterial({ color: pal.glow, emissive: pal.glow, emissiveIntensity: 0.9, roughness: 0.3 });
   // Glowing orbs are brighter in the middle than at the rim, which gives them volume.
   glowMaterial.onBeforeCompile = (shader) => {
@@ -253,10 +256,11 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // Tiny claws peeking out of the toe fur.
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
-    for (const dx of [-0.011, 0, 0.011]) {
-      const claw = new THREE.Mesh(new THREE.ConeGeometry(0.0022, 0.0065, 8), clawMat);
-      claw.rotation.x = Math.PI / 2 + 0.5;
-      attach(`ankle${side}`, claw, abs[`ankle${side}`].clone().add(new THREE.Vector3(dx * s, -0.009, 0.0505 - Math.abs(dx) * 0.35)));
+    for (const dx of TOE_DX) {
+      const claw = new THREE.Mesh(new THREE.ConeGeometry(0.0021, 0.0062, 8), clawMat);
+      claw.rotation.set(Math.PI / 2 + 0.55, 0, 0);
+      claw.rotation.y = dx * s * 9;
+      attach(`ankle${side}`, claw, abs[`ankle${side}`].clone().add(new THREE.Vector3(dx * s * 1.08, -0.0105, 0.0545 - Math.abs(dx) * 0.3)));
     }
   }
 

@@ -16,6 +16,8 @@ export const NOSE: V = [0, 0.228, 0.097];
 export const MOUTH: V = [0, 0.213, 0.093];
 /** Lid fold ring around each eye, in eye radii: offset along the eye axis, ring radius, tube radius. */
 export const LID_FOLD = { offset: 0.4, R: 1.03, r: 0.25 };
+/** Sideways offsets of the three toes (pet space, before mirroring). */
+export const TOE_DX = [-0.0125, 0, 0.0125];
 
 /** Torso weights blend hips → spine → chest → neck by height. */
 function torsoBones(_x: number, y: number): BoneWeight[] {
@@ -99,9 +101,12 @@ export function buildCreatureSculpt(): Sculpt {
     S.add(
       roundCone('thigh', add(thigh, [0.004 * s, 0, -0.006]), shin, 0.035, 0.022, `thigh${side}`, `shin${side}`, 0.024),
       roundCone('shin', shin, ankle, 0.018, 0.0115, `shin${side}`, `ankle${side}`, 0.01),
-      ellipsoid('foot', add(ankle, [0, -0.005, 0.017]), [0.019, 0.0105, 0.031], `ankle${side}`, 0.012),
+      ellipsoid('foot', add(ankle, [0, -0.005, 0.014]), [0.0185, 0.0105, 0.028], `ankle${side}`, 0.012),
     );
-    for (const dx of [-0.011, 0, 0.011]) S.add(ellipsoid('toe', add(ankle, [dx * s, -0.008, 0.043 - Math.abs(dx) * 0.35]), [0.0078, 0.0068, 0.0078], `ankle${side}`, 0.006));
+    // Three plump toes with clear grooves between them (small blend radius),
+    // splayed a little, and a heel pad behind.
+    for (const dx of TOE_DX)
+      S.add(ellipsoid('toe', add(ankle, [dx * s, -0.0085, 0.045 - Math.abs(dx) * 0.3]), [0.0092, 0.0078, 0.0098], `ankle${side}`, 0.0026, alignX([1, 0, -dx * s * 9], [0, 1, 0])));
     // ---- Arms: stubby, with little mitten paws -------------------------------------------------------------
     const sh = P[`shoulder${side}`], el = P[`elbow${side}`], ha = P[`hand${side}`];
     S.add(
@@ -148,7 +153,7 @@ export const FUR_LENGTH: Record<Region, number> = {
   thigh: 0.0055,
   shin: 0.0035,
   foot: 0.0022,
-  toe: 0.0008,
+  toe: 0.0015,
   arm: 0.0035,
   hand: 0.0016,
   finger: 0.0008,

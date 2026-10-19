@@ -15,6 +15,33 @@ export interface FurOptions {
   gravity: number;
 }
 
+/**
+ * Thin-skin translucency (ears): light from behind the surface glows through
+ * as a warm red-pink, plus a little constant scatter, scaled by the per-vertex
+ * `thin` attribute (0 = opaque). Works in any MeshStandardMaterial shader.
+ */
+export function addTranslucency(shader: { vertexShader: string; fragmentShader: string }): void {
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute float thin;\nvarying float vThin;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvThin = thin;');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying float vThin;')
+    .replace(
+      '#include <opaque_fragment>',
+      `if (vThin > 0.001) {
+        vec3 through = vec3(0.35);
+        #if NUM_DIR_LIGHTS > 0
+        for (int i = 0; i < NUM_DIR_LIGHTS; i++) through += directionalLights[i].color * pow(max(0.0, dot(-normal, directionalLights[i].direction)), 1.5);
+        #endif
+        // Thin edges seen at a grazing angle glow a little too.
+        float graze = 1.0 - abs(dot(normal, normalize(vViewPosition)));
+        vec3 tint = mix(diffuseColor.rgb, vec3(1.0, 0.42, 0.36), 0.6) * vec3(1.0, 0.7, 0.66);
+        outgoingLight += vThin * tint * (through * 0.6 + 0.5 * graze * graze);
+      }
+      #include <opaque_fragment>`,
+    );
+}
+
 export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.35 };
 
 /**
@@ -107,6 +134,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         outgoingLight += diffuseColor.rgb * pow(furRim, 3.0) * 0.45 * uShellH;
         #include <opaque_fragment>`,
       );
+    if (h >= 0) addTranslucency(shader);
   };
   m.customProgramCacheKey = () => `fur-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.gravity}`;
   return m;

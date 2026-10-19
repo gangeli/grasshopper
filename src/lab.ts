@@ -7,6 +7,7 @@ import { applyPetEnvironment } from './pet/lighting';
  * Pose lab: renders Hopper in a grid of actions × times (and optional camera
  * angles) so automated tests and humans can review the model and animation at
  * a glance. URL params: actions=a,b,c  times=0.1,0.5  yaw=0.6  size=220  palette=mint
+ * dist/camY/lookY (camera), fur=N, look=0 (don't look at the camera)
  */
 const q = new URLSearchParams(location.search);
 const actions = (q.get('actions') ?? 'idle,hop,jumpCrouch,jumpAir,land,hide,hideLow,peek,giggle,surprised,celebrate,wave,lookAround,sniff,coverEyes,sleep').split(',') as ActionName[];
@@ -52,6 +53,8 @@ const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 10);
 function poseAt(action: ActionName, t: number) {
   // Re-simulate from scratch so springs settle deterministically.
   anim.play(action, 0, true);
+  // No random blinks mid-sheet: they'd make cells look half-lidded at random.
+  Object.assign(anim, { blinkT: 1e9, blinkPhase: 1 });
   if (action === 'hop') anim.ctx.speed = 0.6;
   const dt = 1 / 60;
   let tt = 0;
@@ -72,7 +75,7 @@ for (const action of actions) {
       // The pet looks at this cell's camera (set before posing so it's not the previous cell's).
       camera.position.set(Math.sin(yaw) * dist, camY, Math.cos(yaw) * dist);
       camera.lookAt(0, lookY, 0);
-      anim.lookTarget = camera.position.clone();
+      anim.lookTarget = q.get('look') === '0' ? null : camera.position.clone();
       poseAt(action, t);
       renderer.setViewport(c * cell, H - (r + 1) * cell, cell, cell);
       renderer.setScissor(c * cell, H - (r + 1) * cell, cell, cell);

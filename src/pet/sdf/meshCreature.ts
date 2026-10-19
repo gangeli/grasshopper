@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { BONES } from '../skeleton';
+import { BONES, type BoneName, type V } from '../skeleton';
 import { buildCreatureSculpt, EYE, EYE_RADIUS, FUR_LENGTH } from './creature';
-import type { Region } from './sdf';
+import { alignX, type Region } from './sdf';
 import { surfaceNets } from './surfaceNets';
 
 export interface CreaturePalette {
@@ -92,9 +92,16 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   const d = (x: number, y: number, z: number) => S.d(x, y, z);
   const mesh = surfaceNets(d, [-0.13, -0.012, -0.19], [0.13, 0.33, 0.135], resolution, 0);
   const n = mesh.positions.length / 3;
-  const skinIndex = new Uint16Array(n * 4), skinWeight = new Float32Array(n * 4), color = new Float32Array(n * 3), furLen = new Float32Array(n);
+  const skinIndex = new Uint16Array(n * 4), skinWeight = new Float32Array(n * 4), color = new Float32Array(n * 3), furLen = new Float32Array(n), thin = new Float32Array(n);
+  // Ear frames (same as the sculpt's fins): along the fin, and across it in its plane.
+  const earFrame = (['L', 'R'] as const).map((side) => {
+    const s = side === 'L' ? 1 : -1;
+    const base = BONES.find(([nm]) => nm === (`ear${side}` as BoneName))![2] as V;
+    const r = alignX([0.8 * s, 0.42, -0.42], [0, 1, 0.3]);
+    return { s, base, X: [r[0], r[1], r[2]], Z: [r[6], r[7], r[8]] };
+  });
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark), cBelly = new THREE.Color(pal.belly), cBlush = new THREE.Color(pal.blush);
-  const cPink = new THREE.Color(0xf4a7b1), cEar = new THREE.Color(0xf7b9c4);
+  const cPink = new THREE.Color(0xf4a7b1), cEar = new THREE.Color(0xf7b9c4), cVein = new THREE.Color(0xd65a6e);
   const c = new THREE.Color();
   for (let v = 0; v < n; v++) {
     const x = mesh.positions[v * 3], y = mesh.positions[v * 3 + 1], z = mesh.positions[v * 3 + 2];
@@ -139,12 +146,28 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     if (att.region === 'cheek') c.lerp(cBlush, 0.18 * smooth(0.2, 0.7, nz) * smooth(0.3, -0.1, ny));
     // Pink inner ears.
     // Pink inner ears (the fins face up and forward), darker backs.
-    if (att.region === 'ear') {
+    if (rw('ear') > 0.05) {
       const inner = 0.6 * ny + 0.6 * nz;
-      c.lerp(cDark, 0.5 * smooth(-0.1, -0.6, inner));
-      c.lerp(cEar, 0.85 * smooth(0.15, 0.55, inner));
-      // Deeper, warmer pink down in the cup.
-      c.lerp(cBlush, 0.3 * smooth(0.5, 0.9, inner));
+      const f = earFrame[x > 0 ? 0 : 1];
+      const dx = x - f.base[0], dy = y - f.base[1], dz = z - f.base[2];
+      const u = (dx * f.X[0] + dy * f.X[1] + dz * f.X[2]) / 0.075; // 0 root .. 1 tip
+      const w = (dx * f.Z[0] + dy * f.Z[1] + dz * f.Z[2]) / 0.018; // across the fin
+      // A central vein from the root that forks twice towards the tip.
+      const vein = Math.max(
+        1 - smooth(0.0, 0.14, Math.abs(w - 0.05)),
+        (1 - smooth(0.0, 0.12, Math.abs(w - 0.05 - 0.75 * (u - 0.3)))) * smooth(0.3, 0.4, u),
+        (1 - smooth(0.0, 0.12, Math.abs(w - 0.05 + 0.7 * (u - 0.45)))) * smooth(0.45, 0.55, u),
+      ) * smooth(0.12, 0.3, u) * (1 - smooth(0.8, 1.0, u));
+      if (att.region === 'ear') {
+        c.lerp(cDark, 0.5 * smooth(-0.1, -0.6, inner));
+        c.lerp(cEar, 0.85 * smooth(0.15, 0.55, inner));
+        // Deeper, warmer pink down in the cup, fading lighter towards the thin rim.
+        c.lerp(cBlush, 0.3 * smooth(0.5, 0.9, inner) * (1 - smooth(0.6, 1.0, u)));
+        // Faint rosy veins on the pink side.
+        c.lerp(cVein, 0.6 * vein * smooth(0.1, 0.5, inner));
+      }
+      // Thin towards the tip and rim; veins block a little of the glow.
+      thin[v] = rw('ear') * smooth(0.05, 0.45, u) * (1 - 0.45 * vein);
     }
     // Paws: cream soles, pink beans.
     if (att.region === 'foot' && ny < -0.4) c.lerp(cBelly, 0.85);
@@ -163,7 +186,11 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     // Baked ambient occlusion: creases (armpits, under the chin, between the
     // toes, ear roots, eye sockets) get darker, like dense fur self-shadowing.
     const ao = occlusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
-    c.multiplyScalar(0.5 + 0.5 * ao);
+    // Paws get deeper creases so the toes read as separate beans.
+    const paw = rw('toe') + rw('foot') * 0.6 + rw('finger');
+    c.multiplyScalar(0.5 + 0.5 * ao - 0.25 * paw * (1 - ao));
+    // Toe tops a touch lighter, like worn fur on the knuckles.
+    c.lerp(cBelly, 0.18 * rw('toe') * smooth(0.2, 0.8, ny + nz * 0.5) * ao);
     // Tiny brightness variation.
     const varn = 0.94 + 0.12 * vnoise(x * 300, y * 300, z * 300);
     color[v * 3] = c.r * varn;
@@ -192,6 +219,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   geo.setAttribute('skinIndex', new THREE.BufferAttribute(skinIndex, 4));
   geo.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeight, 4));
   geo.setAttribute('furLen', new THREE.BufferAttribute(furLen, 1));
+  geo.setAttribute('thin', new THREE.BufferAttribute(thin, 1));
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   geo.computeBoundingSphere();
   cache.set(key, geo);

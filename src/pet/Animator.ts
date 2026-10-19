@@ -542,8 +542,8 @@ export class Animator {
       lookYaw = clamp(yaw, -1.3, 1.3) * P.lookWeight * (1 - behind);
       lookPitch = clamp(pitch, -0.8, 0.6) * P.lookWeight;
     }
-    set('neck', P.neckPitch + lookPitch * 0.35, P.neckYaw + lookYaw * 0.4, P.neckRoll);
-    set('head', P.headPitch + lookPitch * 0.5, P.headYaw + lookYaw * 0.45, P.headRoll);
+    set('neck', P.neckPitch + lookPitch * 0.35, P.neckYaw + lookYaw * 0.42, P.neckRoll);
+    set('head', P.headPitch + lookPitch * 0.5, P.headYaw + lookYaw * 0.5, P.headRoll);
 
     // Arms (positive pitch swings back; raise lifts outward).
     set('shoulderL', P.armLPitch, 0, P.armLRaise);
@@ -581,7 +581,8 @@ export class Animator {
         const wob = 0.04 * noise1(this.time * 1.3 + q * 0.4, this.ctx.seed + (s > 0 ? 11 : 13));
         set(`ant${side}${q}` as BoneName, lift * (0.5 + q * 0.3) + wob, spread * (0.6 + q * 0.2), -spread * 0.3);
       }
-      set(`ear${side}` as BoneName, 0, 0, s * (-P.earLift * 0.5 + ear * 0.05));
+      // Positive earLift perks the ears up; they lag (droop) when the head accelerates upward.
+      set(`ear${side}` as BoneName, 0, 0, s * (P.earLift * 0.5 - ear * 0.05));
       // Wings: fold back, spread out, flap.
       const flap = P.wingFlap * Math.sin(this.time * 55) * 0.6;
       // At rest the wings lie folded back along the shoulders. Spreading raises
@@ -626,10 +627,13 @@ export class Animator {
       pupil.scale.set(ps, ps, 1);
     }
     // Remaining look offset goes to the eyes.
-    const eyeYaw = clamp(P.lookX * 0.5 + lookYaw * 0.3, -0.5, 0.5);
+    // The head does most of the turning; the eyes only finish it. The eye on
+    // the far side turns less, so it doesn't roll its iris into the corner and
+    // show a big crescent of white.
+    const eyeYaw = clamp(P.lookX * 0.5 + lookYaw * 0.18, -0.4, 0.4);
     const eyePitch = clamp(-P.lookY * 0.4 + lookPitch * 0.3, -0.4, 0.4);
-    face.irisL.rotation.set(eyePitch, eyeYaw - 0.25, 0);
-    face.irisR.rotation.set(eyePitch, eyeYaw + 0.25, 0);
+    face.irisL.rotation.set(eyePitch, eyeYaw * (eyeYaw < 0 ? 0.55 : 1) - 0.25, 0);
+    face.irisR.rotation.set(eyePitch, eyeYaw * (eyeYaw > 0 ? 0.55 : 1) + 0.25, 0);
     const mo = clamp(P.mouthOpen, 0, 1);
     face.mouthOpen.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.12);
     face.mouthOpen.visible = mo > 0.04;
