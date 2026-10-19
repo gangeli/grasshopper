@@ -55,6 +55,10 @@ export interface Waypoint {
 }
 
 const NONE = -1;
+// Constant sample patterns (module level: no arrays allocated per call).
+const OPEN_ABOVE_OFFSETS: readonly (readonly [number, number])[] = [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]];
+const ARC_HEIGHTS: readonly number[] = [0.06, 0.13, 0.2];
+const ARC_SIDES: readonly number[] = [0, -1, 1];
 
 export class NavGrid {
   readonly p: NavParams;
@@ -258,7 +262,7 @@ export class NavGrid {
     const g = this.g;
     const i = this.ni[q], k = this.nk[q];
     const j0 = g.cellY(this.ny[q] + 0.02), j1 = g.cellY(this.ny[q] + h);
-    for (const [di, dk] of [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]]) for (let j = j0; j <= j1; j++) if (g.solid(i + di, j, k + dk)) return false;
+    for (const [di, dk] of OPEN_ABOVE_OFFSETS) for (let j = j0; j <= j1; j++) if (g.solid(i + di, j, k + dk)) return false;
     return true;
   }
 
@@ -308,11 +312,11 @@ export class NavGrid {
       const t = s / steps;
       NavGrid.arcPoint(from, to, t, p, lift);
       // Sample the body: feet (raised a bit), middle and head.
-      for (const h of [0.06, 0.13, 0.2]) {
+      for (const h of ARC_HEIGHTS) {
         // Near the endpoints the feet are on the surface itself; skip the lowest sample.
         if (h === 0.06 && (t < 0.12 || t > 0.88)) continue;
         // Centre line plus the body's width either side.
-        for (const side of [0, -1, 1]) {
+        for (const side of ARC_SIDES) {
           const x = p.x + side * sx * 0.07, z = p.z + side * sz * 0.07;
           const i = g.cellX(x), j = g.cellY(p.y + h), k = g.cellZ(z);
           if (g.solid(i, j, k)) return false;
