@@ -1,5 +1,5 @@
 import type { Vec3 } from '../core/math';
-import { STRONG_OCC, VoxelGrid } from './VoxelGrid';
+import { OCC_THRESHOLD, STRONG_OCC, VoxelGrid } from './VoxelGrid';
 import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 
 /**
@@ -704,6 +704,8 @@ export class WorldModel {
    * correction and the support with and without it. Cheap enough to run every
    * couple of seconds (coarse-to-fine, a few thousand points).
    */
+  /** Debug hook: called with the scoring function of each misalignment search. */
+  debugScore: ((score: (dx: number, dz: number, yaw: number) => number, pts: number[], data: Int8Array) => void) | null = null;
   estimateMisalignment(opts: { frames?: number; maxShift?: number; maxYaw?: number; snapshot?: 'newest' | 'oldest' | 'event' } = {}): { dx: number; dz: number; dyaw: number; pivot: Vec3; base: number; best: number; n: number; degenerate: boolean; snapT: number } | null {
     const g = this.grid;
     if (!g || !this.replay.length) return null;
@@ -736,6 +738,9 @@ export class WorldModel {
         // Moving things (people) would "align" with where they were a moment ago.
         const ti = g.cellX(x), tj = g.cellY(y), tk = g.cellZ(z);
         if (g.inBounds(ti, tj, tk) && g.isTransient(g.idx(ti, tj, tk))) continue;
+        // Space the old map never saw says nothing either way (and would let
+        // the search "align" new territory with some look-alike elsewhere).
+        if (!g.inBounds(ti, tj, tk) || data[g.idx(ti, tj, tk)] === 0) continue;
         pts.push(x, y, z);
       }
     const n = pts.length / 3;
@@ -753,10 +758,16 @@ export class WorldModel {
         const n0 = g.idx(i, j, k);
         // Soft score: on a confident surface voxel, or right next to one (x/z).
         if (data[n0] > STRONG_OCC) sc += 1;
+        // Surfaces seen less often (a wall the camera only swept past) count too, a bit less.
+        else if (data[n0] > OCC_THRESHOLD) sc += 0.7;
         else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - g.nx] > STRONG_OCC || data[n0 + g.nx] > STRONG_OCC) sc += 0.35;
+        // Landing deep in space the old map saw through clearly argues against
+        // a correction (a look-alike surface elsewhere would put points there).
+        else if (data[n0] < -20) sc -= 0.5;
       }
       return sc;
     };
+    if (this.debugScore) this.debugScore(score, pts, data);
     const maxShift = opts.maxShift ?? 0.5, maxYaw = opts.maxYaw ?? 0.1;
     const used = Math.ceil(n / stride);
     // Prefer small corrections among near-ties: a support penalty of 3% of the
@@ -785,7 +796,17 @@ export class WorldModel {
     let flat = 0;
     for (const [ddx, ddz, dyw] of [[0.1, 0, 0], [-0.1, 0, 0], [0, 0.1, 0], [0, -0.1, 0], [0, 0, 0.05], [0, 0, -0.05]])
       if (score(best.dx + ddx, best.dz + ddz, best.dyaw + dyw) > best.s - drop) flat++;
-    const degenerate = flat >= 5;
+    // A shift along a direction the geometry doesn't pin down (sliding along
+    // a wall onto a better-mapped stretch of it, where support just keeps
+    // rising to the edge of the search) isn't a measurement either.
+    const mag = Math.hypot(best.dx, best.dz);
+    let slides = false;
+    if (mag > 0.1) {
+      const ux = (0.1 * best.dx) / mag, uz = (0.1 * best.dz) / mag;
+      // A real fit is a peak: support falls off both ways along the shift.
+      slides = !(score(best.dx + ux, best.dz + uz, best.dyaw) < best.s - drop && score(best.dx - ux, best.dz - uz, best.dyaw) < best.s - drop);
+    }
+    const degenerate = flat >= 5 || slides;
     return { dx: best.dx, dz: best.dz, dyaw: best.dyaw, pivot: { ...pivot }, base: Math.round(base), best: Math.round(best.s), n: used, degenerate, snapT: snap.t };
   }
 

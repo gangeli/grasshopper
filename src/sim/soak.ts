@@ -76,6 +76,66 @@ export function runSoak(room: string, seed: number, seconds: number, opts: Parti
       if (process.env.SOAK_HIST) console.log('hist', Array.from((sim.world as any).floorWatch as Float32Array).map((v, i) => `${i - 25}:${v.toFixed(0)}`).filter((x) => !x.endsWith(':0')).join(' '));
       console.log(`${sim.time.toFixed(0)}s floorY ${(sim.world.floorY * 100).toFixed(1)} evidence ${(f.offset * 100).toFixed(1)} kmode ${(f.kernelMode * 100).toFixed(0)} gain ${f.kernelGain.toFixed(2)} median ${(f.median * 100).toFixed(1)} below ${(f.below * 100).toFixed(0)} above ${(f.above * 100).toFixed(0)} share ${(f.share * 100).toFixed(0)} mass ${f.mass.toFixed(0)} plane ${pl ? (pl.y * 100).toFixed(1) : '-'} phase ${sim.game.phase} bot ${bot.phase}`);
     }
+    if (process.env.SOAK_EST && Math.abs(sim.time - Number(process.env.SOAK_EST)) < dt / 2) {
+      const toReal = realFromMap(sim), g = sim.world.grid!;
+      sim.world.debugScore = (score, pts, data) => {
+        sim.world.debugScore = null;
+        console.log('score profile dz=0.09 yaw=0.037:', [-0.5, -0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.52].map((x) => `${x}:${score(x, 0.09, 0.037).toFixed(0)}`).join(' '));
+        console.log('score profile dz=0 yaw=0, dx:', [-0.1, 0, 0.1].map((x) => `${x}:${score(x, 0, 0).toFixed(0)}`).join(' '), 'dz:', [-0.1, -0.05, 0.05, 0.1].map((z) => `${z}:${score(0, z, 0).toFixed(0)}`).join(' '));
+        const where: Record<string, number> = {};
+        const q = new THREE.Vector3();
+        for (let i = 0; i < pts.length; i += 3) {
+          q.set(pts[i], pts[i + 1], pts[i + 2]).applyMatrix4(toReal);
+          const v = data[g.idx(g.cellX(pts[i]), g.cellY(pts[i + 1]), g.cellZ(pts[i + 2]))];
+          const k = `${sim.room.pieceAt(q)?.label ?? (sim.room.solidAt(q, 0.05) ? 'wall' : 'air')}/${v > 45 ? 'S' : v > 20 ? 'o' : v < -20 ? 'F' : v < 0 ? 'f' : v === 0 ? 'u' : 'w'} x${(Math.round(q.x * 2) / 2).toFixed(1)} z${(Math.round(q.z * 2) / 2).toFixed(1)}`;
+          where[k] = (where[k] ?? 0) + 1;
+        }
+        console.log('points (real piece / snapshot class / real x,z):', Object.entries(where).sort((a, b) => b[1] - a[1]).slice(0, 16).map(([k, v]) => `${k}: ${v}`).join(' | '));
+        const sh: Record<string, number> = {};
+        const c = Math.cos(0.037), sn = Math.sin(0.037);
+        for (let i = 0; i < pts.length; i += 3) {
+          const piv = sim.cam.pos; // approx
+          const rx = pts[i] - piv.x, rz = pts[i + 2] - piv.z;
+          const x = piv.x + c * rx + sn * rz + 0.52, z = piv.z - sn * rx + c * rz + 0.09;
+          q.set(x, pts[i + 1], z).applyMatrix4(toReal);
+          const v = data[g.idx(g.cellX(x), g.cellY(pts[i + 1]), g.cellZ(z))];
+          const k = `${sim.room.pieceAt(q)?.label ?? (sim.room.solidAt(q, 0.05) ? 'wall' : 'air')}/${v > 45 ? 'S' : v > 20 ? 'o' : v < -20 ? 'F' : v < 0 ? 'f' : v === 0 ? 'u' : 'w'}`;
+          sh[k] = (sh[k] ?? 0) + 1;
+        }
+        console.log('shifted by best:', Object.entries(sh).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${k}: ${v}`).join(' | '));
+      };
+    }
+    if (process.env.SOAK_WATCH && Math.floor(sim.time) !== Math.floor(sim.time - dt) && sim.world.grid) {
+      const [x, y, z] = process.env.SOAK_WATCH.split(',').map(Number), g = sim.world.grid;
+      const vals = [-1, 0, 1].map((d) => g.data[g.idx(g.cellX(x), g.cellY(y), g.cellZ(z + d * g.res))]);
+      console.log(`${sim.time.toFixed(0)}s WATCH ${vals.join(' ')} cam (${sim.cam.pos.x.toFixed(2)},${sim.cam.pos.y.toFixed(2)},${sim.cam.pos.z.toFixed(2)}) yaw ${sim.cam.yaw.toFixed(2)} pitch ${sim.cam.pitch.toFixed(2)} epoch ${sim.world.epoch} bot ${bot.phase}`);
+    }
+    if (process.env.SOAK_FRAME && sim.time > Number(process.env.SOAK_FRAME) && Math.floor(sim.time) !== Math.floor(sim.time - dt)) {
+      const se = (sim.sensor as any).smoothErr, w = sim.world, M = w.trackingToMap();
+      console.log(`${sim.time.toFixed(0)}s track err (${(se.x * 100).toFixed(0)},${(se.z * 100).toFixed(0)})cm yaw ${((se.yaw * 180) / Math.PI).toFixed(1)}° jump (${(sim.sensor.jump[12] * 100).toFixed(0)},${(sim.sensor.jump[14] * 100).toFixed(0)}) map corr (${(M[12] * 100).toFixed(0)},${(M[14] * 100).toFixed(0)}) lost ${sim.sensor.trackingLost} lastEvent ${w.lastTrackingEvent.toFixed(1)} snap ${w.eventSnapshot?.t.toFixed(1)} epoch ${w.epoch}`);
+    }
+    if (process.env.SOAK_ALIGN && sim.time > Number(process.env.SOAK_ALIGN) && Math.floor(sim.time) !== Math.floor(sim.time - dt)) {
+      const toReal = realFromMap(sim), rep_ = (sim.world as any).replay.slice(-10), q = new THREE.Vector3();
+      let n = 0, ok = 0, okSnap = 0;
+      const hist: Record<string, number> = {};
+      const ev = sim.world.eventSnapshot, g = sim.world.grid!;
+      for (const f of rep_)
+        for (let i = 0; i < f.pts.length; i += 3) {
+          if (f.pts[i + 1] < sim.world.floorY + 0.06) continue;
+          n++;
+          q.set(f.pts[i], f.pts[i + 1], f.pts[i + 2]).applyMatrix4(toReal);
+          if (sim.room.solidAt(q, 0.05)) ok++;
+          if (ev && ev.data[g.idx(g.cellX(f.pts[i]), g.cellY(f.pts[i + 1]), g.cellZ(f.pts[i + 2]))] > 45) okSnap++;
+          if (process.env.SOAK_ALIGN_V && ev && ev.data[g.idx(g.cellX(f.pts[i]), g.cellY(f.pts[i + 1]), g.cellZ(f.pts[i + 2]))] < 0 && Math.random() < 0.003) console.log(`    free-in-snapshot wall voxel map (${f.pts[i].toFixed(2)},${f.pts[i + 1].toFixed(2)},${f.pts[i + 2].toFixed(2)})`);
+          if (ev && process.env.SOAK_ALIGN_V) {
+            const v = ev.data[g.idx(g.cellX(f.pts[i]), g.cellY(f.pts[i + 1]), g.cellZ(f.pts[i + 2]))], lv = g.data[g.idx(g.cellX(f.pts[i]), g.cellY(f.pts[i + 1]), g.cellZ(f.pts[i + 2]))];
+            const key = `${v === 0 ? 'unk' : v < 0 ? 'free' : v > 45 ? 'strong' : 'weak'}/${lv === 0 ? 'unk' : lv < 0 ? 'free' : lv > 45 ? 'strong' : 'weak'}:${sim.room.pieceAt(q)?.label ?? (sim.room.solidAt(q, 0.05) ? 'wall' : '-')}`;
+            hist[key] = (hist[key] ?? 0) + 1;
+          }
+        }
+      console.log(`${sim.time.toFixed(0)}s recent pts ${n} on real geometry ${((ok / Math.max(1, n)) * 100).toFixed(0)}% on snapshot occ ${((okSnap / Math.max(1, n)) * 100).toFixed(0)}% cam (${sim.cam.pos.x.toFixed(2)},${sim.cam.pos.z.toFixed(2)}) bot ${bot.phase}`);
+      if (process.env.SOAK_ALIGN_V) console.log('   ', Object.entries(hist).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k} ${v}`).join(' | '));
+    }
     if (Math.floor(sim.time / 15) !== Math.floor((sim.time - dt) / 15)) rep.precisionTimeline.push({ t: sim.time, p: mapPrecision(sim) });
     // The pet's body against the real room (after any frame correction, the map
     // frame should match reality, so compare in the map frame).

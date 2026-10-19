@@ -55,7 +55,11 @@ export class DriftMonitor {
     const ev = this.world.eventSnapshot;
     const sinceEvent = this.world.now - this.world.lastTrackingEvent;
     const inEvent = !!ev && sinceEvent < this.opts.eventWindow;
-    if (inEvent && !this.inEvent) {
+    // A new loss inside the window can move the frame again: earlier looks
+    // (for or against a jump) describe the frame before it.
+    const newEvent = this.world.lastTrackingEvent !== this.seenEvent;
+    this.seenEvent = this.world.lastTrackingEvent;
+    if (inEvent && (!this.inEvent || newEvent)) {
       this.votes = [];
       this.against = 0;
       this.eventSeen = [];
@@ -64,6 +68,7 @@ export class DriftMonitor {
     if (this.inEvent) return this.afterEvent(t);
     return this.drifting(t);
   }
+  private seenEvent = -Infinity;
   /** Currently checking for a jump after a tracking loss. */
   inEvent = false;
   /** Just after a loss, or a jump looks likely and nothing says the map still fits. */
@@ -91,14 +96,19 @@ export class DriftMonitor {
     const ok = !m.degenerate && m.n >= O.minPoints && m.best >= O.minSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n);
     // A confident "nothing moved" (most readings on known surfaces as they are) votes against a jump.
     if (!m.degenerate && m.n >= 800 && m.base >= 0.6 * m.n && mag < O.minCorrection) this.against++;
-    if (!ok || mag < O.minCorrection) {
+    // Fewer readings, but the old map plainly doesn't fit where it is and does
+    // fit shifted: a weaker vote, so it takes more of them agreeing.
+    const weak = !ok && !m.degenerate && m.n >= 150 && m.best >= 0.3 * m.n && m.best >= 4 * Math.max(m.base, 0.05 * m.n);
+    if ((!ok && !weak) || mag < O.minCorrection) {
       this.note(`event: ${ok ? 'aligned' : 'unsure'} n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm`);
       return false;
     }
     // Votes: estimates from different moments that agree on the same correction.
     const agreeing = this.votes.filter((v) => t - v.t >= 0.9 && displacement(m, v.m) <= O.agree);
-    this.votes.push({ m, t });
-    if (agreeing.length >= 1 && agreeing.length + 1 > this.against) {
+    this.votes.push({ m, t, weak });
+    const strong = agreeing.filter((v) => !v.weak).length + (weak ? 0 : 1);
+    const enough = strong >= 2 || agreeing.length + 1 >= 4;
+    if (enough && agreeing.length + 1 > this.against) {
       this.world.realign(m.dx, m.dz, m.dyaw, m.pivot, (this.world.eventSnapshot?.t ?? this.world.lastTrackingEvent) - 0.5);
       this.votes = [];
       this.against = 0;
@@ -108,10 +118,10 @@ export class DriftMonitor {
       this.note(`event: REALIGNED ${(mag * 100).toFixed(0)}cm (${agreeing.length + 1} votes)`);
       return true;
     }
-    this.note(`event: vote ${(mag * 100).toFixed(0)}cm ${m.best}/${m.n} (agreeing ${agreeing.length}, against ${this.against})`);
+    this.note(`event: ${weak ? 'weak ' : ''}vote ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} (agreeing ${agreeing.length}, against ${this.against})`);
     return false;
   }
-  private votes: { m: Est; t: number }[] = [];
+  private votes: { m: Est; t: number; weak: boolean }[] = [];
   private against = 0;
 
   /** Share of post-event readings that matched the pre-event map without correction (per check). */
@@ -127,10 +137,12 @@ export class DriftMonitor {
     this.eventSeen = [];
     this.votes = [];
     this.against = 0;
+    const sure = votes.filter((x) => !x.weak);
+    // Size of the likely jump (weak looks count here: they pick how hard to reset, not whether to).
     const mag = votes.length ? Math.max(...votes.map((x) => displacement(x.m, null))) : 0;
     // Repeated confident jump estimates that never agreed enough to fix, with
     // nothing confidently saying the map still fits: stop trusting the old map.
-    if (votes.length >= 2 && against === 0) return { verdict: 'unresolved', mag };
+    if (sure.length >= 2 && against === 0) return { verdict: 'unresolved', mag };
     if (v.length < 4) return { verdict: 'unknown', mag };
     const sorted = v.slice().sort((a, b) => a - b);
     return { verdict: sorted[sorted.length >> 1] < 0.2 ? 'unresolved' : 'fine', mag };
