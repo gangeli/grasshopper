@@ -13,6 +13,8 @@ export interface DepthImage {
   invProj: ArrayLike<number>;
   /** Camera-to-world matrix (column-major 4x4), i.e. the tracked camera pose. */
   camToWorld: ArrayLike<number>;
+  /** Optional per-pixel range uncertainty (m), e.g. from motion stereo geometry. */
+  sigma?: Float32Array;
 }
 
 /**
@@ -60,7 +62,7 @@ const DIRS = [
 ];
 
 /** Lift every valid pixel to a world-space point. */
-export function depthImageToPoints(img: DepthImage, depth: Float32Array = img.depth): Vec3[] {
+export function depthImageToPoints(img: DepthImage, depth: Float32Array = img.depth, sigmas?: number[]): Vec3[] {
   const { w, h, invProj: P, camToWorld: M } = img;
   const out: Vec3[] = [];
   for (let y = 0; y < h; y++)
@@ -76,6 +78,7 @@ export function depthImageToPoints(img: DepthImage, depth: Float32Array = img.de
       const px = vx / vw, py = vy / vw, pz = vz / vw;
       const s = d / -pz;
       const cx = px * s, cy = py * s, cz = pz * s;
+      if (sigmas) sigmas.push(img.sigma ? img.sigma[y * w + x] : 0);
       out.push({
         x: M[0] * cx + M[4] * cy + M[8] * cz + M[12],
         y: M[1] * cx + M[5] * cy + M[9] * cz + M[13],

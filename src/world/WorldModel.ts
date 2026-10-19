@@ -269,7 +269,8 @@ export class WorldModel {
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
     }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
-    this.ingestDepth(eye, depthImageToPoints(img, this.filterEdges ? filterDiscontinuities(img) : img.depth));
+    const sig: number[] | undefined = img.sigma ? [] : undefined;
+    this.ingestDepth(eye, depthImageToPoints(img, this.filterEdges ? filterDiscontinuities(img) : img.depth, sig), 4.5, sig);
     return true;
   }
 
@@ -277,16 +278,18 @@ export class WorldModel {
    * Integrate a set of depth samples taken from `eye`. Points near the floor
    * mark the floor as observed; others mark occupancy and carve free space.
    */
-  ingestDepth(eye: Vec3, points: Vec3[], maxRange = 4.5): void {
+  ingestDepth(eye: Vec3, points: Vec3[], maxRange = 4.5, sigmas?: number[]): void {
     const g = this.grid;
     if (!g) return;
     const r = g.res;
-    for (const p of points) {
+    for (let q = 0; q < points.length; q++) {
+      const p = points[q];
       const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z);
       if (d < 0.1) continue;
       this.depthPoints++;
       const far = d > maxRange;
-      const sigma = this.depthSigmaA + this.depthSigmaB * d * d;
+      // The sensor's own per-pixel uncertainty when it has one (never more optimistic than the model).
+      const sigma = Math.max(this.depthSigmaA + this.depthSigmaB * d * d, sigmas ? sigmas[q] : 0);
       const dirY = (p.y - eye.y) / d;
       // Collect floor-height evidence from close, steeply downward readings.
       if (d < 1.5 && dirY < -0.4 && Math.abs(p.y - this.floorY) < 0.15) {

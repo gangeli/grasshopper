@@ -21,7 +21,7 @@ for (const [pos, name] of rooms.entries()) {
   const room = dressRoom(roomFromName(name), idx + 1);
   const w0 = new WorldModel();
   Object.assign(w0, JSON.parse(process.env.WORLD ?? '{}'));
-  const { world, eyes, frames, dropped, camera } = scanRoomHuman(room, { seed: idx + 3, noise: prof, seconds: secs, world: w0, cameraDepth: !!process.env.CAMERA, stereo: JSON.parse(process.env.STEREO ?? '{}') });
+  const { world, eyes, frames, dropped, camera } = scanRoomHuman(room, { seed: idx + 3, noise: prof, seconds: secs, world: w0, cameraDepth: !!process.env.CAMERA, cameraEvery: Number(process.env.CAMERA_EVERY ?? 2), stereo: JSON.parse(process.env.STEREO ?? '{}') });
   if (camera) console.log(`  camera: ${camera.frames} frames, ${camera.depthFrames} with stereo depth`);
   room.time = 1e6; // the walker has left
   const nav = new NavGrid(world, JSON.parse(process.env.NAV ?? '{}'));

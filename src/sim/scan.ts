@@ -95,11 +95,11 @@ export function defaultScanSpots(room: SimRoom): Vec3[] {
  */
 export function scanRoomHuman(
   room: SimRoom,
-  opts: { seed?: number; seconds?: number; noise?: NoiseName | NoiseProfile; world?: WorldModel; caps?: SensorCaps; cameraDepth?: boolean; camera?: Partial<CameraOptions>; stereo?: Partial<StereoOptions> } = {},
+  opts: { seed?: number; seconds?: number; noise?: NoiseName | NoiseProfile; world?: WorldModel; caps?: SensorCaps; cameraDepth?: boolean; camera?: Partial<CameraOptions>; stereo?: Partial<StereoOptions>; cameraEvery?: number } = {},
 ) {
   const world = opts.world ?? new WorldModel();
   const sensor = new SimSensor(room, opts.caps ?? { depth: true, planes: true, mesh: false }, opts.seed ?? 7, opts.noise ?? 'real');
-  const camera = opts.cameraDepth ? new CameraDepthSource(room, sensor, { camera: opts.camera, stereo: opts.stereo, seed: opts.seed }) : undefined;
+  const camera = opts.cameraDepth ? new CameraDepthSource(room, sensor, { camera: opts.camera, stereo: opts.stereo, seed: opts.seed, every: opts.cameraEvery }) : undefined;
   world.setFloor(sensor.floorEstimate(), { x: 0, y: 0, z: 0 });
   const path = humanScanPath(room, opts.seed ?? 7, opts.seconds ?? 40);
   const eyes: Vec3[] = [];

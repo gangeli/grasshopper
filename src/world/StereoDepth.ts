@@ -49,6 +49,20 @@ export interface StereoOptions {
   minTexture: number;
   /** Max relative depth uncertainty from the baseline geometry (σ_d / d) at 0.5px matching error. */
   maxRelSigma: number;
+  /**
+   * Minimum image gradient (grey levels/px, RMS over the window) along the
+   * epipolar direction. Texture that runs parallel to the epipolar line (floor
+   * plank seams, shelf edges) can't fix the depth: the aperture problem.
+   */
+  minEpiGrad: number;
+  /** Relative baseline error of the tracked poses (adds σ_d = this × d). */
+  poseRelErr: number;
+  /** Frames turning faster than this (rad/s, from the tracked poses) are too blurred to use. */
+  maxAngVel: number;
+  /** Fewest source frames for a depth map; matches seen by fewer are unreliable. */
+  minSources: number;
+  /** Depths beyond this are dropped from the output (the sweep still covers maxDepth). */
+  maxOutputDepth: number;
   /** Frames kept for source selection. */
   history: number;
 }
@@ -65,16 +79,27 @@ export const DEFAULT_STEREO: StereoOptions = {
   idealBaseline: 0.12,
   maxAngle: 0.45,
   maxAge: 1.5,
-  uniqueness: 0.12,
+  uniqueness: 0.3,
   maxCost: 0.3,
   minTexture: 2.5,
   maxRelSigma: 0.06,
+  minEpiGrad: 2,
+  poseRelErr: 0.015,
+  maxAngVel: 1.0,
+  minSources: 3,
+  maxOutputDepth: 3.5,
   history: 24,
 };
 
 interface Prepared extends StereoFrame {
+  /** Angular speed at this frame (rad/s), from the previous tracked pose. */
+  angVel: number;
   census: Uint32Array;
   texture: Float32Array;
+  /** Windowed structure tensor of the image gradient (sums over 5x5). */
+  sxx: Float32Array;
+  sxy: Float32Array;
+  syy: Float32Array;
   /** World-to-camera (column-major). */
   inv: Float64Array;
 }
@@ -88,7 +113,7 @@ export interface StereoResult {
   /** Uniqueness margin per output pixel (0 where rejected). */
   confidence: Float32Array;
   sources: number;
-  stats: { candidates: number; accepted: number; rejectedTexture: number; rejectedUnique: number; rejectedCost: number; rejectedGeometry: number };
+  stats: { candidates: number; accepted: number; rejectedTexture: number; rejectedUnique: number; rejectedCost: number; rejectedGeometry: number; rejectedAperture: number };
 }
 
 export class MotionStereo {
@@ -103,8 +128,17 @@ export class MotionStereo {
   }
 
   push(f: StereoFrame): void {
-    const { census, texture } = censusTransform(f.gray, f.w, f.h);
-    this.frames.push({ ...f, census, texture, inv: invertRigid(f.camToWorld) });
+    const { census, texture, sxx, sxy, syy } = censusTransform(f.gray, f.w, f.h);
+    const prev = this.frames[this.frames.length - 1];
+    let angVel = 0;
+    if (prev && f.t > prev.t) {
+      const A = prev.camToWorld, B = f.camToWorld;
+      // Rotation angle between the two poses from the trace of A^T·B.
+      let tr = 0;
+      for (let c = 0; c < 3; c++) tr += A[c * 4] * B[c * 4] + A[c * 4 + 1] * B[c * 4 + 1] + A[c * 4 + 2] * B[c * 4 + 2];
+      angVel = Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2))) / (f.t - prev.t);
+    }
+    this.frames.push({ ...f, angVel, census, texture, sxx, sxy, syy, inv: invertRigid(f.camToWorld) });
     if (this.frames.length > this.opts.history) this.frames.shift();
   }
 
@@ -113,7 +147,7 @@ export class MotionStereo {
     const O = this.opts, M = ref.camToWorld;
     const cands: { f: Prepared; score: number }[] = [];
     for (const f of this.frames) {
-      if (f === ref || ref.t - f.t > O.maxAge || f.t > ref.t) continue;
+      if (f === ref || ref.t - f.t > O.maxAge || f.t > ref.t || f.angVel > O.maxAngVel) continue;
       const S = f.camToWorld;
       const b = Math.hypot(S[12] - M[12], S[13] - M[13], S[14] - M[14]);
       if (b < O.minBaseline || b > O.maxBaseline) continue;
@@ -129,9 +163,9 @@ export class MotionStereo {
   /** Depth for the newest frame, or null if no usable sources (e.g. pure rotation). */
   compute(): StereoResult | null {
     const ref = this.frames[this.frames.length - 1];
-    if (!ref) return null;
+    if (!ref || ref.angVel > this.opts.maxAngVel) return null;
     const srcs = this.chooseSources(ref);
-    if (!srcs.length) return null;
+    if (srcs.length < this.opts.minSources) return null;
     const O = this.opts, { w, h, fx, fy, cx, cy } = ref;
     const D = O.depths;
     const rhoMin = 1 / O.maxDepth, rhoMax = 1 / O.minDepth;
@@ -202,8 +236,8 @@ export class MotionStereo {
     }
     // 3. Winner-takes-all on the output grid, with sub-sample refinement and checks.
     const st = O.step, gw = Math.floor(w / st), gh = Math.floor(h / st);
-    const depth = new Float32Array(gw * gh), confidence = new Float32Array(gw * gh);
-    const stats = { candidates: gw * gh, accepted: 0, rejectedTexture: 0, rejectedUnique: 0, rejectedCost: 0, rejectedGeometry: 0 };
+    const depth = new Float32Array(gw * gh), confidence = new Float32Array(gw * gh), sigma = new Float32Array(gw * gh);
+    const stats = { candidates: gw * gh, accepted: 0, rejectedTexture: 0, rejectedUnique: 0, rejectedCost: 0, rejectedGeometry: 0, rejectedAperture: 0 };
     for (let gy = 0; gy < gh; gy++)
       for (let gx = 0; gx < gw; gx++) {
         const u = gx * st + (st - 1) / 2, v = gy * st + (st - 1) / 2;
@@ -237,10 +271,14 @@ export class MotionStereo {
         const off = den > 1e-6 ? Math.max(-0.5, Math.min(0.5, (0.5 * (cm - cp)) / den)) : 0;
         const rho = rhoAt(best + off);
         const d = 1 / rho;
+        if (d > O.maxOutputDepth) {
+          stats.rejectedGeometry++;
+          continue;
+        }
         // Geometry: how many pixels does a small change of inverse depth move the
         // match in the best-placed source? Too few → the depth is not resolved.
         const rx = (u + 0.5 - cx) / fx, ry = -(v + 0.5 - cy) / fy;
-        let J = 0;
+        let J = 0, ex = 1, ey = 0;
         for (const R of rel) {
           const pr = (rr: number) => {
             const qx = R[0] * rx + R[4] * ry - R[8] + R[12] * rr;
@@ -249,21 +287,35 @@ export class MotionStereo {
             return [(fx * qx) / -qz, (-fy * qy) / -qz];
           };
           const a = pr(rho), b = pr(rho * 1.01);
-          J = Math.max(J, Math.hypot(a[0] - b[0], a[1] - b[1]) / (rho * 0.01));
+          const du = b[0] - a[0], dv = b[1] - a[1], m = Math.hypot(du, dv);
+          if (m / (rho * 0.01) > J) {
+            J = m / (rho * 0.01);
+            // Image y grows downwards; (du, -dv) in image axes.
+            ex = du / (m || 1);
+            ey = -dv / (m || 1);
+          }
         }
         const sigmaRho = 0.5 / Math.max(J, 1e-9);
         if ((sigmaRho * d * d) / d > O.maxRelSigma) {
           stats.rejectedGeometry++;
           continue;
         }
+        // Aperture: gradient energy along the epipolar direction (~ the same in the
+        // reference image for the small rotations between nearby frames).
+        const epi = Math.sqrt(Math.max(0, ex * ex * ref.sxx[i] + 2 * ex * ey * ref.sxy[i] + ey * ey * ref.syy[i]) / 25);
+        if (epi < O.minEpiGrad) {
+          stats.rejectedAperture++;
+          continue;
+        }
         depth[gy * gw + gx] = d;
+        sigma[gy * gw + gx] = Math.hypot(sigmaRho * d * d, O.poseRelErr * d);
         confidence[gy * gw + gx] = margin;
         stats.accepted++;
       }
     const tx = gw * st / 2 / fx, ty = gh * st / 2 / fy;
     const n = 0.1, f = 100;
     const invProj = [tx, 0, 0, 0, 0, ty, 0, 0, 0, 0, 0, (n - f) / (2 * f * n), 0, 0, -1, (f + n) / (2 * f * n)];
-    return { image: { w: gw, h: gh, depth, invProj, camToWorld: ref.camToWorld }, confidence, sources: srcs.length, stats };
+    return { image: { w: gw, h: gh, depth, invProj, camToWorld: ref.camToWorld, sigma }, confidence, sources: srcs.length, stats };
   }
 }
 
@@ -274,8 +326,9 @@ const clampI = (x: number, n: number) => (x < 0 ? 0 : x >= n ? n - 1 : x);
  * with the window mean rather than the (noisy) centre pixel. 24 bits, plus the
  * local contrast (std-dev) used to skip blank patches.
  */
-export function censusTransform(gray: Uint8Array, w: number, h: number): { census: Uint32Array; texture: Float32Array } {
+export function censusTransform(gray: Uint8Array, w: number, h: number): { census: Uint32Array; texture: Float32Array; sxx: Float32Array; sxy: Float32Array; syy: Float32Array } {
   const census = new Uint32Array(w * h), texture = new Float32Array(w * h);
+  const sxx = new Float32Array(w * h), sxy = new Float32Array(w * h), syy = new Float32Array(w * h);
   // 3x3 binomial blur: sensor noise flips fewer bits.
   const g = new Float32Array(w * h);
   for (let v = 1; v < h - 1; v++)
@@ -301,8 +354,21 @@ export function censusTransform(gray: Uint8Array, w: number, h: number): { censu
         }
       census[v * w + u] = code >>> 0;
       texture[v * w + u] = Math.sqrt(Math.max(0, s2 / 25 - m * m));
+      // Structure tensor over the window (central differences; image y down, so gy = up-gradient).
+      let a = 0, b = 0, c = 0;
+      for (let dv = -2; dv <= 2; dv++)
+        for (let du = -2; du <= 2; du++) {
+          const j = (v + dv) * w + u + du;
+          const gxx = (g[j + 1] - g[j - 1]) / 2, gyy = (g[j - w] - g[j + w]) / 2;
+          a += gxx * gxx;
+          b += gxx * gyy;
+          c += gyy * gyy;
+        }
+      sxx[v * w + u] = a;
+      sxy[v * w + u] = b;
+      syy[v * w + u] = c;
     }
-  return { census, texture };
+  return { census, texture, sxx, sxy, syy };
 }
 
 /** Inverse of a rigid column-major 4x4. */

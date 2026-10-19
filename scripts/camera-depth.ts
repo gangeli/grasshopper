@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { roomFromName } from '../src/sim/SimRoom';
 import { dressRoom, humanScanPath } from '../src/sim/Realism';
-import { SimSensor, type NoiseName } from '../src/sim/SimSensor';
+import { SimSensor, cameraBasis, type NoiseName } from '../src/sim/SimSensor';
 import { CameraSim } from '../src/sim/CameraSim';
 import { MotionStereo } from '../src/world/StereoDepth';
 // Quick look: render a few frames of a human scan and run motion stereo on them.
@@ -18,6 +18,10 @@ const path = humanScanPath(room, 3, 30);
 let k = 0;
 const errs: number[] = [];
 const signed: number[] = [];
+const floorErr: number[] = [];
+const bins = new Map<string, number[]>();
+const addBin = (k: string, e: number) => { if (!bins.has(k)) bins.set(k, [0, 0]); const b = bins.get(k)!; b[0]++; if (e > 0.25) b[1]++; };
+let floorPx = 0, floorShort = 0;
 let acc = 0, cand = 0;
 for (const step of path) {
   if (k >= nFrames) break;
@@ -39,6 +43,24 @@ for (const step of path) {
     const tr = frame.truthDepth![(gy * st + 1) * frame.w + gx * st + 1];
     fe.push(Math.abs(d - tr) / tr);
     signed.push((d - tr) / tr);
+    const ae = Math.abs(d - tr) / tr;
+    addBin('depth<' + (tr < 1 ? 1 : tr < 2 ? 2 : tr < 3 ? 3 : 9), ae);
+    addBin('angVel<' + (step.angVel < 0.5 ? 0.5 : step.angVel < 1 ? 1 : step.angVel < 2 ? 2 : 9), ae);
+    addBin('src' + res.sources, ae);
+    addBin('conf<' + (res.confidence[gy * image.w + gx] < 0.2 ? 0.2 : res.confidence[gy * image.w + gx] < 0.35 ? 0.35 : 1), ae);
+    // Is the true surface the floor? Height of the true hit point.
+    const { forward, right, up } = cameraBasis(step.cam);
+    const ty = Math.tan(step.cam.fovY / 2), tx = (ty * frame.w) / frame.h;
+    const nx = ((gx * st + 1.5) / frame.w) * 2 - 1, ny = 1 - ((gy * st + 1.5) / frame.h) * 2;
+    const dy = forward.y + right.y * nx * tx + up.y * ny * ty;
+    const yHit = step.cam.pos.y + dy * tr; // z-depth along forward, ray dir scaled so forward component = 1
+    if (yHit < 0.005) {
+      floorPx++;
+      floorErr.push((d - tr) / tr);
+      // Would the point land >2.5cm above the floor (phantom obstacle)?
+      const yEst = step.cam.pos.y + dy * d;
+      if (yEst > 0.025) floorShort++;
+    }
   }
   fe.sort((a, b) => a - b);
   errs.push(...fe);
@@ -59,5 +81,8 @@ for (const step of path) {
 }
 errs.sort((a, b) => a - b);
 signed.sort((a, b) => a - b);
+floorErr.sort((a, b) => a - b);
+for (const [k, [n, o]] of [...bins].sort()) console.log(`${k.padEnd(12)} n=${n} outliers>25% ${(o / n * 100).toFixed(1)}%`);
+console.log(`floor pixels ${floorPx}: signed p5 ${(floorErr[Math.floor(floorErr.length*0.05)]*100).toFixed(1)}% median ${(floorErr[floorErr.length>>1]*100).toFixed(2)}% p95 ${(floorErr[Math.floor(floorErr.length*0.95)]*100).toFixed(1)}%  phantom(>2.5cm above floor) ${(floorShort/Math.max(1,floorPx)*100).toFixed(1)}%`);
 console.log(`signed rel err: p10 ${(signed[Math.floor(signed.length*0.1)]*100).toFixed(2)}% median ${(signed[signed.length>>1]*100).toFixed(2)}% p90 ${(signed[Math.floor(signed.length*0.9)]*100).toFixed(2)}%`);
 console.log(`TOTAL density ${(acc / Math.max(1, cand) * 100).toFixed(1)}% median rel err ${(errs[errs.length >> 1] * 100).toFixed(2)}% p90 ${(errs[Math.floor(errs.length * 0.9)] * 100).toFixed(1)}% >10% ${(errs.filter((e) => e > 0.1).length / errs.length * 100).toFixed(1)}% >25% ${(errs.filter((e) => e > 0.25).length / errs.length * 100).toFixed(1)}%`);
