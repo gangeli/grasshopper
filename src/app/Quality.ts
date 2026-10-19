@@ -128,7 +128,8 @@ export class QualityGovernor {
     this.applyShells();
     const r = this.t.renderer;
     if (!r.xr.isPresenting) {
-      const pr = this.t.basePixelRatio * L.scale;
+      // A pixel-ratio change resizes the canvas (reallocates its buffers): only in two steps.
+      const pr = this.t.basePixelRatio * (L.scale >= 0.9 ? 1 : L.scale >= 0.7 ? 0.8 : 0.6);
       if (pr !== this.appliedPixelRatio) {
         this.appliedPixelRatio = pr;
         r.setPixelRatio(pr);
