@@ -11,14 +11,18 @@ const prof = (process.argv[2] ?? 'real') as NoiseName;
 const rooms = (process.argv[3] ?? 'living,bedroom,r3,r7,r11,r19,r23,r29,r31,r37,r41,r43').split(',');
 const secs = Number(process.argv[4] ?? 45);
 const f = (x: number) => x.toFixed(2), cm = (x: number) => (x * 100).toFixed(1).padStart(5), pc = (x: number) => (x * 100).toFixed(0).padStart(3) + '%';
-console.log(`profile=${prof} scan=${secs}s human path, dressed rooms`);
+console.log(`profile=${prof} scan=${secs}s human path, dressed rooms, depth from ${process.env.CAMERA ? 'CAMERA motion stereo' : 'depth-sensor model'}`);
 console.log('room     frames(drop) | surfErr med  p95  >5cm >10cm | falseFree missedLow | nodes coll(maxPen) unsup | paths coll(maxPen) jumps badLand | area');
 const agg = { ff: 0, coll: 0, pen: [] as number[], bad: 0, jumps: 0, area: 0, err95: 0, nodesColl: 0, nodes: 0, unsup: 0, gateRej: 0, gateAll: 0 };
-for (const [idx, name] of rooms.entries()) {
+// Seeds come from the room's place in the canonical list, so subsets (and parallel runs) see the same rooms.
+const CANON = ['living', 'bedroom', 'r3', 'r7', 'r11', 'r19', 'r23', 'r29', 'r31', 'r37', 'r41', 'r43'];
+for (const [pos, name] of rooms.entries()) {
+  const idx = CANON.includes(name) ? CANON.indexOf(name) : pos;
   const room = dressRoom(roomFromName(name), idx + 1);
   const w0 = new WorldModel();
   Object.assign(w0, JSON.parse(process.env.WORLD ?? '{}'));
-  const { world, eyes, frames, dropped } = scanRoomHuman(room, { seed: idx + 3, noise: prof, seconds: secs, world: w0 });
+  const { world, eyes, frames, dropped, camera } = scanRoomHuman(room, { seed: idx + 3, noise: prof, seconds: secs, world: w0, cameraDepth: !!process.env.CAMERA, stereo: JSON.parse(process.env.STEREO ?? '{}') });
+  if (camera) console.log(`  camera: ${camera.frames} frames, ${camera.depthFrames} with stereo depth`);
   room.time = 1e6; // the walker has left
   const nav = new NavGrid(world, JSON.parse(process.env.NAV ?? '{}'));
   const m = evaluateMap(world, nav, room, { paths: 100, eyes });

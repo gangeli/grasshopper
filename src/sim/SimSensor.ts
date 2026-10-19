@@ -121,7 +121,9 @@ export function worldNoise(x: number, y: number, z: number): number {
 /** Camera-to-world (column-major) for a camera with a tracking error applied. */
 export function poseMatrix(cam: SimCamera, pose: { yaw: number; pitch: number; x: number; y: number; z: number }): number[] {
   const { forward, right, up } = cameraBasis(cam);
-  const est = (v: Vec3) => applyPoseError(pose, { x: 0, y: 0, z: 0 }, v);
+  // Directions only rotate: the translation error must not leak into the basis.
+  const rot = { ...pose, x: 0, y: 0, z: 0 };
+  const est = (v: Vec3) => applyPoseError(rot, { x: 0, y: 0, z: 0 }, v);
   const X = est(right), Y = est(up), Zb = est({ x: -forward.x, y: -forward.y, z: -forward.z });
   const T = applyPoseError(pose, cam.pos, cam.pos);
   return [X.x, X.y, X.z, 0, Y.x, Y.y, Y.z, 0, Zb.x, Zb.y, Zb.z, 0, T.x, T.y, T.z, 1];
@@ -153,11 +155,14 @@ export class SimSensor {
   private detectedPlanes = new Map<string, PlaneInput>();
   private texturelessPlanes = new Set<string>();
   private allPlanes: PlaneInput[];
+  /** Unperturbed planes: detection depends on whether the real surface is seen. */
+  private truePlanes: PlaneInput[];
   readonly noise: NoiseProfile;
   constructor(readonly room: SimRoom, readonly caps: SensorCaps = { depth: true, planes: true, mesh: false }, seed = 7, noise: NoiseProfile | NoiseName = 'ideal') {
     this.rng = new Rng(seed);
     this.noise = typeof noise === 'string' ? NOISE_PROFILES[noise] : noise;
-    this.allPlanes = buildPlanes(room).map((p) => this.perturbPlane(p));
+    this.truePlanes = buildPlanes(room);
+    this.allPlanes = this.truePlanes.map((p) => this.perturbPlane(p));
     // Planes on texture-less surfaces (blank walls, bare floors) are harder to detect.
     for (const p of this.allPlanes) {
       const m = p.id === 'floor' ? room.floorMaterial : room.boxes[Number(p.id.replace(/\D+(\d+).*/, '$1'))]?.material;
@@ -300,9 +305,21 @@ export class SimSensor {
    * smoother frame to frame than the depth-registration jitter modelled in
    * depthImage(), so camera frames get a fraction of that jitter.
    */
-  trackedCamToWorld(cam: SimCamera, jitterScale = 0.4): number[] {
-    return poseMatrix(cam, this.stepPoseError(jitterScale));
+  trackedCamToWorld(cam: SimCamera, jitterScale = 0.1): number[] {
+    const j = this.stepPoseError(jitterScale);
+    // VIO error drifts smoothly (the IMU integrates over many frames): low-pass
+    // the random-walk drift, keep relocalisation jumps instantaneous.
+    const s = this.smoothErr, e = this.poseErr, a = 0.03;
+    for (const k of ['yaw', 'pitch', 'x', 'y', 'z'] as const) s[k] += (e[k] - s[k]) * a;
+    return poseMatrix(cam, {
+      yaw: s.yaw + (j.yaw - e.yaw),
+      pitch: s.pitch + (j.pitch - e.pitch),
+      x: s.x + (j.x - e.x),
+      y: s.y + (j.y - e.y),
+      z: s.z + (j.z - e.z),
+    });
   }
+  private smoothErr = { yaw: 0, pitch: 0, x: 0, y: 0, z: 0 };
 
   /** Floor height as measured by the placement hit-test (with error). */
   floorEstimate(): number {
@@ -337,10 +354,17 @@ export class SimSensor {
   /** A sudden pose correction (loop closure / relocalisation). */
   private relocalise() {
     const N = this.noise, e = this.poseErr;
-    e.x += this.gauss() * (N.relocPos ?? 0);
-    e.z += this.gauss() * (N.relocPos ?? 0);
-    e.y += this.gauss() * (N.relocPos ?? 0) * 0.3;
-    e.yaw += this.gauss() * (N.relocRot ?? 0);
+    const dx = this.gauss() * (N.relocPos ?? 0), dz = this.gauss() * (N.relocPos ?? 0), dy = this.gauss() * (N.relocPos ?? 0) * 0.3, dyaw = this.gauss() * (N.relocRot ?? 0);
+    e.x += dx;
+    e.z += dz;
+    e.y += dy;
+    e.yaw += dyaw;
+    // Jumps are instantaneous for the camera pose too.
+    const sm = this.smoothErr;
+    sm.x += dx;
+    sm.z += dz;
+    sm.y += dy;
+    sm.yaw += dyaw;
   }
 
   private stepPoseError(jitterScale = 1) {
@@ -362,9 +386,9 @@ export class SimSensor {
 
   /** Planes become "detected" once part of them has been seen; they then persist. */
   planes(cam: SimCamera): PlaneInput[] {
-    for (const p of this.allPlanes) {
+    for (const [q, p] of this.allPlanes.entries()) {
       if (this.detectedPlanes.has(p.id)) continue;
-      const samples = planeSamples(p);
+      const samples = planeSamples(this.truePlanes[q]);
       let seen = 0;
       for (const s of samples) {
         const lifted = { x: s.x + p.normal.x * 0.01, y: s.y + p.normal.y * 0.01, z: s.z + p.normal.z * 0.01 };
