@@ -39,7 +39,7 @@ export class SimMode {
   private ui: GameUI;
   private keys = new Set<string>();
   private lastT = 0;
-  private drag: { x: number; y: number; id: number; move: boolean } | null = null;
+  private drag: { x: number; y: number; x0: number; y0: number; t0: number; id: number; move: boolean; travel: number } | null = null;
   private joy: { x: number; y: number } = { x: 0, y: 0 };
   private roomGroup = new THREE.Group();
   frames = 0;
@@ -68,6 +68,9 @@ export class SimMode {
       this.sim.sensing = false;
     } else {
       this.buildRoom(this.sim.room);
+      // Look a little further down than the simulator's default, so Hopper
+      // (1m ahead) appears mid-screen rather than behind the activities bar.
+      if (!this.bot) this.sim.cam.pitch = -0.75;
       stage.scene.add(this.roomGroup);
       stage.scene.background = new THREE.Color(0x202430);
     }
@@ -148,12 +151,12 @@ export class SimMode {
     sim.step(dt);
   }
 
-  /** Camera mode: where the middle of the view meets the floor (1.2–2.5m away), so Hopper appears on screen. */
+  /** Camera mode: where the middle of the view meets the floor (1.2–2.2m away), so Hopper appears on screen. */
   private spawnPoint() {
     const c = this.sim.cam;
     const { forward } = cameraBasis(c);
     const fl = Math.hypot(forward.x, forward.z) || 1;
-    const d = forward.y < -0.1 ? clamp(c.pos.y / -forward.y * fl, 1.2, 2.5) : 2;
+    const d = forward.y < -0.1 ? clamp(c.pos.y / -forward.y * fl, 1.2, 2.2) : 2;
     return { x: c.pos.x + (forward.x / fl) * d, y: 0, z: c.pos.z + (forward.z / fl) * d };
   }
 
@@ -198,12 +201,13 @@ export class SimMode {
       this.voice.unlock();
       // Left third of a touch screen is a virtual joystick.
       const move = !this.camera && e.pointerType === 'touch' && e.clientX < window.innerWidth * 0.33;
-      this.drag = { x: e.clientX, y: e.clientY, id: e.pointerId, move };
+      this.drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), id: e.pointerId, move, travel: 0 };
       canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener('pointermove', (e) => {
       if (!this.drag || e.pointerId !== this.drag.id) return;
       const dx = e.clientX - this.drag.x, dy = e.clientY - this.drag.y;
+      this.drag.travel = Math.max(this.drag.travel, Math.hypot(e.clientX - this.drag.x0, e.clientY - this.drag.y0));
       if (this.drag.move) {
         this.joy = { x: clamp(dx / 60, -1, 1), y: clamp(-dy / 60, -1, 1) };
         return;
@@ -216,20 +220,31 @@ export class SimMode {
       c.pitch = clamp(c.pitch - dy * 0.005, -1.4, 1.2);
     });
     const end = (e: PointerEvent) => {
-      if (this.drag && e.pointerId === this.drag.id) {
-        if (this.drag.move) this.joy = { x: 0, y: 0 };
+      const d = this.drag;
+      if (d && e.pointerId === d.id) {
+        if (d.move) this.joy = { x: 0, y: 0 };
         this.drag = null;
+        return d;
       }
+      return null;
     };
     canvas.addEventListener('pointerup', (e) => {
-      end(e);
-      // Click/tap on the pet.
-      const ndc = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(ndc, this.stage.camera);
-      this.sim.game.tapAt(ray.ray.origin, ray.ray.direction);
+      const d = end(e);
+      // A tap (not a drag to look around, not the joystick): on Hopper, or a
+      // spot for Hopper to go to.
+      if (!d || d.move || d.travel > 12 || performance.now() - d.t0 > 700) return;
+      this.tapScreen(e.clientX, e.clientY);
     });
     canvas.addEventListener('pointercancel', end);
+  }
+
+  /** A tap at a screen point (CSS px): the game decides what it means. */
+  tapScreen(x: number, y: number) {
+    const ndc = new THREE.Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    this.stage.camera.updateMatrixWorld();
+    ray.setFromCamera(ndc, this.stage.camera);
+    return this.sim.game.tap(ray.ray.origin, ray.ray.direction);
   }
 
   private buildRoom(room: SimRoom) {
