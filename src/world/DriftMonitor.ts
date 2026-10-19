@@ -69,9 +69,37 @@ export class DriftMonitor {
     }
     this.inWindow = inEvent;
     this.inEvent = inEvent && !this.contradicted;
-    if (this.inEvent) return this.afterEvent(t);
-    if (inEvent) return false; // contradicted: waiting for the verdict to be taken
-    return this.drifting(t);
+    if (this.task) return this.resume(); // the previous check is still running
+    if (this.inEvent) this.task = this.afterEvent(t);
+    else if (inEvent) return false; // contradicted: waiting for the verdict to be taken
+    else this.task = this.drifting(t);
+    return this.resume();
+  }
+
+  /**
+   * Milliseconds of searching per call: checks are resumable, so in the app
+   * they can be spread over several frames instead of stalling one. Infinite
+   * (the default) runs each check to completion right away.
+   */
+  budgetMs = Infinity;
+  private task: Generator<void, boolean, void> | null = null;
+  /** A check is in progress (call resume() each frame). */
+  get busy(): boolean {
+    return this.task !== null;
+  }
+  /** Continue a check in progress; true if it finished by realigning the map. */
+  resume(): boolean {
+    const task = this.task;
+    if (!task) return false;
+    const until = Number.isFinite(this.budgetMs) ? performance.now() + this.budgetMs : Infinity;
+    for (;;) {
+      const r = task.next();
+      if (r.done) {
+        this.task = null;
+        return r.value;
+      }
+      if (performance.now() >= until) return false;
+    }
   }
   private seenEvent = -Infinity;
   /** Inside the post-loss window (even if the event was already settled early). */
@@ -92,9 +120,9 @@ export class DriftMonitor {
    * over a wide search range, and if two looks agree, realign everything
    * since the loss.
    */
-  private afterEvent(t: number): boolean {
+  private *afterEvent(t: number): Generator<void, boolean, void> {
     const O = this.opts;
-    const m = this.world.estimateMisalignment({ maxShift: 0.5, maxYaw: 0.1, snapshot: 'event' });
+    const m = yield* this.world.misalignmentSearch({ maxShift: 0.5, maxYaw: 0.1, snapshot: 'event' });
     this.last = { t, m, fired: false };
     if (!m) {
       this.note('event: no estimate yet');
@@ -180,10 +208,10 @@ export class DriftMonitor {
     return { verdict: sorted[sorted.length >> 1] < 0.2 ? 'unresolved' : 'fine', mag };
   }
 
-  private drifting(t: number): boolean {
+  private *drifting(t: number): Generator<void, boolean, void> {
     const O = this.opts;
     const maxShift = O.maxDriftShift;
-    const m = this.world.estimateMisalignment({ maxShift, maxYaw: 0.05 });
+    const m = yield* this.world.misalignmentSearch({ maxShift, maxYaw: 0.05 });
     this.last = { t, m, fired: false };
     if (!m) {
       this.pending = null;
@@ -199,7 +227,7 @@ export class DriftMonitor {
     }
     // Must also hold against an older snapshot of the map: real drift moves
     // everything the same way, a person walking by doesn't.
-    const m2 = this.world.estimateMisalignment({ maxShift, maxYaw: 0.05, snapshot: 'oldest' });
+    const m2 = yield* this.world.misalignmentSearch({ maxShift, maxYaw: 0.05, snapshot: 'oldest' });
     if (!m2 || m2.snapT === m.snapT || displacement(m, m2) > O.agree) {
       this.pending = null;
       this.note(`second snapshot ${!m2 ? 'missing' : m2.snapT === m.snapT ? 'same' : `disagrees ${(displacement(m, m2) * 100).toFixed(0)}cm`} (mag ${(mag * 100).toFixed(0)}cm)`);

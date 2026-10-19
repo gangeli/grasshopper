@@ -370,7 +370,12 @@ export class NavGrid {
    * Dijkstra/A* over walk + jump edges. If `goal` is NONE, computes a full
    * cost field up to maxCost (used to score hiding spots by reachability).
    */
-  search(start: number, goal: number = NONE, maxCost = 60): { cost: Float32Array; prev: Int32Array } {
+  /**
+   * Dijkstra / A* (towards `goal`) over walk steps and, unless `jumps` is
+   * false, jump links (whose arcs are computed lazily and are the expensive
+   * part on freshly built graphs).
+   */
+  search(start: number, goal: number = NONE, maxCost = 60, jumps = true): { cost: Float32Array; prev: Int32Array } {
     const n = this.count;
     const cost = new Float32Array(n).fill(Infinity);
     const prev = new Int32Array(n).fill(NONE);
@@ -403,7 +408,7 @@ export class NavGrid {
           heap.push(b, nc + h(b));
         }
       }
-      if (this.edgeFlag[a]) {
+      if (jumps && this.edgeFlag[a]) {
         const pa = this.pos(a);
         for (const b of this.jumps(a)) {
           if (closed[b]) continue;

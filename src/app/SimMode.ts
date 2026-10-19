@@ -54,6 +54,8 @@ export class SimMode {
     this.sim = new Simulation({ room: this.camera ? openFloor() : opts.room, seed: opts.seed, game: this.camera ? { roamDistance: 1.8, eyeHeight: 1.35 } : undefined });
     this.bot = opts.bot ? new SeekerBot(this.sim) : null;
     this.ui = new GameUI(this.sim, hud, voice);
+    // Spread drift checks over frames (a few ms each) instead of stalling one frame.
+    this.sim.game.health.drift.budgetMs = 3;
     stage.scene.add(this.sim.rig.group);
     stage.setPetRig(this.sim.rig);
     const perf = stage.perf;

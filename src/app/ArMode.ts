@@ -128,6 +128,8 @@ export class ArMode {
 
   constructor(readonly stage: Stage, readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     this.ui = new GameUI(stack, hud, voice);
+    // Spread drift checks over frames (a few ms each) instead of stalling one frame.
+    stack.game.health.drift.budgetMs = 3;
     // Profiler (?perf=1): the overlay must live in the dom-overlay root to show in AR.
     const perf = stage.perf;
     perf.attachOverlay(hud.root);

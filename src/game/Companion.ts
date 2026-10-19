@@ -5,6 +5,10 @@ import type { PetController } from '../pet/PetController';
 import { NAV_NONE, type NavGrid, type Waypoint } from '../world/NavGrid';
 import type { ViewPose } from './Visibility';
 
+/** Path search limits (travel cost ≈ metres): follow targets and explore trips are close by. */
+const FOLLOW_MAX_COST = 8;
+const EXPLORE_MAX_COST = 3;
+
 /**
  * "Walk" activity: what Hopper does between rounds. Hopper keeps the player
  * company: it stays a metre or two in front of (and a little beside) where
@@ -198,16 +202,22 @@ export class Companion {
     const s = standingNode(nav, pet.pos);
     let t = nav.nearest(want, 0.2);
     if (s === NAV_NONE || t === NAV_NONE) return false;
-    let path = nav.pathBetween(s, t);
-    if (!path) {
+    // One bounded search (follow targets are a few metres away; an unbounded
+    // search for an unreachable target would sweep the whole map, every replan).
+    // Following across the floor needs no jumps (their arcs are costly to work
+    // out on a freshly rebuilt graph): only consider them when Hopper is up on
+    // something or the spot is.
+    const fy = this.host.floorY, step = nav.p.maxStep;
+    const needJumps = Math.abs(nav.ny[s] - fy) > step || Math.abs(nav.ny[t] - fy) > step;
+    const { cost, prev } = nav.search(s, t, FOLLOW_MAX_COST, needJumps);
+    if (s !== t && prev[t] === NAV_NONE) {
       // No way there yet (the floor in between isn't mapped): get as close as we can.
-      t = this.closestReachable(nav, s, want);
+      t = this.closestReachable(nav, cost, want);
       if (t === NAV_NONE) return false;
       want = nav.pos(t);
       if (Math.hypot(want.x - pet.pos.x, want.z - pet.pos.z) < 0.35) return false;
-      path = nav.pathBetween(s, t);
-      if (!path) return false;
     }
+    const path = nav.reconstruct(prev, s, t);
     // Already on the way there: don't restart the walk.
     if (pet.moving && this.goal && Math.hypot(want.x - this.goal.x, want.z - this.goal.z) < 0.3) return true;
     const far = Math.hypot(want.x - pet.pos.x, want.z - pet.pos.z);
@@ -226,9 +236,8 @@ export class Companion {
     return true;
   }
 
-  /** The floor node reachable from `s` that is closest to `p` (NAV_NONE if none is closer than 3m). */
-  private closestReachable(nav: NavGrid, s: number, p: Vec3): number {
-    const { cost } = nav.search(s, NAV_NONE, 15);
+  /** Of the floor nodes a search reached (finite `cost`), the closest to `p` (NAV_NONE if none is closer than 3m). */
+  private closestReachable(nav: NavGrid, cost: Float32Array, p: Vec3): number {
     const g = nav.g, fy = this.host.floorY;
     let best = NAV_NONE, bd = 3;
     for (let q = 0; q < nav.count; q++) {
@@ -276,8 +285,11 @@ export class Companion {
       }
     }
     if (best === NAV_NONE) return false;
-    const path = nav.pathBetween(s, best);
-    if (!path || path.length < 2) return false;
+    // Trips are short (≤ 2.2m below): no need to search further than that.
+    const { prev } = nav.search(s, best, EXPLORE_MAX_COST, wantHop || Math.abs(nav.ny[s] - this.host.floorY) > nav.p.maxStep);
+    if (prev[best] === NAV_NONE) return false;
+    const path = nav.reconstruct(prev, s, best);
+    if (path.length < 2) return false;
     // Short trips only, at most one jump each way.
     let len = 0, jumps = 0;
     for (let i = 1; i < path.length; i++) {

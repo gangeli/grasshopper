@@ -47,6 +47,24 @@ export const ASSUMED_FREE = -1;
 export const ASSUMED_SOLID = 15;
 const HOLLOW_LABELS = new Set(['table', 'desk', 'bed', 'shelf']);
 
+export interface MisalignmentOptions {
+  frames?: number;
+  maxShift?: number;
+  maxYaw?: number;
+  snapshot?: 'newest' | 'oldest' | 'event';
+}
+export interface Misalignment {
+  dx: number;
+  dz: number;
+  dyaw: number;
+  pivot: Vec3;
+  base: number;
+  best: number;
+  n: number;
+  degenerate: boolean;
+  snapT: number;
+}
+
 export class WorldModel {
   grid: VoxelGrid | null = null;
   floorY = 0;
@@ -789,7 +807,21 @@ export class WorldModel {
    */
   /** Debug hook: called with the scoring function of each misalignment search. */
   debugScore: ((score: (dx: number, dz: number, yaw: number) => number, pts: number[], data: Int8Array) => void) | null = null;
-  estimateMisalignment(opts: { frames?: number; maxShift?: number; maxYaw?: number; snapshot?: 'newest' | 'oldest' | 'event' } = {}): { dx: number; dz: number; dyaw: number; pivot: Vec3; base: number; best: number; n: number; degenerate: boolean; snapT: number } | null {
+  estimateMisalignment(opts: MisalignmentOptions = {}): Misalignment | null {
+    const it = this.misalignmentSearch(opts);
+    for (;;) {
+      const r = it.next();
+      if (r.done) return r.value;
+    }
+  }
+
+  /**
+   * estimateMisalignment as a resumable search: it pauses (yields) between
+   * steps so a caller can spread it over several frames. If the map or its
+   * frame changes while paused, the search gives up (returns null) rather
+   * than mix old and new data.
+   */
+  *misalignmentSearch(opts: MisalignmentOptions = {}): Generator<void, Misalignment | null, void> {
     const g = this.grid;
     if (!g || !this.replay.length) return null;
     let frames = this.replay.slice(-(opts.frames ?? 10));
@@ -910,6 +942,8 @@ export class WorldModel {
       return sc;
     };
     if (this.debugScore) this.debugScore(score, pts, data);
+    const epoch = this.epoch, frameV = this.frameVersion, snapT = snap.t;
+    const stale = () => this.grid !== g || this.epoch !== epoch || this.frameVersion !== frameV || snap.t !== snapT || snap.data !== data;
     const maxShift = opts.maxShift ?? 0.5, maxYaw = opts.maxYaw ?? 0.1;
     const used = Math.ceil(n / stride);
     // Prefer small corrections among near-ties: a support penalty of 3% of the
@@ -921,14 +955,21 @@ export class WorldModel {
       const sc = score(dx, dz, yaw), v = sc - pen(dx, dz, yaw);
       if (v > best.v) best = { dx, dz, dyaw: yaw, s: sc, v };
     };
-    for (let yaw = -maxYaw; yaw <= maxYaw + 1e-9; yaw += 0.025)
-      for (let dx = -maxShift; dx <= maxShift + 1e-9; dx += 0.05)
+    for (let yaw = -maxYaw; yaw <= maxYaw + 1e-9; yaw += 0.025) {
+      for (let dx = -maxShift; dx <= maxShift + 1e-9; dx += 0.05) {
         for (let dz = -maxShift; dz <= maxShift + 1e-9; dz += 0.05) consider(dx, dz, yaw);
+        yield;
+        if (stale()) return null;
+      }
+    }
     // Refine around the best.
     const c0 = { ...best };
-    for (let yaw = c0.dyaw - 0.0125; yaw <= c0.dyaw + 0.0126; yaw += 0.00625)
+    for (let yaw = c0.dyaw - 0.0125; yaw <= c0.dyaw + 0.0126; yaw += 0.00625) {
       for (let dx = c0.dx - 0.025; dx <= c0.dx + 0.026; dx += 0.0125)
         for (let dz = c0.dz - 0.025; dz <= c0.dz + 0.026; dz += 0.0125) consider(dx, dz, yaw);
+      yield;
+      if (stale()) return null;
+    }
     // Degenerate geometry (one long wall, a plain floor edge): the fit can
     // slide without losing support, so the correction isn't really known.
     // Require the support to drop when the correction is nudged every way.

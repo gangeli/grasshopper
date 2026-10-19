@@ -44,6 +44,8 @@ export function runSoak(room: string, seed: number, seconds: number, opts: Parti
   const rng = new Rng(seed * 101 + 7);
   const sim = new Simulation({ seed, noise: 'real', ...opts, room: dressRoom(roomFromName(room), seed) });
   const bot = new SeekerBot(sim);
+  // DRIFT_BUDGET=3: spread drift checks over frames as the app does.
+  if (process.env.DRIFT_BUDGET) sim.game.health.drift.budgetMs = Number(process.env.DRIFT_BUDGET);
   bot.continuous = true;
   bot.timeout = 120;
   const rep: SoakReport = { room, seed, seconds, rounds: 0, faults: [], recoveries: [], longestStall: 0, insideTime: 0, longestInside: 0, insideVisibleTime: 0, nanFrames: 0, finalFrameError: 0, finalFloorError: 0, mapPrecision: 0, errors: [], driftTrace: [], precisionTimeline: [] };

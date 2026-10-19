@@ -138,6 +138,8 @@ export class HealthMonitor {
     if (!w.grid) return;
     // Cheap checks every frame; the rest ~3x/s.
     this.checkPetNumbers(view);
+    // A drift check spread over several frames (see DriftMonitor.budgetMs) continues every frame.
+    if (this.drift.busy && this.drift.resume()) this.onRealigned();
     if (this.t - this.lastCheck < 0.33) return;
     this.lastCheck = this.t;
     this.checkDrift();
@@ -150,6 +152,14 @@ export class HealthMonitor {
   }
 
   // --- Map frame -------------------------------------------------------------------
+  private onRealigned() {
+    this.lastRealign = this.t;
+    this.conflictSince = null;
+    const m = this.drift.last?.m;
+    this.report('drift', m ? `realigned by ${(Math.hypot(m.dx, m.dz) * 100).toFixed(0)}cm, ${((m.dyaw * 180) / Math.PI).toFixed(1)}°` : 'realigned');
+    this.game.mapChanged();
+  }
+
   private checkDrift() {
     const w = this.world;
     const wasInEvent = this.drift.inEvent;
@@ -186,13 +196,7 @@ export class HealthMonitor {
       this.report('petReanchored', 'after a tracking loss there was too little depth to check the map: pet brought back into view');
       this.game.reanchorPet();
     }
-    if (fixed) {
-      this.lastRealign = this.t;
-      this.conflictSince = null;
-      const m = this.drift.last?.m;
-      this.report('drift', m ? `realigned by ${(Math.hypot(m.dx, m.dz) * 100).toFixed(0)}cm, ${((m.dyaw * 180) / Math.PI).toFixed(1)}°` : 'realigned');
-      this.game.mapChanged();
-    }
+    if (fixed) this.onRealigned();
     // Sustained contradictions that no consistent realignment explains: the
     // map has gone bad (e.g. it absorbed a big drift before we caught it).
     if (w.conflictRate > this.opts.conflictHigh) this.conflictSince ??= this.t;
