@@ -299,8 +299,9 @@ const ACTIONS: Record<ActionName, ActionFn> = {
     p.antLift = 0.7;
     p.antSpread = 0.4;
     p.earLift = 0.8;
+    // A startled buzz that settles into a held flare (a steady flap reads as flicker).
     p.wingSpread = 1;
-    p.wingFlap = 0.6;
+    p.wingFlap = 0.6 * Math.exp(-t * 5);
     p.tailLift = 0.6;
     p.glow = 1;
   },
@@ -588,7 +589,9 @@ export class Animator {
       // At rest the wings lie folded back along the shoulders. Spreading raises
       // them in the plane of the back (so they stay face-on and peek above the
       // shoulders) with a little outward swing.
-      set(`wing${side}` as BoneName, 0.1 - P.wingSpread * 0.3, -s * (P.wingSpread * 0.35 + flap * 0.3), s * (P.wingSpread * 0.6 + flap * 0.7));
+      // (Tuned so the spread membrane still faces back and out rather than
+      // turning edge-on; a horizontal wing reads as a flickering hairline.)
+      set(`wing${side}` as BoneName, 0.1 + P.wingSpread * 0.4, -s * (P.wingSpread * 0.55 + flap * 0.3), s * (P.wingSpread * 0.3 + flap * 0.7));
     }
     // Tail chain: curl, lift and sway distributed along the bones, with spring lag.
     for (let q = 0; q < 6; q++) {

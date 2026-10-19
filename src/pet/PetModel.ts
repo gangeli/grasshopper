@@ -32,9 +32,9 @@ export interface PetPalette {
 }
 
 export const PALETTES: Record<string, PetPalette> = {
-  mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0x9ff3ff },
+  mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0xb4b8ff },
   plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0 },
-  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffe39a },
+  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffb4d4 },
 };
 
 export interface PetRig {
@@ -111,15 +111,21 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // Ears are thin: backlight glows through them (fur shells add the same term).
   skin.onBeforeCompile = (shader) => addTranslucency(shader);
   skin.customProgramCacheKey = () => 'skin-thin';
-  const glowMaterial = new THREE.MeshStandardMaterial({ color: pal.glow, emissive: pal.glow, emissiveIntensity: 0.9, roughness: 0.3 });
+  // The emissive is a deeper, more saturated version of the glow colour, so the
+  // bulbs stay coloured instead of tone-mapping to pale cream when they light up.
+  const glowHsl = new THREE.Color(pal.glow).getHSL({ h: 0, s: 0, l: 0 });
+  const glowDeep = new THREE.Color().setHSL(glowHsl.h, Math.min(1, glowHsl.s * 1.1 + 0.1), glowHsl.l * 0.78);
+  const glowMaterial = new THREE.MeshStandardMaterial({ color: pal.glow, emissive: glowDeep, emissiveIntensity: 0.9, roughness: 0.3 });
   // Glowing orbs are brighter in the middle than at the rim, which gives them volume.
   glowMaterial.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <emissivemap_fragment>',
       `#include <emissivemap_fragment>
       float orb = abs(dot(normalize(vNormal), normalize(vViewPosition)));
-      totalEmissiveRadiance *= mix(0.35, 1.2, orb * orb);
-      diffuseColor.rgb *= mix(0.6, 1.0, orb);`,
+      // A hot, paler core inside a saturated shell.
+      totalEmissiveRadiance *= mix(0.45, 1.15, orb * orb);
+      totalEmissiveRadiance += emissive * 0.35 * pow(orb, 6.0);
+      diffuseColor.rgb *= mix(0.55, 1.0, orb);`,
     );
   };
   glowMaterial.customProgramCacheKey = () => 'glow-orb';
@@ -154,13 +160,27 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     color: pal.wing,
     map: wingTexture(new THREE.Color(pal.bodyDark)),
     transparent: true,
-    opacity: 0.95,
-    roughness: 0.15,
+    opacity: 1,
+    roughness: 0.2,
     side: THREE.DoubleSide,
     iridescence: 1,
-    iridescenceIOR: 1.6,
+    iridescenceIOR: 1.5,
+    iridescenceThicknessRange: [250, 500],
+    sheen: 0.6,
+    sheenColor: new THREE.Color(pal.wing),
     depthWrite: false,
   });
+  // Seen edge-on a membrane would vanish into a flickering hairline; keep a
+  // little more opacity at grazing angles, like light skimming a real wing.
+  wingMat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <alphamap_fragment>',
+      `#include <alphamap_fragment>
+      float wingGraze = 1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition)));
+      diffuseColor.a = min(1.0, diffuseColor.a + 0.35 * pow(wingGraze, 3.0));`,
+    );
+  };
+  wingMat.customProgramCacheKey = () => 'wing-graze';
   const clawMat = new THREE.MeshStandardMaterial({ color: pal.belly, roughness: 0.4 });
   const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, clawMat, hornMat];
 
@@ -723,7 +743,7 @@ function wingTexture(vein: THREE.Color): THREE.DataTexture {
 
 function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
   const c = new THREE.Color();
-  const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.25);
+  const veinC = vein.clone().lerp(new THREE.Color(1, 1, 1), 0.1);
   return dataTexture(128, (u, v) => {
     const a = Math.atan2(v - 0.5, u + 0.02);
     const d = Math.hypot(u, v - 0.5);
@@ -731,10 +751,12 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
     const radial = Math.pow(Math.max(0, 1 - Math.abs(Math.sin(a * 7)) / 0.12), 1.5) * smooth((0.95 - d) / 0.4);
     const cross = Math.max(0, 1 - Math.abs(d - 0.45 - 0.05 * Math.sin(a * 5)) / 0.018);
     const k = Math.min(1, radial + cross);
-    // Membrane is lighter (and more see-through) away from the root.
-    c.setRGB(0.85, 0.85, 0.85).multiplyScalar(0.9 + 0.1 * smooth(d / 0.8));
-    c.lerp(veinC, k * 0.85);
-    return [c.r, c.g, c.b, 0.42 + 0.5 * k + 0.25 * (1 - smooth(d / 0.35))];
+    // Membrane: richer colour at the root, lighter and more see-through towards
+    // the edge, with a darker rim so the outline reads against any background.
+    c.setRGB(0.72, 0.72, 0.72).lerp(new THREE.Color(1, 1, 1), smooth(d / 0.9));
+    const rim = smooth((d - 0.78) / 0.2);
+    c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35));
+    return [c.r, c.g, c.b, Math.min(1, 0.55 + 0.4 * k + 0.25 * (1 - smooth(d / 0.35)) + 0.2 * rim)];
   });
 }
 
