@@ -122,8 +122,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   glowMaterial.customProgramCacheKey = () => 'glow-orb';
   const lidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.1);
   const sclera = scleraMaterial(lidColor);
-  // Polygon offset keeps the iris cap from z-fighting with the eyeball at its rim.
-  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye), roughness: 0.4, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye), roughness: 0.4 });
   const pupilMat = new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.3 });
   const corneaMat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
@@ -290,6 +289,8 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
   const headBone = bones.head;
   const toHead = (v: THREE.Vector3) => v.clone().sub(abs.head);
   const R = EYE_RADIUS;
+  // Lid shell radius (eye radii): clear of the cornea and catchlights (which reach ~1.05).
+  const LID_R = 1.07;
   const mkEye = (side: 'L' | 'R') => {
     const s = side === 'L' ? 1 : -1;
     const eye = new THREE.Group();
@@ -306,7 +307,9 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     eye.add(ball);
     const iris = new THREE.Group();
     eye.add(iris);
-    const irisCap = new THREE.Mesh(capGeometry(R * 1.003, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial));
+    // Lifted just enough off the eyeball not to z-fight at its rim (a polygon
+    // offset would push it through closed lids at grazing angles).
+    const irisCap = new THREE.Mesh(capGeometry(R * 1.006, 0.6, true), pupilIrisMaterial(m.irisMat as THREE.MeshStandardMaterial));
     iris.add(irisCap);
     // The pupil is painted by the iris shader; this node only carries its size
     // (the Animator scales it), read back just before the iris draws.
@@ -333,7 +336,7 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
       eye.add(shine);
     }
     const furryLid = (color: THREE.Color, arch: number) => {
-      const geo = lidGeometry(R * 1.07, color, arch);
+      const geo = lidGeometry(R * LID_R, color, arch);
       const mesh = new THREE.Mesh(geo, m.lidMat);
       if (lid.shells > 0) {
         const fur = new THREE.Mesh(shellStack(geo, lid.shells), lid.fur);
@@ -346,13 +349,13 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     const up = furryLid(lid.upper, UP_ARCH);
     eye.add(up);
     // Lash line along the (curved) lid edge and three flicked lashes at the outer corner.
-    const rimPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * 1.075, UP_ARCH, -Math.PI * 0.47 + (q / 24) * Math.PI * 0.94));
+    const rimPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * (LID_R + 0.005), UP_ARCH, -Math.PI * 0.47 + (q / 24) * Math.PI * 0.94));
     const rim = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(rimPts), 40, 0.0011, 6), m.lashMat);
     up.add(rim);
     for (let q = 0; q < 3; q++) {
       const phi = s * (Math.PI / 2 - 0.18 - q * 0.22);
       const lash = new THREE.Mesh(new THREE.ConeGeometry(0.0011, 0.0075 - q * 0.0012, 5), m.lashMat);
-      const base = lidRimPoint(R * 1.07, UP_ARCH, phi);
+      const base = lidRimPoint(R * LID_R, UP_ARCH, phi);
       lash.position.copy(base);
       lash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(base.x, -0.55 * R, base.z).normalize());
       up.add(lash);
@@ -360,7 +363,7 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
     const LO_ARCH = 0.38;
     const lo = furryLid(lid.lower, LO_ARCH);
     // A softer lash line defines the lower lid when it rises into a happy squint.
-    const loPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * 1.072, LO_ARCH, -Math.PI * 0.42 + (q / 24) * Math.PI * 0.84));
+    const loPts = Array.from({ length: 25 }, (_, q) => lidRimPoint(R * (LID_R + 0.002), LO_ARCH, -Math.PI * 0.42 + (q / 24) * Math.PI * 0.84));
     lo.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(loPts), 40, 0.0007, 5), m.lashMat));
     lo.scale.set(0.99, -1, 0.99);
     eye.add(lo);
@@ -571,7 +574,7 @@ function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferG
     const k = smooth((1 - rimT[i]) / 0.35); // 1 on top of the lid, 0 at the lash line
     c.copy(color).multiplyScalar(0.72 + 0.28 * k);
     col.set([c.r, c.g, c.b], i * 3);
-    fl[i] = 0.0028 * (0.3 + 0.7 * k);
+    fl[i] = 0.0036 * (0.3 + 0.7 * k);
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.setAttribute('furLen', new THREE.BufferAttribute(fl, 1));

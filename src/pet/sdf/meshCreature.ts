@@ -32,6 +32,23 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
+/**
+ * SDF ambient occlusion at a surface point: march a few steps out along the
+ * normal; wherever the field is closer than the step, something is nearby.
+ * Returns 1 (open) .. 0 (fully occluded).
+ */
+function occlusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+  let occ = 0, w = 1, wsum = 0;
+  for (let i = 0; i < 5; i++) {
+    const h = 0.003 + 0.0055 * i;
+    const d = S.d(x + nx * h, y + ny * h, z + nz * h);
+    occ += w * Math.max(0, Math.min(1, (h - d) / h));
+    wsum += w;
+    w *= 0.72;
+  }
+  return Math.max(0, Math.min(1, 1 - 1.6 * (occ / wsum)));
+}
+
 const boneIndex = new Map(BONES.map(([n], i) => [n as string, i]));
 
 const cache = new Map<string, THREE.BufferGeometry>();
@@ -142,7 +159,11 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     }
     if (att.region === 'tuft') c.lerp(cDark, 0.7);
     // Socket liner.
-    c.lerp(cDark, 0.35 * rim).multiplyScalar(1 - 0.3 * rim);
+    c.lerp(cDark, 0.22 * rim).multiplyScalar(1 - 0.18 * rim);
+    // Baked ambient occlusion: creases (armpits, under the chin, between the
+    // toes, ear roots, eye sockets) get darker, like dense fur self-shadowing.
+    const ao = occlusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
+    c.multiplyScalar(0.5 + 0.5 * ao);
     // Tiny brightness variation.
     const varn = 0.94 + 0.12 * vnoise(x * 300, y * 300, z * 300);
     color[v * 3] = c.r * varn;
