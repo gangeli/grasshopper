@@ -49,6 +49,29 @@ export class Simulation {
   time = 0;
   private frame = 0;
   private senseEvery: number;
+  /** Simulated sensing on/off (camera mode maps its invisible room once, then stops). */
+  sensing = true;
+
+  /**
+   * Map the room from where the camera stands with a quick look around (a
+   * few full turns at different tilts, as a smooth ~10Hz sweep so the pose
+   * gate keeps every frame). Synchronous; advances simulation time.
+   */
+  primeMap(): void {
+    const c = this.cam, yaw = c.yaw, pitch = c.pitch;
+    for (const p of [-0.35, -0.7]) {
+      c.pitch = p;
+      for (let a = 0; a <= 36; a++) {
+        c.yaw = (a / 36) * Math.PI * 2;
+        this.time += 0.1;
+        this.room.time = this.time;
+        // Coarse depth is plenty for open floor, and 4x cheaper.
+        senseFrame(this.world, this.sensor, c, [20, 15]);
+      }
+    }
+    c.yaw = yaw;
+    c.pitch = pitch;
+  }
 
   constructor(opts: SimOptions = {}) {
     this.room = typeof opts.room === 'object' ? opts.room : roomFromName(opts.room ?? 'living');
@@ -121,7 +144,7 @@ export class Simulation {
   step(dt: number): void {
     this.time += dt;
     this.room.time = this.time;
-    if (this.frame++ % this.senseEvery === 0) this.sense();
+    if (this.sensing && this.frame++ % this.senseEvery === 0) this.sense();
     this.game.update(dt, this.view());
   }
 

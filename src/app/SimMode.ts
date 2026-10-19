@@ -62,6 +62,10 @@ export class SimMode {
       stage.renderer.setClearColor(0x000000, 0);
       Object.assign(stage.renderer.domElement.style, { position: 'fixed', inset: '0', zIndex: '1' });
       this.sim.cam.pos.y = 1.35;
+      // The invisible room never changes and the player can't walk around it:
+      // map it once, then skip simulated sensing (the most expensive per-frame work).
+      this.sim.primeMap();
+      this.sim.sensing = false;
     } else {
       this.buildRoom(this.sim.room);
       stage.scene.add(this.roomGroup);
