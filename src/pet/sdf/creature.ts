@@ -145,7 +145,7 @@ export function buildCreatureSculpt(): Sculpt {
   const tip = P.tail5, dirTip: V = [0, 0.024, 0.01];
   // A brush of long fur at the tip, tapering to a soft point.
   S.add(
-    ellipsoid('tuft', add(tip, [0, 0.012, 0.004]), [0.02, 0.0125, 0.0135], 'tail5', 0.012, alignX(dirTip, [1, 0, 0])),
+    ellipsoid('tuft', add(tip, [0, 0.012, 0.004]), [0.019, 0.0105, 0.011], 'tail5', 0.012, alignX(dirTip, [1, 0, 0])),
     roundCone('tuft', add(tip, [0, 0.018, 0.007]), add(tip, [0, 0.04, 0.014]), 0.011, 0.003, 'tail5', 'tail5', 0.01),
   );
   // ---- Eye sockets (carved), so the eyes sit *in* the face -------------------------------------------------
@@ -183,7 +183,7 @@ export const FUR_LENGTH: Record<Region, number> = {
   hand: 0.002,
   finger: 0.0009,
   tail: 0.008,
-  tuft: 0.016,
+  tuft: 0.019,
 };
 
 export { mirror };

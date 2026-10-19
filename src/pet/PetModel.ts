@@ -1115,7 +1115,7 @@ function makeWingTexture(vein: THREE.Color): THREE.DataTexture {
     const rim = smooth((d - 0.78) / 0.2);
     c.lerp(veinC, Math.min(1, k * 0.9 + rim * 0.35 + fine * 0.45));
     // A small dark pterostigma near the tip of the fore-lobe.
-    const ptero = 1 - smooth((Math.hypot((u - 0.82) / 1.8, v - 0.66) - 0.03) / 0.015);
+    const ptero = 0.7 * (1 - smooth((Math.hypot((u - 0.84) / 2.2, v - 0.66) - 0.016) / 0.012));
     c.lerp(stigma, 0.85 * ptero);
     return [c.r, c.g, c.b, Math.min(1, 0.4 + 0.45 * k + 0.22 * fine + 0.25 * (1 - smooth(d / 0.35)) + 0.25 * rim + 0.5 * ptero)];
   });
@@ -1210,13 +1210,19 @@ function tubeGeometry(
  * and back, with the membrane roughly parallel to the back. s = +1 left, -1 right.
  */
 function wingGeometry(s: number): THREE.BufferGeometry {
-  const shape = new THREE.Shape();
-  shape.moveTo(0, 0);
-  shape.bezierCurveTo(0.03, 0.028, 0.08, 0.034, 0.096, 0.01);
-  shape.bezierCurveTo(0.102, -0.004, 0.075, -0.012, 0.05, -0.008);
-  shape.bezierCurveTo(0.068, -0.022, 0.062, -0.044, 0.036, -0.035);
-  shape.bezierCurveTo(0.02, -0.027, 0.008, -0.013, 0, 0);
-  const geo = new THREE.ShapeGeometry(shape, 16);
+  // A long, slender fore-wing with a rounded tip, and a smaller hind-wing
+  // swept back below it (two separate membranes, like a lacewing's).
+  const fore = new THREE.Shape();
+  fore.moveTo(0, 0.002);
+  fore.bezierCurveTo(0.025, 0.021, 0.074, 0.03, 0.103, 0.016);
+  fore.bezierCurveTo(0.113, 0.009, 0.104, -0.003, 0.084, -0.004);
+  fore.bezierCurveTo(0.055, -0.006, 0.022, -0.004, 0, -0.002);
+  const hind = new THREE.Shape();
+  hind.moveTo(0.002, -0.004);
+  hind.bezierCurveTo(0.022, -0.008, 0.05, -0.013, 0.069, -0.024);
+  hind.bezierCurveTo(0.077, -0.03, 0.068, -0.041, 0.052, -0.039);
+  hind.bezierCurveTo(0.032, -0.036, 0.012, -0.02, 0.002, -0.006);
+  const geo = new THREE.ShapeGeometry([fore, hind], 16);
   // Shape UVs are in metres; stretch them over the vein texture.
   const uv = geo.attributes.uv;
   for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 0.1, uv.getY(i) / 0.08 + 0.5);
