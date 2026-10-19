@@ -18,7 +18,16 @@ export class Stage {
   readonly occluder = new Occluder();
   readonly reticle: THREE.Mesh;
   readonly debugGroup = new THREE.Group();
+  /**
+   * Parent of everything expressed in the world model's map frame (the pet,
+   * the occluder, debug visuals). Its matrix is the map → tracking transform
+   * (anchor drift correction); identity when there is none. Reticle, shadow
+   * catcher and lights live in the tracking frame.
+   */
+  readonly mapRoot = new THREE.Group();
   private debugBuiltVersion = -1;
+  private debugBuiltEpoch = -1;
+  private readonly _v = new THREE.Vector3();
   debug = false;
 
   constructor(container: HTMLElement, opts: { ar: boolean }) {
@@ -53,7 +62,9 @@ export class Stage {
     this.shadowCatcher.renderOrder = 1;
     this.scene.add(this.shadowCatcher);
 
-    this.scene.add(this.occluder.mesh);
+    this.mapRoot.matrixAutoUpdate = false;
+    this.scene.add(this.mapRoot);
+    this.mapRoot.add(this.occluder.mesh);
 
     this.reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2),
@@ -62,7 +73,7 @@ export class Stage {
     this.reticle.visible = false;
     this.reticle.matrixAutoUpdate = false;
     this.scene.add(this.reticle);
-    this.scene.add(this.debugGroup);
+    this.mapRoot.add(this.debugGroup);
 
     window.addEventListener('resize', () => this.resize());
   }
@@ -75,16 +86,49 @@ export class Stage {
   }
 
   addPet(stack: GameStack) {
-    this.scene.add(stack.rig.group);
+    this.mapRoot.add(stack.rig.group);
     applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
+  }
+
+  /**
+   * Follow the world model's map → tracking transform (anchor drift
+   * correction). Non-finite or missing transforms leave the identity.
+   */
+  syncMapFrame(world: unknown) {
+    const fn = (world as { mapToTracking?: () => ArrayLike<number> | null }).mapToTracking;
+    let m: ArrayLike<number> | null = null;
+    try {
+      m = fn ? fn.call(world) : null;
+    } catch {
+      m = null;
+    }
+    let ok = !!m && m.length === 16;
+    if (ok) for (let i = 0; i < 16; i++) if (!Number.isFinite(m![i])) ok = false;
+    if (ok) this.mapRoot.matrix.fromArray(Array.from(m!));
+    else this.mapRoot.matrix.identity();
+    this.mapRoot.matrixWorldNeedsUpdate = true;
+  }
+
+  /** Map-frame point → tracking frame (what the renderer, lights and audio use). */
+  mapToTracking(p: { x: number; y: number; z: number }, out = new THREE.Vector3()): THREE.Vector3 {
+    return out.set(p.x, p.y, p.z).applyMatrix4(this.mapRoot.matrix);
+  }
+
+  /** Tracking-frame point (hit-test, camera) → map frame (what the world model and game use). */
+  trackingToMap(p: { x: number; y: number; z: number }, out = new THREE.Vector3()): THREE.Vector3 {
+    return out.set(p.x, p.y, p.z).applyMatrix4(new THREE.Matrix4().copy(this.mapRoot.matrix).invert());
   }
 
   /** Keep the key light and shadow catcher centred on the pet. */
   followPet(stack: GameStack) {
-    const p = stack.pet.pos;
+    const pm = stack.pet.pos;
+    if (!Number.isFinite(pm.x) || !Number.isFinite(pm.y) || !Number.isFinite(pm.z)) return;
+    // Lights and the catcher are in the tracking frame; the pet is in the map frame.
+    const p = this.mapToTracking(pm, this._v);
     this.sun.position.set(p.x + 0.8, p.y + 2.2, p.z + 0.6);
     this.sun.target.position.copy(p);
-    this.shadowCatcher.position.set(p.x, groundUnder(stack) + 0.002, p.z);
+    const g = this.mapToTracking({ x: pm.x, y: groundUnder(stack), z: pm.z });
+    this.shadowCatcher.position.set(g.x, g.y + 0.002, g.z);
   }
 
   updateOccluder(stack: GameStack) {
@@ -98,8 +142,9 @@ export class Stage {
     this.debugGroup.visible = this.debug;
     this.occluder.debugVisible = this.debug;
     const g = stack.world.grid, nav = stack.game.nav;
-    if (!this.debug || !g || !nav || g.version === this.debugBuiltVersion) return;
+    if (!this.debug || !g || !nav || (g.version === this.debugBuiltVersion && stack.world.epoch === this.debugBuiltEpoch)) return;
     this.debugBuiltVersion = g.version;
+    this.debugBuiltEpoch = stack.world.epoch;
     for (const c of [...this.debugGroup.children]) {
       this.debugGroup.remove(c);
       (c as THREE.Points).geometry.dispose();

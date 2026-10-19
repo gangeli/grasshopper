@@ -9,6 +9,7 @@ import type { Voice } from './Voice';
  */
 export class GameUI {
   private lastTick = -1;
+  private petWorld = new THREE.Vector3();
   constructor(readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     const { game, pet } = stack;
     game.events.onMessage = (m) => hud.say(m, 6);
@@ -43,7 +44,10 @@ export class GameUI {
   update(camera: THREE.Camera) {
     const { game, pet } = this.stack;
     const hud = this.hud;
-    this.voice.updateSpatial(camera, pet.pos);
+    // The camera is in the tracking frame; the pet in its parent's (map) frame.
+    const parent = this.stack.rig.group.parent;
+    const petPos = parent ? this.petWorld.copy(pet.pos).applyMatrix4(parent.matrixWorld) : pet.pos;
+    if (Number.isFinite(petPos.x) && Number.isFinite(petPos.y) && Number.isFinite(petPos.z)) this.voice.updateSpatial(camera, petPos);
     switch (game.phase) {
       case 'waiting':
         hud.setPrimary(null);

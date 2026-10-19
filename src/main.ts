@@ -44,6 +44,16 @@ async function main() {
   const arOk = await ArMode.supported();
   if (arOk) arBtn.style.display = '';
   else note.textContent = 'AR needs a WebXR browser (Chrome on Android, Quest Browser). On this device you can play in a virtual room.';
+  // A message carried over a reload (e.g. AR failed to start).
+  try {
+    const carried = sessionStorage.getItem('hopper-note');
+    if (carried) {
+      sessionStorage.removeItem('hopper-note');
+      note.textContent = carried;
+    }
+  } catch {
+    /* storage unavailable */
+  }
 
   // Showcase: Hopper waves on the landing page.
   const showcase = startShowcase();
@@ -59,12 +69,24 @@ async function main() {
       stage.addPet(stack);
       const ar = new ArMode(stage, stack, hud, voice);
       window.__hopper = { ...window.__hopper, mode: 'ar', stage, hud, stack, ar, game: stack.game, THREE };
-      ar.onExit = () => location.reload();
+      // Leaving AR (or AR failing) goes back to a fresh start page: never a dead AR screen.
+      const backToStart = (msg?: string) => {
+        try {
+          if (msg) sessionStorage.setItem('hopper-note', msg);
+        } catch {
+          /* storage unavailable */
+        }
+        location.reload();
+      };
+      ar.onExit = () => backToStart();
       try {
         await ar.start();
       } catch (e) {
-        hud.say(`Couldn't start AR: ${(e as Error).message}`, 8);
         console.warn(e);
+        const msg = `Couldn't start AR: ${(e as Error)?.message ?? e}. Try again, or play in the virtual room.`;
+        hud.say(msg, 8);
+        // If the session never started there is nothing to show: back to the start page.
+        if (!ar.session) setTimeout(() => backToStart(msg), 2500);
       }
     } else {
       const stage = new Stage(document.body, { ar: false });

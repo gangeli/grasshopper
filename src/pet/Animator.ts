@@ -395,7 +395,7 @@ export class Animator {
   readonly pose: Pose = neutralPose();
   private tmp: Pose = neutralPose();
   private time = 0;
-  /** World-space look target (usually the camera). */
+  /** Look target (usually the camera), in the pet's parent frame (= world in the sim, map frame in AR). */
   lookTarget: THREE.Vector3 | null = null;
   private blinkT = 2;
   private blinkPhase = 1;
@@ -512,9 +512,12 @@ export class Animator {
 
     // Look-at: split between neck and head, the remainder goes to the eyes.
     let lookYaw = 0, lookPitch = 0;
-    if (this.lookTarget && P.lookWeight > 0) {
+    const lt = this.lookTarget;
+    if (lt && Number.isFinite(lt.x) && Number.isFinite(lt.y) && Number.isFinite(lt.z) && P.lookWeight > 0) {
       this.rig.group.updateMatrixWorld(true);
-      _v.copy(this.lookTarget);
+      // The target is in the pet's parent frame (the map frame in AR).
+      _v.copy(lt);
+      if (this.rig.group.parent) _v.applyMatrix4(this.rig.group.parent.matrixWorld);
       bones.chest.worldToLocal(_v);
       _v.sub(bones.neck.position);
       const yaw = Math.atan2(_v.x, _v.z);

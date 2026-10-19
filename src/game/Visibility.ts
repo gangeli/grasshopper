@@ -55,10 +55,20 @@ const SAMPLE_BONES: [BoneName, number][] = [
 
 const _p = new THREE.Vector3();
 
+const _toParent = new THREE.Matrix4();
+
+/**
+ * Sample points on the pet, in the frame of the pet's parent: the world
+ * model's map frame (in AR the pet sits under a map-frame root whose
+ * transform corrects tracking drift; the game works in map coordinates).
+ */
 export function petSamplePoints(rig: PetRig): { p: Vec3; w: number }[] {
   rig.group.updateMatrixWorld(true);
+  const parent = rig.group.parent;
+  if (parent) _toParent.copy(parent.matrixWorld).invert();
   return SAMPLE_BONES.map(([b, w]) => {
     rig.bones[b].getWorldPosition(_p);
+    if (parent) _p.applyMatrix4(_toParent);
     // Head bone sits at the neck joint; sample the middle of the head instead.
     if (b === 'head') _p.y += 0.055 * rig.group.scale.y;
     return { p: { x: _p.x, y: _p.y, z: _p.z }, w };
