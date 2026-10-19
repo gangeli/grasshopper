@@ -652,6 +652,7 @@ export class Animator {
     const shut = smoothstep(-0.25, 0.38, up);
     if (face.eyeClosed) face.eyeClosed.value = closed;
     if (face.eyeFill) face.eyeFill.value = shut;
+    if (face.eyeSquint) face.eyeSquint.value = smoothstep(1.0, 0.15, lo);
     // A closed eye sinks into the face, so the lid reads as a soft fold in the
     // fur rather than a dome standing proud of it.
     face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.2 * shut);

@@ -73,6 +73,8 @@ export interface FaceRig {
   eyeClosed?: { value: number };
   /** 0..1: how far the face fur fills in over a shut (not squinting) eye (set by the Animator). */
   eyeFill?: { value: number };
+  /** 0..1: how far the cheek fur fills in below a "^^" squint (set by the Animator). */
+  eyeSquint?: { value: number };
 }
 
 export interface PetOptions {
@@ -115,10 +117,10 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // --- Materials --------------------------------------------------------------
   const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
   // Ears are thin: backlight glows through them (fur shells add the same term).
-  const eyeClosed = { value: 0 }, eyeFill = { value: 0 };
+  const eyeClosed = { value: 0 }, eyeFill = { value: 0 }, eyeSquint = { value: 0 };
   skin.onBeforeCompile = (shader) => {
     addTranslucency(shader);
-    addSocketFade(shader, eyeClosed, eyeFill);
+    addSocketFade(shader, eyeClosed, eyeFill, eyeSquint);
   };
   skin.customProgramCacheKey = () => 'skin-thin-sock';
   // The emissive is a deeper, more saturated version of the glow colour, so the
@@ -221,7 +223,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const urlFur = url?.get('fur') ?? null;
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
   for (let q = 1; q <= shells; q++) {
-    const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill });
+    const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill, squint: eyeSquint });
     materials.push(mat);
     const shell = addSkinned(bodyGeo, mat, `fur${q}`);
     shell.castShadow = false;
@@ -328,6 +330,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
 
   face.eyeClosed = eyeClosed;
   face.eyeFill = eyeFill;
+  face.eyeSquint = eyeSquint;
   return { group, bones, rest, skeleton, scaler, face, materials, glowMaterial, palette: pal };
 }
 

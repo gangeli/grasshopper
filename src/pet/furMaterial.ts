@@ -45,7 +45,7 @@ export function addTranslucency(shader: { vertexShader: string; fragmentShader: 
 /**
  * Eye-socket fade: the body bakes a dark liner and short fur around the eye
  * sockets (per-vertex `socket` = [rim 0..1, brightness ratio without the
- * liner, brow fill]). While the eyes are closed (`uEyeClosed` → 1) the liner fades out
+ * liner, brow fill]); a shut eye fills the hollow above it, a "^^" squint the one below.. While the eyes are closed (`uEyeClosed` → 1) the liner fades out
  * and, on fur shells, the short fur grows back over the seam, so a closed lid
  * reads as part of the furry face rather than a goggle in a dark ring.
  * Call after any other color_fragment edits; geometry without the attribute is unaffected.
@@ -54,12 +54,14 @@ export function addSocketFade(
   shader: { vertexShader: string; fragmentShader: string; uniforms: Record<string, { value: unknown }> },
   eyeClosed: { value: number },
   eyeFill: { value: number },
+  eyeSquint: { value: number },
 ): void {
   shader.uniforms.uEyeClosed = eyeClosed;
   shader.uniforms.uEyeFill = eyeFill;
+  shader.uniforms.uEyeSquint = eyeSquint;
   shader.vertexShader = shader.vertexShader
-    .replace('#include <common>', '#include <common>\nattribute vec3 socket;\nuniform float uEyeClosed;\nuniform float uEyeFill;\nvarying float vSocketK;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed * step(0.001, socket.x));\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.006);');
+    .replace('#include <common>', '#include <common>\nattribute vec3 socket;\nuniform float uEyeClosed;\nuniform float uEyeFill;\nuniform float uEyeSquint;\nvarying float vSocketK;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed * step(0.001, socket.x));\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.006 + max(0.0, socket.x * socket.x - socket.z) * uEyeSquint * 0.004);');
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', '#include <common>\nvarying float vSocketK;')
     .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vSocketK;');
@@ -72,7 +74,7 @@ export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.3
  * per-vertex `shellH` attribute instead, so several shells can be merged into
  * one geometry and drawn in a single call (used for small rigid parts like eyelids).
  */
-export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.MeshStandardMaterial, eye?: { closed: { value: number }; fill: { value: number } }): THREE.MeshStandardMaterial {
+export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.MeshStandardMaterial, eye?: { closed: { value: number }; fill: { value: number }; squint: { value: number } }): THREE.MeshStandardMaterial {
   const m = base.clone();
   m.name = `fur${h.toFixed(2)}`;
   if (h < 0) m.defines = { ...m.defines, SHELL_ATTR: '' };
@@ -163,7 +165,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #include <opaque_fragment>`,
       );
     if (h >= 0) addTranslucency(shader);
-    if (eye) addSocketFade(shader, eye.closed, eye.fill);
+    if (eye) addSocketFade(shader, eye.closed, eye.fill, eye.squint);
   };
   if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
   m.customProgramCacheKey = () => `fur-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.gravity}${eye ? '-sock' : ''}`;

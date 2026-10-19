@@ -146,7 +146,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     if (backM > 0) {
       const wx = vnoise(x * 30 + 5, y * 30, z * 30) - 0.5, wy = vnoise(x * 30, y * 30 + 7, z * 30) - 0.5;
       const sp = vnoise(x * 78 + 11 + wx * 1.6, y * 78 + wy * 1.6, z * 78);
-      c.lerp(cSpot, smooth(0.6, 0.8, sp) * (0.4 + 0.25 * mk) * backM);
+      c.lerp(cSpot, smooth(0.57, 0.77, sp) * (0.5 + 0.35 * mk) * backM);
     }
     // Cream belly / chest / muzzle / cheeks.
     const front = smooth(0.15, 0.6, nz);
@@ -183,7 +183,10 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     // Paws: cream soles, pink beans.
     if (att.region === 'foot' && ny < -0.4) c.lerp(cBelly, 0.85);
     // Pink beans only underneath (seen when it lifts a paw), not as painted tips.
-    if (att.region === 'toe' || att.region === 'finger') c.lerp(cPink, 0.75 * smooth(-0.2, -0.6, ny));
+    // Pink beans underneath, peeking out along the front-lower edge of each toe
+    // so the paw reads as three beans even from standing height.
+    if (att.region === 'toe') c.lerp(cPink, 0.8 * smooth(0.1, -0.45, ny) * smooth(-0.2, 0.3, nz - ny));
+    if (att.region === 'finger') c.lerp(cPink, 0.75 * smooth(-0.2, -0.6, ny));
     if (att.region === 'hand') c.lerp(cPink, 0.45 * smooth(-0.45, -0.8, ny));
     if (att.region === 'hand' && nz > 0.4) c.lerp(cBelly, 0.4);
     // Tail stripes and a dark tuft.
@@ -211,6 +214,13 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
       // Only the brow side fills: the lash line along the bottom must stay visible.
       socket[v * 3 + 2] = rim * rim * smooth(-0.35, 0.45, (y - EYE.L[1]) / EYE_RADIUS);
     } else socket[v * 3 + 1] = 1;
+    // Painted grooves between the toes (the sculpted ones are soft at a distance).
+    const toeW = rw('toe') + rw('foot');
+    if (toeW > 0.05 && y < 0.03 && z > 0.008) {
+      const gx = Math.abs(Math.abs(x) - 0.052);
+      const groove = Math.exp(-Math.pow((gx - 0.00625) / 0.0019, 2)) * smooth(0.008, 0.02, z);
+      c.multiplyScalar(1 - 0.55 * groove * Math.min(1, toeW));
+    }
     // Toe tops a touch lighter, like worn fur on the knuckles.
     c.lerp(cBelly, 0.3 * rw('toe') * smooth(0.2, 0.8, ny + nz * 0.5) * ao);
     // Tiny brightness variation.
