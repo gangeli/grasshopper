@@ -18,7 +18,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { BONES, type BoneName } from './skeleton';
 import { creatureGeometry, furLengthAt, surfaceAt } from './sdf/meshCreature';
 import { EYE, EYE_RADIUS, MOUTH, NOSE, TOE_DX } from './sdf/creature';
-import { addTranslucency, DEFAULT_FUR, makeFurShellMaterial, type FurOptions } from './furMaterial';
+import { addSocketFade, addTranslucency, DEFAULT_FUR, makeFurShellMaterial, type FurOptions } from './furMaterial';
 export { HEAD_CENTER, HEAD_RADIUS, type BoneName } from './skeleton';
 
 export interface PetPalette {
@@ -29,12 +29,14 @@ export interface PetPalette {
   glow: number;
   eye: number;
   wing: number;
+  /** Strength of the dark back dapples (1 = full). */
+  markings?: number;
 }
 
 export const PALETTES: Record<string, PetPalette> = {
   mint: { body: 0x5ccf9f, bodyDark: 0x2f9a78, belly: 0xfff0c4, blush: 0xff8fa3, glow: 0xffd56a, eye: 0x2e6b3f, wing: 0xb4b8ff },
-  plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0 },
-  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffb4d4 },
+  plum: { body: 0xa98bea, bodyDark: 0x6a4fb8, belly: 0xffe7f2, blush: 0xff8fb8, glow: 0x9ffcff, eye: 0x5a2d82, wing: 0xffc8f0, markings: 0.45 },
+  ember: { body: 0xff9f5a, bodyDark: 0xd2633a, belly: 0xfff3d6, blush: 0xff6f7f, glow: 0xfff07a, eye: 0x6b5a14, wing: 0xffb4d4, markings: 0.5 },
 };
 
 export interface PetRig {
@@ -67,6 +69,10 @@ export interface FaceRig {
   blushL: THREE.Mesh;
   blushR: THREE.Mesh;
   blushMat: THREE.MeshBasicMaterial;
+  /** 0 = eyes open .. 1 = closed; fades the socket liner so closed lids blend into the face (set by the Animator). */
+  eyeClosed?: { value: number };
+  /** 0..1: how far the face fur fills in over a shut (not squinting) eye (set by the Animator). */
+  eyeFill?: { value: number };
 }
 
 export interface PetOptions {
@@ -109,8 +115,12 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // --- Materials --------------------------------------------------------------
   const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0 });
   // Ears are thin: backlight glows through them (fur shells add the same term).
-  skin.onBeforeCompile = (shader) => addTranslucency(shader);
-  skin.customProgramCacheKey = () => 'skin-thin';
+  const eyeClosed = { value: 0 }, eyeFill = { value: 0 };
+  skin.onBeforeCompile = (shader) => {
+    addTranslucency(shader);
+    addSocketFade(shader, eyeClosed, eyeFill);
+  };
+  skin.customProgramCacheKey = () => 'skin-thin-sock';
   // The emissive is a deeper, more saturated version of the glow colour, so the
   // bulbs stay coloured instead of tone-mapping to pale cream when they light up.
   const glowHsl = new THREE.Color(pal.glow).getHSL({ h: 0, s: 0, l: 0 });
@@ -147,7 +157,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   // Lids are vertex-coloured (darker towards the lash line) and get their own fur shells.
   const lidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
   const lowerLidMat = lidMat;
-  const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.12);
+  const lowerLidColor = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.04);
   const lashMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(pal.bodyDark).multiplyScalar(0.35), roughness: 0.7 });
   const noseMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(pal.bodyDark).lerp(new THREE.Color(0x5c2a36), 0.88), roughness: 0.32, clearcoat: 0.5 });
   const mouthMat = new THREE.MeshStandardMaterial({ color: 0x3a1420, roughness: 0.6 });
@@ -181,8 +191,12 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     );
   };
   wingMat.customProgramCacheKey = () => 'wing-graze';
+  const wingGhostMat = wingMat.clone();
+  wingGhostMat.onBeforeCompile = wingMat.onBeforeCompile;
+  wingGhostMat.customProgramCacheKey = wingMat.customProgramCacheKey;
+  wingGhostMat.opacity = 0;
   const clawMat = new THREE.MeshStandardMaterial({ color: pal.belly, roughness: 0.4 });
-  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, clawMat, hornMat];
+  const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, noseMat, mouthMat, tongueMat, toothMat, blushMat, wingMat, wingGhostMat, clawMat, hornMat];
 
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark);
 
@@ -207,7 +221,7 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
   const urlFur = url?.get('fur') ?? null;
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 3 : mobile ? 7 : furOpts.shells);
   for (let q = 1; q <= shells; q++) {
-    const mat = makeFurShellMaterial(q / shells, furOpts, skin);
+    const mat = makeFurShellMaterial(q / shells, furOpts, skin, { closed: eyeClosed, fill: eyeFill });
     materials.push(mat);
     const shell = addSkinned(bodyGeo, mat, `fur${q}`);
     shell.castShadow = false;
@@ -271,6 +285,23 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     wing.name = `wingMesh${side}`;
     wing.renderOrder = 20;
     attach(`wing${side}`, wing, abs[`wing${side}`].clone().add(new THREE.Vector3(0.006 * s, 0.006, -0.018)));
+    // Motion blur for fast flapping: faint copies fanned along the flap arc
+    // (the Animator spreads them and fades them in), so a ~9 Hz flap reads as
+    // a soft blur instead of a strobing membrane.
+    const blur = new THREE.Group();
+    blur.name = `wingBlur${side}`;
+    blur.visible = false;
+    blur.userData.mat = wingGhostMat;
+    bones[`wing${side}`].add(blur);
+    for (const f of [-1, -0.6, -0.2, 0.2, 0.6, 1]) {
+      const pivot = new THREE.Group();
+      pivot.userData.f = f;
+      const ghost = new THREE.Mesh(wing.geometry, wingGhostMat);
+      ghost.position.copy(wing.position);
+      ghost.renderOrder = 19;
+      pivot.add(ghost);
+      blur.add(pivot);
+    }
   }
 
   // Tiny claws peeking out of the toe fur.
@@ -295,6 +326,8 @@ export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint
     { upper: lidColor, lower: lowerLidColor, fur: lidFur, shells: lidShells },
   );
 
+  face.eyeClosed = eyeClosed;
+  face.eyeFill = eyeFill;
   return { group, bones, rest, skeleton, scaler, face, materials, glowMaterial, palette: pal };
 }
 
@@ -614,7 +647,7 @@ function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferG
     // A soft fold a little above the lash line and a plump lid margin below it,
     // so a closed lid reads as a lid and not as a smooth dome.
     const crease = Math.exp(-Math.pow((rimT[i] - 0.6) / 0.08, 2));
-    v.multiplyScalar(r * (1 - 0.045 * crease + 0.025 * smooth((rimT[i] - 0.7) / 0.2) * (1 - smooth((rimT[i] - 0.94) / 0.06))));
+    v.multiplyScalar(r * (1 - 0.02 * crease + 0.025 * smooth((rimT[i] - 0.7) / 0.2) * (1 - smooth((rimT[i] - 0.94) / 0.06))));
     pos.setXYZ(i, v.x, v.y, v.z);
   }
   const col = new Float32Array(pos.count * 3), fl = new Float32Array(pos.count);
@@ -624,7 +657,7 @@ function lidGeometry(r: number, color: THREE.Color, arch: number): THREE.BufferG
     const crease = Math.exp(-Math.pow((rimT[i] - 0.6) / 0.06, 2));
     c.copy(color).multiplyScalar((0.72 + 0.28 * k) * (1 - 0.3 * crease));
     col.set([c.r, c.g, c.b], i * 3);
-    fl[i] = 0.0036 * (0.3 + 0.7 * k) * (1 - 0.6 * crease);
+    fl[i] = 0.0046 * (0.3 + 0.7 * k) * (1 - 0.6 * crease);
   }
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   g.setAttribute('furLen', new THREE.BufferAttribute(fl, 1));

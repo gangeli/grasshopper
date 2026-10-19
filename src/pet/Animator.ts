@@ -429,6 +429,9 @@ export class Animator {
   private lastHeadVel = new THREE.Vector3();
   private hasLast = false;
   private restAnkle: Record<'L' | 'R', THREE.Vector3>;
+  /** Wing membranes and their motion-blur fans (absent on custom rigs). */
+  private wingMat: THREE.Material | null = null;
+  private wingBlur: Record<'L' | 'R', THREE.Object3D | undefined>;
 
   constructor(readonly rig: PetRig, seed = 0) {
     this.ctx.seed = seed;
@@ -439,6 +442,9 @@ export class Animator {
     // Express in scaler (pet) space.
     rig.group.updateMatrixWorld(true);
     for (const s of ['L', 'R'] as const) rig.scaler.worldToLocal(this.restAnkle[s]);
+    this.wingBlur = { L: rig.group.getObjectByName('wingBlurL'), R: rig.group.getObjectByName('wingBlurR') };
+    const wm = rig.group.getObjectByName('wingMeshL') as THREE.Mesh | undefined;
+    if (wm && !Array.isArray(wm.material)) this.wingMat = wm.material;
   }
 
   /** Cross-fade to an action; restarting the same action resets its clock if `restart`. */
@@ -577,8 +583,25 @@ export class Animator {
     const tl = sp.tailLift.step(0, accLocal.y * 0.6, dt);
     const ts = sp.tailSide.step(0, -accLocal.x * 0.8, dt);
 
+    // Fast flapping blurs: the membrane itself only flutters a little and fades,
+    // while faint copies fanned across the stroke draw the blurred arc.
+    const flapAmp = clamp(P.wingFlap, 0, 1.5) * 0.6;
+    const blurK = smoothstep(0.15, 0.55, P.wingFlap);
+    const flapNow = flapAmp * Math.sin(this.time * 55) * (1 - 0.75 * blurK);
+    if (this.wingMat) this.wingMat.opacity = 1 - 0.55 * blurK;
     for (const side of ['L', 'R'] as const) {
       const s = side === 'L' ? 1 : -1;
+      const fan = this.wingBlur[side];
+      if (fan) {
+        fan.visible = blurK > 0.01;
+        if (fan.visible) {
+          (fan.userData.mat as THREE.Material).opacity = 0.2 * blurK;
+          for (const pv of fan.children) {
+            const d = (pv.userData.f as number) * flapAmp - flapNow;
+            pv.rotation.set(0, -s * d * 0.3, s * d * 0.7);
+          }
+        }
+      }
       const lift = -P.antLift * 0.45 + antP * 0.04;
       const spread = P.antSpread * 0.4 * s + antY * 0.03;
       for (let q = 0; q < 4; q++) {
@@ -588,7 +611,7 @@ export class Animator {
       // Positive earLift perks the ears up; they lag (droop) when the head accelerates upward.
       set(`ear${side}` as BoneName, 0, 0, s * (P.earLift * 0.5 - ear * 0.05));
       // Wings: fold back, spread out, flap.
-      const flap = P.wingFlap * Math.sin(this.time * 55) * 0.6;
+      const flap = flapNow;
       // At rest the wings lie folded back along the shoulders. Spreading raises
       // them in the plane of the back (so they stay face-on and peek above the
       // shoulders) with a little outward swing.
@@ -622,9 +645,24 @@ export class Animator {
     const lo = Math.min(THREE.MathUtils.lerp(0.95, 1.65, o), THREE.MathUtils.lerp(1.65, 0.02, happy));
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
+    // How much of the eye the lids cover (sleep, blink or a "^^" squint).
+    const closed = Math.max(smoothstep(-0.9, 0.35, up), smoothstep(1.0, 0.15, lo));
+    // Upper lid fully down (sleep, blink), as opposed to a "^^" squint, whose
+    // arched lash line must stay clear of the brow.
+    const shut = smoothstep(-0.25, 0.38, up);
+    if (face.eyeClosed) face.eyeClosed.value = closed;
+    if (face.eyeFill) face.eyeFill.value = shut;
+    // A closed eye sinks into the face, so the lid reads as a soft fold in the
+    // fur rather than a dome standing proud of it.
+    face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.2 * shut);
     // When happy the lower lid grows over the upper one, so its arched lash
     // line is the one that shows.
-    const ls = 0.99 + 0.07 * smoothstep(0.2, 0.8, happy);
+    // Closed lids also widen a touch so their edge tucks under the face fur
+    // (no visible seam / socket ring around a sleeping eye).
+    const grow = 1 + 0.04 * closed;
+    face.lidUpL.scale.setScalar(grow);
+    face.lidUpR.scale.setScalar(grow);
+    const ls = (0.99 + 0.07 * smoothstep(0.2, 0.8, happy)) * grow;
     face.lidLoL.scale.set(ls, -ls, ls);
     face.lidLoR.scale.set(ls, -ls, ls);
     const ps = clamp(P.pupilSize, 0.5, 1.5);

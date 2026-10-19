@@ -42,6 +42,29 @@ export function addTranslucency(shader: { vertexShader: string; fragmentShader: 
     );
 }
 
+/**
+ * Eye-socket fade: the body bakes a dark liner and short fur around the eye
+ * sockets (per-vertex `socket` = [rim 0..1, brightness ratio without the
+ * liner, brow fill]). While the eyes are closed (`uEyeClosed` → 1) the liner fades out
+ * and, on fur shells, the short fur grows back over the seam, so a closed lid
+ * reads as part of the furry face rather than a goggle in a dark ring.
+ * Call after any other color_fragment edits; geometry without the attribute is unaffected.
+ */
+export function addSocketFade(
+  shader: { vertexShader: string; fragmentShader: string; uniforms: Record<string, { value: unknown }> },
+  eyeClosed: { value: number },
+  eyeFill: { value: number },
+): void {
+  shader.uniforms.uEyeClosed = eyeClosed;
+  shader.uniforms.uEyeFill = eyeFill;
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute vec3 socket;\nuniform float uEyeClosed;\nuniform float uEyeFill;\nvarying float vSocketK;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSocketK = mix(1.0, socket.y > 0.0 ? socket.y : 1.0, uEyeClosed * step(0.001, socket.x));\n// Fill the socket hollow so the lid sits flush in the fur.\ntransformed += normal * (socket.z * uEyeFill * 0.006);');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying float vSocketK;')
+    .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= vSocketK;');
+}
+
 export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.35 };
 
 /**
@@ -49,7 +72,7 @@ export const DEFAULT_FUR: FurOptions = { shells: 12, density: 1000, gravity: 0.3
  * per-vertex `shellH` attribute instead, so several shells can be merged into
  * one geometry and drawn in a single call (used for small rigid parts like eyelids).
  */
-export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.MeshStandardMaterial): THREE.MeshStandardMaterial {
+export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.MeshStandardMaterial, eye?: { closed: { value: number }; fill: { value: number } }): THREE.MeshStandardMaterial {
   const m = base.clone();
   m.name = `fur${h.toFixed(2)}`;
   if (h < 0) m.defines = { ...m.defines, SHELL_ATTR: '' };
@@ -81,16 +104,21 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #endif
         vShellH = sh;
         vRest = position;
-        vFurLen = furLen;
+        float fLen = furLen;
+        #ifdef SOCKET_FADE
+        // Closed eyes: the trimmed fur around the socket grows back over the lid seam.
+        fLen *= mix(1.0, 1.0 / max(0.3, 1.0 - 0.85 * socket.x), uEyeClosed);
+        #endif
+        vFurLen = fLen;
         // Push out along the rest normal; tips droop a little (in pet space).
-        transformed += normal * furLen * sh;
-        transformed.y -= furLen * uGravity * sh * sh;
+        transformed += normal * fLen * sh;
+        transformed.y -= fLen * uGravity * sh * sh;
         #ifndef SHELL_ATTR
         // Combed: on the head fur flows back from the muzzle, on the body it
         // lies down and back. Only the tangential part bends the strands.
         vec3 flow = position.y > 0.19 ? normalize(position - vec3(0.0, 0.225, 0.11)) : normalize(vec3(0.0, -1.0, -0.45));
         flow -= normal * dot(flow, normal);
-        transformed += flow * furLen * 0.55 * sh * sh;
+        transformed += flow * fLen * 0.55 * sh * sh;
         #endif`,
       );
     shader.fragmentShader = shader.fragmentShader
@@ -135,7 +163,9 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #include <opaque_fragment>`,
       );
     if (h >= 0) addTranslucency(shader);
+    if (eye) addSocketFade(shader, eye.closed, eye.fill);
   };
-  m.customProgramCacheKey = () => `fur-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.gravity}`;
+  if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
+  m.customProgramCacheKey = () => `fur-${h < 0 ? 'attr' : h.toFixed(3)}-${opts.density}-${opts.gravity}${eye ? '-sock' : ''}`;
   return m;
 }

@@ -12,6 +12,8 @@ export interface CreaturePalette {
   glow: number;
   eye: number;
   wing: number;
+  /** Strength of the dark back spots and saddle (1 = full; lighter for palettes whose dark tone is strong). */
+  markings?: number;
 }
 
 /** Smooth 3D value noise in [0,1]. */
@@ -93,6 +95,11 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   const mesh = surfaceNets(d, [-0.13, -0.012, -0.19], [0.13, 0.33, 0.135], resolution, 0);
   const n = mesh.positions.length / 3;
   const skinIndex = new Uint16Array(n * 4), skinWeight = new Float32Array(n * 4), color = new Float32Array(n * 3), furLen = new Float32Array(n), thin = new Float32Array(n);
+  // Eye-socket rim (0..1), the brightness ratio that removes the socket liner when the
+  // eyes are closed, and how much the hollow above the eye fills in then.
+  const socket = new Float32Array(n * 3);
+  const mk = pal.markings ?? 1;
+  const cSpot = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.55 + 0.45 * mk);
   // Ear frames (same as the sculpt's fins): along the fin, and across it in its plane.
   const earFrame = (['L', 'R'] as const).map((side) => {
     const s = side === 'L' ? 1 : -1;
@@ -131,11 +138,15 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
     c.lerp(cDark, 0.12 * mott);
     // Darker crown and back.
     if (ny > 0.45 && (att.region === 'head' || att.region === 'brow')) c.lerp(cDark, 0.45 * smooth(0.45, 1, ny));
-    if (nz < -0.25 && y > 0.08) c.lerp(cDark, 0.3 * smooth(-0.25, -0.8, nz));
-    // Soft leopard-ish spots on the back and haunches.
-    if (nz < -0.1 || att.region === 'thigh') {
-      const sp = vnoise(x * 70 + 11, y * 70, z * 70);
-      if (sp > 0.62) c.lerp(cDark, smooth(0.62, 0.72, sp) * 0.75);
+    if (nz < -0.25 && y > 0.08) c.lerp(cDark, (0.12 + 0.16 * mk) * smooth(-0.25, -0.8, nz));
+    // Soft dapples on the back and haunches: domain-warped so they're rounded,
+    // irregular and feathered at the edges (not hard blotches), fading in
+    // towards the spine.
+    const backM = Math.max(smooth(-0.05, -0.4, nz), att.region === 'thigh' ? smooth(-0.3, 0.2, -nz) : 0);
+    if (backM > 0) {
+      const wx = vnoise(x * 30 + 5, y * 30, z * 30) - 0.5, wy = vnoise(x * 30, y * 30 + 7, z * 30) - 0.5;
+      const sp = vnoise(x * 78 + 11 + wx * 1.6, y * 78 + wy * 1.6, z * 78);
+      c.lerp(cSpot, smooth(0.6, 0.8, sp) * (0.4 + 0.25 * mk) * backM);
     }
     // Cream belly / chest / muzzle / cheeks.
     const front = smooth(0.15, 0.6, nz);
@@ -181,16 +192,27 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
       if (st > 0.35 && ny + -nz > -0.2) c.lerp(cDark, 0.6);
     }
     if (att.region === 'tuft') c.lerp(cDark, 0.7);
-    // Socket liner.
+    // Socket liner (the shader fades it out while the eyes are closed, so a
+    // closed lid melts into the face instead of sitting in a dark goggle ring).
+    const lumBefore = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
     c.lerp(cDark, 0.22 * rim).multiplyScalar(1 - 0.18 * rim);
     // Baked ambient occlusion: creases (armpits, under the chin, between the
     // toes, ear roots, eye sockets) get darker, like dense fur self-shadowing.
     const ao = occlusion(S, x, y, z, mesh.normals[v * 3], ny, nz);
     // Paws get deeper creases so the toes read as separate beans.
     const paw = rw('toe') + rw('foot') * 0.6 + rw('finger');
-    c.multiplyScalar(0.5 + 0.5 * ao - 0.25 * paw * (1 - ao));
+    const aoK = 0.5 + 0.5 * ao - 0.32 * paw * (1 - ao);
+    c.multiplyScalar(aoK);
+    if (rim > 0) {
+      const lumOpen = (c.r * 0.3 + c.g * 0.59 + c.b * 0.11);
+      const lumClosed = lumBefore * THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.92), rim);
+      socket[v * 3] = rim;
+      socket[v * 3 + 1] = Math.min(3, lumClosed / Math.max(1e-4, lumOpen));
+      // Only the brow side fills: the lash line along the bottom must stay visible.
+      socket[v * 3 + 2] = rim * rim * smooth(-0.35, 0.45, (y - EYE.L[1]) / EYE_RADIUS);
+    } else socket[v * 3 + 1] = 1;
     // Toe tops a touch lighter, like worn fur on the knuckles.
-    c.lerp(cBelly, 0.18 * rw('toe') * smooth(0.2, 0.8, ny + nz * 0.5) * ao);
+    c.lerp(cBelly, 0.3 * rw('toe') * smooth(0.2, 0.8, ny + nz * 0.5) * ao);
     // Tiny brightness variation.
     const varn = 0.94 + 0.12 * vnoise(x * 300, y * 300, z * 300);
     color[v * 3] = c.r * varn;
@@ -220,6 +242,7 @@ export function creatureGeometry(pal: CreaturePalette, resolution = 0.0028): THR
   geo.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeight, 4));
   geo.setAttribute('furLen', new THREE.BufferAttribute(furLen, 1));
   geo.setAttribute('thin', new THREE.BufferAttribute(thin, 1));
+  geo.setAttribute('socket', new THREE.BufferAttribute(socket, 3));
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   geo.computeBoundingSphere();
   cache.set(key, geo);
