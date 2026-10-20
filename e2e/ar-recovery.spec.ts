@@ -89,6 +89,10 @@ test('AR recovers from bad situations: placement, tracking, visibility, errors, 
   await emu(page, 'setTracking', 'ok');
   await placeOnFloor(page);
   await expect.poll(async () => (await stats(page)).anchor, { timeout: 10_000 }).toBe('tracking');
+  // Submaps on anchors (when on): the emulator's anchors work, so the first submap gets one.
+  const submaps = (await stats(page)).submapAnchors;
+  expect(['on', 'off', 'unsupported']).toContain(submaps);
+  if (submaps === 'on') await expect.poll(() => num(page, 'submapAnchorsCreated'), { timeout: 10_000 }).toBeGreaterThan(0);
   await lookAround(page, 24);
 
   // --- Tracking loss: freeze, tell the user, resume ---------------------------
@@ -171,7 +175,11 @@ test('AR recovers from bad situations: placement, tracking, visibility, errors, 
   await expect.poll(() => alertText(page), { timeout: 10_000 }).toBe('');
 
   // --- Anchor drift → map correction -----------------------------------------
+  const anchorMoves = () => ev(page, () => (window.__hopper?.stack as { world: { anchorMoves: number } }).world.anchorMoves);
+  const moves0 = await anchorMoves();
   await emu(page, 'setAnchorDrift', 0.1, 0, 0);
+  // (With submaps on anchors, what the moved anchors carry moves with them.)
+  if (submaps === 'on') await expect.poll(anchorMoves, { timeout: 5000 }).toBeGreaterThan(moves0);
   await expect.poll(async () => ((await stats(page)).anchorCorrection as number[] | null)?.[12] ?? 0, { timeout: 5000 }).toBeCloseTo(-0.1, 3);
   await emu(page, 'setAnchorDrift', 0, 0, 0);
   await expect.poll(async () => Math.abs(((await stats(page)).anchorCorrection as number[] | null)?.[12] ?? 1), { timeout: 5000 }).toBeLessThan(0.011);
