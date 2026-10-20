@@ -7,7 +7,7 @@ Usage: la-loop-gate.py <la-loop-truth outputs...>"""
 import re
 import sys
 
-rx = re.compile(r"^([\d.]+) (\w+)\s+est \(([-\d.]+),([-\d.]+)\) true \(([-\d.]+),([-\d.]+)\) err (\d+)cm \|true\| (\d+)cm yaw ([-\d.]+) true ([-\d.]+) oldT (\d+) sup (\d+)/(\d+) base (-?\d+) truth (\S+) 2nd (\d+) uniq (\S+) c (\S+)(.*)$")
+rx = re.compile(r"^([\d.]+) (\w+)\s+est \(([-\d.]+),([-\d.]+)\) true \(([-\d.]+),([-\d.]+)\) err (\d+)cm \|true\| (\d+)cm yaw ([-\d.]+) true ([-\d.]+) oldT (\d+) sup (\d+)/(\d+) base (-?\d+) truth (\S+) 2nd (\d+) uniq (\S+) c (\S+)(?: open (\S+))?(.*)$")
 rows = []
 for f in [a for a in sys.argv[1:] if not a.startswith("--")]:
     for line in open(f):
@@ -16,12 +16,15 @@ for f in [a for a in sys.argv[1:] if not a.startswith("--")]:
             continue
         g = m.groups()
         rows.append(dict(t=float(g[0]), kind=g[1], err=int(g[6]), true=int(g[7]), mag=(float(g[2]) ** 2 + float(g[3]) ** 2) ** 0.5, sup=int(g[11]) / max(1, int(g[12])), n=int(g[12]), base=int(g[13]) / max(1, int(g[12])),
-                         uniq=float(g[16]) if g[16] not in ('undefined', 'NaN') else 0, c=float(g[17]) if g[17] not in ('undefined', 'NaN') else float('nan'), deg='DEG' in g[18], f=f))
+                         uniq=float(g[16]) if g[16] not in ('undefined', 'NaN') else 0, c=float(g[17]) if g[17] not in ('undefined', 'NaN') else float('nan'), open=float(g[18]) if g[18] not in (None, 'undefined', 'NaN') else 0, deg='DEG' in g[19], f=f))
 print(f"{len(rows)} estimates, {sum(r['err'] < 8 for r in rows)} right (<8cm)")
 
 
+OPEN = float(next((a.split('=')[1] for a in sys.argv if a.startswith('--open=')), '9'))
+
+
 def gate(r, sup, uniq, c, ratio):
-    return (not r['deg']) and r['n'] >= 300 and r['sup'] >= sup and r['uniq'] >= uniq and (r['c'] != r['c'] or r['c'] >= c) and r['sup'] >= ratio * max(r['base'], 0.1) and r['mag'] >= 0.04
+    return r['open'] <= OPEN and (not r['deg']) and r['n'] >= 300 and r['sup'] >= sup and r['uniq'] >= uniq and (r['c'] != r['c'] or r['c'] >= c) and r['sup'] >= ratio * max(r['base'], 0.1) and r['mag'] >= 0.04
 
 
 print('sup  uniq  c      ratio | pass right wrong (wrong: err cm)')
@@ -40,4 +43,9 @@ if '--list' in sys.argv or True:
     print('\nright estimates of real drift (err < 10cm, |true| >= 12cm):')
     for r in rows:
         if r['err'] < 10 and r['true'] >= 12:
-            print(f"  {r['f'][-12:]} t {r['t']:6.1f} {r['kind']:4} err {r['err']:2d} true {r['true']:2d} sup {r['sup']:.2f} base {r['base']:.2f} uniq {r['uniq']:.2f} c {r['c']:.3f} n {r['n']} {'DEG' if r['deg'] else ''}")
+            print(f"  {r['f'][-12:]} t {r['t']:6.1f} {r['kind']:4} err {r['err']:2d} true {r['true']:2d} sup {r['sup']:.2f} base {r['base']:.2f} uniq {r['uniq']:.2f} c {r['c']:.3f} open {r['open']:.2f} n {r['n']} {'DEG' if r['deg'] else ''}")
+
+print('\nwrong confident estimates (err >= 20cm, uniq >= 1.3, not degenerate):')
+for r in rows:
+    if r['err'] >= 20 and r['uniq'] >= 1.3 and not r['deg'] and r['sup'] >= 0.12:
+        print(f"  {r['f'][-12:]} t {r['t']:6.1f} {r['kind']:4} err {r['err']:2d} true {r['true']:2d} sup {r['sup']:.2f} base {r['base']:.2f} uniq {r['uniq']:.2f} c {r['c']:.3f} open {r['open']:.2f}")

@@ -432,6 +432,7 @@ export function fullMap(world: WorldModel, house: House): { world: WorldModel; n
   const half = Math.max(house.width, house.depth) / 2 + 1.2;
   const w = new WorldModel({ halfExtent: half });
   w.followCamera = false;
+  w.navParams = world.navParams;
   // Centre so that the lattices line up (the import is then a plain copy).
   const n = w.windowChunks * 32, r = w.res;
   const ox = m.originX + Math.round((-n / 2) * r / r - m.originX / r) * r;

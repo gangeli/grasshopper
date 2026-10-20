@@ -315,7 +315,7 @@ export class PlaceMemory {
    * share of the current view that visit explains. Resumable (yields
    * between search rows).
    */
-  *alignBest(pts: Float32Array | number[], pivot: Vec3, visits: { t0: number; t1: number; subs: Submap[] }[], maxShift: number, maxYaw: number, penalty = 0.02): Generator<void, PlaceMatch | null, void> {
+  *alignBest(pts: Float32Array | number[], pivot: Vec3, visits: { t0: number; t1: number; subs: Submap[]; maxShift?: number }[], maxShift: number, maxYaw: number, penalty = 0.02): Generator<void, PlaceMatch | null, void> {
     const np = pts.length / 3;
     this.why = '';
     if (np < 60 || !visits.length) return (this.why = 'few readings'), null;
@@ -383,7 +383,10 @@ export class PlaceMemory {
     // Prefer small corrections among near-ties: `penalty` × readings per 10cm (yaw at 1m).
     const pen = (dx: number, dz: number, yaw: number) => (penalty * m * (Math.hypot(dx, dz) + Math.abs(yaw))) / 0.1;
     let result: PlaceMatch | null = null;
+    const searchShift = maxShift;
     for (const visit of visits) {
+      // (A visit may come with a tighter range: how far the frame can have drifted since.)
+      const maxShift = Math.min(searchShift, visit.maxShift ?? searchShift);
       // Cells: 1 = on the visit's structure; 2 = next to it (x, y or z).
       // (And where each structure cell's points are, for the ICP refinement.)
       L.fill(0, 0, len);
@@ -417,7 +420,7 @@ export class PlaceMemory {
       if (this.debug) this.debug(score, visit, pivot);
       // Coarse lattice (kept whole for peak finding).
       const SY = 0.05, SS = 0.1;
-      const NY = Math.round((2 * maxYaw) / SY) + 1, NS = Math.round((2 * maxShift) / SS) + 1;
+      const NY = Math.round((2 * maxYaw) / SY) + 1, NS = Math.max(3, Math.round((2 * maxShift) / SS) + 1);
       const y0 = -((NY - 1) / 2) * SY, s0 = -((NS - 1) / 2) * SS;
       const grid = new Float32Array(NY * NS * NS);
       for (let a = 0; a < NY; a++)
@@ -593,7 +596,7 @@ export class PlaceMemory {
         // (The count is flat over a voxel or two — walls come out a couple of
         // voxels thick — so a converged ICP fit is the better estimate even
         // when it counts less; if it wandered off or got much worse, keep the peak.)
-        refined.push(Math.hypot(r.dx, r.dz) <= maxShift + 0.1 && Math.hypot(r.dx - pk.dx, r.dz - pk.dz) + Math.abs(r.dyaw - pk.dyaw) < 0.25 && r.s >= 0.6 * pk.s ? r : pk);
+        refined.push(Math.hypot(r.dx, r.dz) <= maxShift + 0.05 && Math.hypot(r.dx - pk.dx, r.dz - pk.dz) + Math.abs(r.dyaw - pk.dyaw) < 0.25 && r.s >= 0.6 * pk.s ? r : pk);
         yield;
       }
       refined.sort((a, b) => b.v - a.v);

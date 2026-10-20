@@ -47,7 +47,60 @@ proto.transform = function (sm, cs, sn, tx, tz, p) {
   subM.set(sm, mul(T, subM.get(sm) ?? frameAt(sm.t0)));
   origT.call(this, sm, cs, sn, tx, tz, p);
 };
+// Bookkeep each submap from its creation (a later realignment corrects the frames' truth too: a
+// submap made earlier must start from the truth of its frames as they were when it was made).
+const protoC = PlaceMemory.prototype as unknown as { close: () => void; submaps: Submap[] };
+const origClose = protoC.close;
+protoC.close = function (this: { submaps: Submap[] }) {
+  origClose.call(this);
+  for (const sm of this.submaps) if (!subM.has(sm)) subM.set(sm, frameAt(sm.t0));
+};
 let subsOf: (t0: number) => M | null = () => null;
+// The visit's truth transform measured directly: its cells fitted (ICP, x/z + yaw) onto the real
+// geometry, starting from the bookkept transform. Robust to bookkeeping gaps (re-attaches, warps).
+const fitCache = new Map<string, M>();
+const room = house.room;
+function fitToTruth(cells: number[], M0: M): M {
+  let G = inv(M0); // map -> truth
+  for (let it = 0; it < 10; it++) {
+    const P: number[] = [], Q: number[] = [];
+    for (let q = 0; q < cells.length; q += 3) {
+      const p = ap(G, { x: cells[q], y: cells[q + 1], z: cells[q + 2] });
+      let bd = 0.3, bx = 0, bz = 0;
+      for (const b of room.boxes) {
+        if (p.x < b.min.x - bd || p.x > b.max.x + bd || p.z < b.min.z - bd || p.z > b.max.z + bd || p.y < b.min.y - 0.1 || p.y > b.max.y + 0.1) continue;
+        // Nearest point on the box's vertical faces (x/z).
+        const inside = p.x > b.min.x && p.x < b.max.x && p.z > b.min.z && p.z < b.max.z;
+        let qx: number, qz: number;
+        if (inside) {
+          const dl = p.x - b.min.x, dr = b.max.x - p.x, dn = p.z - b.min.z, df = b.max.z - p.z, m = Math.min(dl, dr, dn, df);
+          (qx = m === dl ? b.min.x : m === dr ? b.max.x : p.x), (qz = m === dn ? b.min.z : m === df ? b.max.z : p.z);
+        } else (qx = Math.max(b.min.x, Math.min(b.max.x, p.x))), (qz = Math.max(b.min.z, Math.min(b.max.z, p.z)));
+        const d = Math.hypot(qx - p.x, qz - p.z);
+        if (d < bd) (bd = d), (bx = qx), (bz = qz);
+      }
+      if (bd >= 0.3 || bd > (it < 4 ? 0.3 : 0.12)) continue;
+      P.push(p.x, p.z);
+      Q.push(bx, bz);
+    }
+    const n = P.length / 2;
+    if (n < 30) break;
+    let mpx = 0, mpz = 0, mqx = 0, mqz = 0;
+    for (let q = 0; q < P.length; q += 2) (mpx += P[q]), (mpz += P[q + 1]), (mqx += Q[q]), (mqz += Q[q + 1]);
+    (mpx /= n), (mpz /= n), (mqx /= n), (mqz /= n);
+    let A = 0, B = 0;
+    for (let q = 0; q < P.length; q += 2) {
+      const ax = P[q] - mpx, az = P[q + 1] - mpz, bx = Q[q] - mqx, bz = Q[q + 1] - mqz;
+      A += bx * ax + bz * az;
+      B += bx * az - bz * ax;
+    }
+    const th = Math.atan2(B, A), c = Math.cos(th), sn = Math.sin(th);
+    // x' = c x + s z + t (same convention as the estimator)
+    const D = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, mqx - (c * mpx + sn * mpz), 0, mqz - (-sn * mpx + c * mpz), 1];
+    G = mul(D, G);
+  }
+  return inv(G); // truth -> map
+}
 runLargeArea({
   house, seed, seconds,
   noise: { ...NOISE_PROFILES[(process.env.PROFILE ?? 'house-hard') as 'house-hard'] },
@@ -55,6 +108,7 @@ runLargeArea({
   walk: JSON.parse(process.env.WALK ?? '{"panSpeed":[2,5],"glanceRate":0.15}'),
   setup: (world, stack, sensor) => {
     Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
+    if (process.env.NOPEOPLE) sensor.room.dynamic.length = 0;
     const dm = stack.game.health.drift as any;
     Object.assign(dm.opts, JSON.parse(process.env.DRIFT ?? '{}'));
     const orig = world.ingestDepthImage.bind(world);
@@ -76,6 +130,21 @@ runLargeArea({
       for (const f of frameM) if (f.t >= since) f.M = mul(T, f.M);
       origRealign(dx, dz, dyaw, pivot, since);
     };
+    // A re-attach corrects the frames since the detach (in the replay buffer) the same way.
+    const origRe = world.reattach.bind(world);
+    world.reattach = (c: { dx: number; dz: number; dyaw: number; pivot: { x: number; y: number; z: number } }) => {
+      const since = world.dormant?.t ?? Infinity;
+      const cs = Math.cos(c.dyaw), sn = Math.sin(c.dyaw), p = c.pivot;
+      const T = [cs, 0, -sn, 0, 0, 1, 0, 0, sn, 0, cs, 0, p.x - (cs * p.x + sn * p.z) + c.dx, 0, p.z - (-sn * p.x + cs * p.z) + c.dz, 1];
+      for (const f of frameM) if (f.t >= since) f.M = mul(T, f.M);
+      console.log(`# reattach at ${world.now.toFixed(1)} (dormant since ${since.toFixed(1)})`);
+      origRe(c);
+    };
+    const origDetach = world.detachMap.bind(world);
+    world.detachMap = () => {
+      console.log(`# detach at ${world.now.toFixed(1)}`);
+      origDetach();
+    };
     // Support of the true correction in each place alignment (is the truth even in the data?).
     if (world.placeMemory)
       world.placeMemory.debug = (score, visit) => {
@@ -86,8 +155,22 @@ runLargeArea({
         atTruth.set(visit.t0, score(a1.x - a0.x, a1.z - a0.z, tyaw));
       };
     subsOf = (t0) => {
-      const sm = world.placeMemory?.submaps.find((x) => x.t0 === t0);
-      return sm ? subM.get(sm) ?? frameAt(sm.t0) : null;
+      const pmem = world.placeMemory;
+      const sm = pmem?.submaps.find((x) => x.t0 === t0);
+      if (!sm || !pmem) return null;
+      const M0 = subM.get(sm) ?? frameAt(sm.t0);
+      if (!process.env.REFIT) return M0;
+      // The whole visit (submaps close in time from t0 on).
+      const subs = pmem.submaps.filter((x) => x.t0 >= t0 && x.t0 <= t0 + 60);
+      const key = `${t0}:${subs.length}:${subs.reduce((a, x) => a + x.cells[0], 0)}`;
+      let G = fitCache.get(key);
+      if (!G) {
+        const cells: number[] = [];
+        for (const x of subs) for (let q = 0; q < x.cells.length; q += 3 * 4) cells.push(x.cells[q] / 100, x.cells[q + 1] / 100, x.cells[q + 2] / 100);
+        G = fitToTruth(cells.slice(0, 6000), M0);
+        fitCache.set(key, G);
+      }
+      return G;
     };
     const on = dm.note.bind(dm);
     dm.note = (s: string) => {
@@ -106,7 +189,7 @@ runLargeArea({
       const e = Math.hypot(m.dx - tx, m.dz - tz);
       const tyaw = Math.atan2(old.M[8], old.M[0]) - Math.atan2(now.M[8], now.M[0]);
       if (kind !== 'none') errs.push(e);
-      rows.push(`${world.now.toFixed(1)} ${kind.padEnd(4)} est (${m.dx.toFixed(2)},${m.dz.toFixed(2)}) true (${tx.toFixed(2)},${tz.toFixed(2)}) err ${(e * 100).toFixed(0)}cm |true| ${(Math.hypot(tx, tz) * 100).toFixed(0)}cm yaw ${m.dyaw.toFixed(3)} true ${tyaw.toFixed(3)} oldT ${m.oldT.toFixed(0)} sup ${m.best}/${m.n} base ${m.base} truth ${(atTruth.get(m.visitT0) ?? NaN).toFixed(0)}${m.second !== undefined ? ` 2nd ${m.second} uniq ${m.unique?.toFixed(2)} c ${m.constraint?.toFixed(3)}` : ''}${m.degenerate ? ' DEG' : ''}`);
+      rows.push(`${world.now.toFixed(1)} ${kind.padEnd(4)} est (${m.dx.toFixed(2)},${m.dz.toFixed(2)}) true (${tx.toFixed(2)},${tz.toFixed(2)}) err ${(e * 100).toFixed(0)}cm |true| ${(Math.hypot(tx, tz) * 100).toFixed(0)}cm yaw ${m.dyaw.toFixed(3)} true ${tyaw.toFixed(3)} oldT ${m.oldT.toFixed(0)} sup ${m.best}/${m.n} base ${m.base} truth ${(atTruth.get(m.visitT0) ?? NaN).toFixed(0)}${m.second !== undefined ? ` 2nd ${m.second} uniq ${m.unique?.toFixed(2)} c ${m.constraint?.toFixed(3)} open ${m.openShare?.toFixed(2)}` : ''}${m.degenerate ? ' DEG' : ''}`);
     };
   },
 });

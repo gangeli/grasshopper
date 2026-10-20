@@ -61,6 +61,16 @@ export interface DriftOptions {
   placeMinSupport: number;
   /** Place loops: the best correction must beat any distinct one by this factor. */
   loopUnique: number;
+  /**
+   * Loop closures look for corrections up to floor + perM × metres walked
+   * since the visit (odometry drift: ~1–3% of the path), capped by
+   * loopMaxShift. Null: always the full range.
+   */
+  loopDriftBound: { floor: number; perM: number } | null;
+  /** Loop warps cover only this many seconds before the closure (0: all the way back to the matched visit). */
+  loopWarpWindow: number;
+  /** Post-loss checks fall back to place memory when the map copy taken at the loss is gone. */
+  placeEvent: boolean;
   /** Held frames are matched against place memory first (the voxel map's old structure if that finds nothing). */
   placeHold: boolean;
   /** Relocalisation against a dormant map (see WorldModel.detachMap): search range. */
@@ -68,7 +78,7 @@ export interface DriftOptions {
   relocMaxYaw: number;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 8, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false, placeLoop: true, placeMinSupport: 0.15, loopUnique: 1.3, relocMaxShift: 1.0, relocMaxYaw: 0.3, placeHold: false };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 8, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false, placeLoop: true, placeMinSupport: 0.15, loopUnique: 1.3, relocMaxShift: 1.0, relocMaxYaw: 0.3, placeHold: false, placeEvent: true, loopWarpWindow: 0, loopDriftBound: { floor: 0.15, perM: 0.03 } };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -186,7 +196,7 @@ export class DriftMonitor {
     // existed): look for the frames since the loss in place memory instead
     // (wide: a relocalisation can be off by a lot).
     let place: (Est & { unique: number; constraint: number }) | null = null;
-    if (!m && O.placeLoop) {
+    if (!m && O.placeLoop && O.placeEvent) {
       place = yield* this.world.placeSearch({ since: this.world.lastTrackingEvent, minAge: 0.5, maxShift: O.relocMaxShift, maxYaw: O.relocMaxYaw, penalty: 0.005, frames: 60, span: 6 });
       m = place;
     }
@@ -199,16 +209,17 @@ export class DriftMonitor {
     const clear = !place || (place.unique >= O.loopUnique && place.best >= O.placeMinSupport * place.n);
     // Only looks that line up with known structure somehow say anything:
     // nothing matching at any shift is new territory, not a contradiction.
-    // (Place looks: how much of the best fit holds without the correction.)
-    if (place) {
-      if (m.best >= O.placeMinSupport * m.n && clear) this.eventSeen.push(m.base / m.best);
-    } else if (m.n && m.best >= 0.2 * m.n) this.eventSeen.push(m.base / m.n);
+    // (Place looks compare with older visits, which carry whatever drift had
+    // built up by then: they may fix the frame, but never condemn the map.)
+    if (!place && m.n && m.best >= 0.2 * m.n) this.eventSeen.push(m.base / m.n);
     // Look after look, the map as it stands fits nothing while a shifted map
     // fits clearly: no need to wait out the window to know the map is off.
     // (Readings landing in space the old map saw clearly empty count even when
     // the right correction can't be pinned down.)
-    const intoFree = m.n >= 100 && m.base <= -0.12 * m.n;
-    if (intoFree || (!m.degenerate && clear && m.n >= 100 && m.best >= 0.2 * m.n && m.base <= (place ? 0.1 : 0.05) * m.n && displacement(m, null) >= O.minCorrection)) {
+    const intoFree = !place && m.n >= 100 && m.base <= -0.12 * m.n;
+    if (place) {
+      // (see above)
+    } else if (intoFree || (!m.degenerate && m.n >= 100 && m.best >= 0.2 * m.n && m.base <= 0.05 * m.n && displacement(m, null) >= O.minCorrection)) {
       this.contra++;
       this.contraMag = Math.max(this.contraMag, displacement(m, null));
     } else if (m.n >= 100 && m.base >= 0.3 * m.n) this.contra = 0;
@@ -230,7 +241,7 @@ export class DriftMonitor {
     }
     // Votes: estimates from different moments that agree on the same correction.
     const agreeing = this.votes.filter((v) => t - v.t >= 0.9 && displacement(m, v.m) <= O.agree);
-    this.votes.push({ m, t, weak });
+    this.votes.push({ m, t, weak, place: !!place });
     const strong = agreeing.filter((v) => !v.weak).length + (weak ? 0 : 1);
     const enough = strong >= 2 || agreeing.length + 1 >= 4;
     if (enough && agreeing.length + 1 > this.against) {
@@ -246,7 +257,7 @@ export class DriftMonitor {
     this.note(`event: ${weak ? 'weak ' : ''}vote ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} (agreeing ${agreeing.length}, against ${this.against})`);
     return false;
   }
-  private votes: { m: Est; t: number; weak: boolean }[] = [];
+  private votes: { m: Est; t: number; weak: boolean; place?: boolean }[] = [];
   private contra = 0;
   private contraMag = 0;
   private contradicted = false;
@@ -268,7 +279,7 @@ export class DriftMonitor {
     const contradicted = this.contradicted, contraMag = this.contraMag;
     this.contra = 0;
     this.contraMag = 0;
-    const sure = votes.filter((x) => !x.weak);
+    const sure = votes.filter((x) => !x.weak && !x.place);
     // Size of the likely jump (weak looks count here: they pick how hard to reset, not whether to).
     const mag = votes.length ? Math.max(...votes.map((x) => displacement(x.m, null))) : 0;
     // Repeated confident jump estimates that never agreed enough to fix, with
@@ -415,7 +426,7 @@ export class DriftMonitor {
 
   private *closing(t: number): Generator<void, boolean, void> {
     const O = this.opts;
-    const pm = O.placeLoop ? yield* this.world.placeSearch({ minAge: O.loopMinAge, maxShift: O.loopMaxShift, maxYaw: O.loopMaxYaw }) : null;
+    const pm = O.placeLoop ? yield* this.world.placeSearch({ minAge: O.loopMinAge, maxShift: O.loopMaxShift, maxYaw: O.loopMaxYaw, drift: O.loopDriftBound ?? undefined }) : null;
     const m = O.placeLoop ? pm : yield* this.world.misalignmentSearch({ snapshot: 'aged', minAge: O.loopMinAge, maxShift: O.loopMaxShift, maxYaw: O.loopMaxYaw });
     this.last = { t, m, fired: false };
     const J = this.world.poseGate.lastJump;
@@ -431,7 +442,7 @@ export class DriftMonitor {
     const P = this.pendingLoop;
     if (P && (this.world.now - P.wt > O.loopPendingSeconds || P.corr !== this.corrections)) this.pendingLoop = null;
     if (!m) {
-      this.note('loop: no old structure in view');
+      this.note(`loop: no old structure in view${O.placeLoop ? ` (${this.world.placeWhy})` : ''}`);
       return false;
     }
     const mag = displacement(m, null);
@@ -449,7 +460,13 @@ export class DriftMonitor {
       this.world.realign(m.dx, m.dz, m.dyaw, m.pivot, since);
       // What was mapped between then and now drifted by a growing share of
       // the same error: move it too, so the loop lines up all the way round.
-      if (this.opts.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) this.world.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      if (this.opts.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) {
+        // Only the last stretch (loopWarpWindow s) when set: drift that the
+        // loop reveals mostly built up lately; spreading it linearly over a
+        // long loop moves structure that was mapped right.
+        const from = O.loopWarpWindow > 0 ? Math.max(m.oldT, since - O.loopWarpWindow) : m.oldT;
+        this.world.warpSince(from, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      }
       this.pendingLoop = null;
       this.pending = null;
       this.corrections++;

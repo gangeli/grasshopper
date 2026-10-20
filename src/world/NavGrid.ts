@@ -85,7 +85,7 @@ export class NavGrid {
   constructor(readonly world: WorldModel, params: Partial<NavParams> = {}, deferred = false) {
     if (!world.grid) throw new Error('NavGrid needs an initialized world grid');
     this.g = world.grid;
-    this.p = { ...DEFAULT_NAV, ...params };
+    this.p = { ...DEFAULT_NAV, ...world.navParams, ...params };
     this.colStart = new Int32Array(this.g.nx * this.g.nz);
     this.colCount = new Uint8Array(this.g.nx * this.g.nz);
     if (!deferred) this.build();

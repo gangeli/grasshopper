@@ -106,6 +106,13 @@ export class WorldModel {
   histogramRefine = false;
   /** Set false once play starts: rebuilding the map mid-round would be disruptive. */
   allowFloorRefine = true;
+  /**
+   * Navigation settings for this map's depth source (NavGrid takes them as
+   * defaults). Sparse depth (motion stereo from the camera, no depth API)
+   * carves the space just above the floor far less densely than a depth
+   * sensor: one observed-empty voxel above a column is evidence enough there.
+   */
+  navParams: Partial<import('./NavGrid').NavParams> = {};
   /** Number of depth points integrated so far (diagnostics/HUD). */
   depthPoints = 0;
 
@@ -737,7 +744,7 @@ export class WorldModel {
     this.placeWhy = why;
     return null;
   }
-  *placeSearch(opts: { frames?: number; since?: number; minAge: number; maxShift: number; maxYaw: number; memory?: PlaceMemory; penalty?: number; span?: number }): Generator<void, (Misalignment & { second: number; secondAt: PlaceMatch['secondAt']; constraint: number; unique: number; visitT0: number }) | null, void> {
+  *placeSearch(opts: { frames?: number; since?: number; minAge: number; maxShift: number; maxYaw: number; memory?: PlaceMemory; penalty?: number; span?: number; drift?: { floor: number; perM: number } }): Generator<void, (Misalignment & { second: number; secondAt: PlaceMatch['secondAt']; constraint: number; unique: number; visitT0: number; openShare: number }) | null, void> {
     const pm = opts.memory ?? this.placeMemory, g = this.grid;
     if (!pm || !g || !this.replay.length) return this.noPlace('no memory/grid/frames');
     let frames = this.replay.slice(-(opts.frames ?? 20));
@@ -769,16 +776,46 @@ export class WorldModel {
     if (pts.length < 180 || !headings.length) return this.noPlace('too few readings');
     const pad = opts.maxShift + 0.3;
     const eye = frames[frames.length - 1].eye;
-    const visits = pm.visitsNear({ minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }, frames[0].t - opts.minAge, { x: eye.x, z: eye.z, headings, maxDist: 1.5 + opts.maxShift, maxTurn: 0.6 + opts.maxYaw });
+    const visits = pm.visitsNear({ minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }, frames[0].t - opts.minAge, { x: eye.x, z: eye.z, headings, maxDist: 2.5 + opts.maxShift, maxTurn: 1.0 + opts.maxYaw });
     if (!visits.length) return this.noPlace('no visit seen from here');
     // The oldest visit and the two that saw the most of this place: whichever explains the view best.
     const cand = [...new Set([visits[0], ...visits.slice().sort((a, b) => b.cells - a.cells).slice(0, 1)])].filter((v) => v.cells >= 150);
     if (!cand.length) return this.noPlace('no visit with enough structure');
     const pivot = frames[frames.length - 1].eye;
     const epoch = this.epoch, fv = this.frameVersion;
-    const m: PlaceMatch | null = yield* pm.alignBest(pts, pivot, cand, opts.maxShift, opts.maxYaw, opts.penalty);
+    // Odometry drift since a visit is bounded by the walk since then: don't
+    // search (or believe) corrections larger than that (a parallel wall across
+    // a corridor otherwise "matches" at its distance).
+    const D = opts.drift;
+    const visitsIn = D ? cand.map((v) => ({ ...v, maxShift: D.floor + D.perM * Math.max(0, this.walked - this.walkedAt(this.timeCode(v.t1))) })) : cand;
+    const m: PlaceMatch | null = yield* pm.alignBest(pts, pivot, visitsIn, opts.maxShift, opts.maxYaw, opts.penalty);
     if (!m || this.epoch !== epoch || this.frameVersion !== fv) return this.noPlace(`search gave up${pm.why ? `: ${pm.why}` : ''}`);
-    return { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot, base: m.base, best: m.best, n: m.n, degenerate: m.degenerate, snapT: frames[0].t, oldT: m.visitT1, second: m.second, secondAt: m.secondAt, constraint: m.constraint, unique: m.unique, visitT0: m.visitT0 };
+    // Free-space check: the matched visit's structure, brought into the
+    // current frame, must not lie where the camera currently sees empty space
+    // (a parallel wall across a corridor "matches" the near one at its
+    // distance, but then the near wall's old copy lands in the open).
+    const visit = cand.find((v) => v.t0 === m.visitT0)!;
+    const c = Math.cos(m.dyaw), sn = Math.sin(m.dyaw), P = m.pivot;
+    let seen = 0, open = 0;
+    for (const sub of visit.subs) {
+      const C = sub.cells;
+      for (let q = 0; q < C.length; q += 9) {
+        const x = C[q] / 100, y = C[q + 1] / 100, z = C[q + 2] / 100;
+        if (x < minX - 0.3 || x > maxX + 0.3 || z < minZ - 0.3 || z > maxZ + 0.3) continue;
+        // Inverse of x' = P + R(x - P) + d.
+        const ux = x - P.x - m.dx, uz = z - P.z - m.dz;
+        const X = P.x + c * ux - sn * uz, Z = P.z + sn * ux + c * uz;
+        if (Math.hypot(X - eye.x, Z - eye.z) > 2.5) continue;
+        const i = g.cellX(X), j = g.cellY(y), k = g.cellZ(Z);
+        if (!g.inBounds(i, j, k)) continue;
+        const v = g.data[g.idx(i, j, k)];
+        if (v === 0) continue;
+        seen++;
+        if (v <= -20) open++;
+      }
+    }
+    const openShare = seen >= 30 ? open / seen : 0;
+    return { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot, base: m.base, best: m.best, n: m.n, degenerate: m.degenerate, snapT: frames[0].t, oldT: m.visitT1, second: m.second, secondAt: m.secondAt, constraint: m.constraint, unique: m.unique, visitT0: m.visitT0, openShare };
   }
 
   /** See VoxelGrid.shieldedCarving. */
@@ -1092,9 +1129,12 @@ export class WorldModel {
     const px = c.pivot.x, pz = c.pivot.z;
     const visit = (I: number, J: number, K: number, v: number, h: number, top: number, under: number): boolean => {
       if (v <= 0 || v === 127) return false;
-      const last = h & 0xffff;
-      if (last < code0 || last > code1) return false;
-      const [cs, sn, tx, tz] = corrFor(last);
+      // When the voxel was laid down (birth) or last hit: structure from
+      // before t0 that was merely seen again since (in the drifting frame,
+      // landing on the same voxel) belongs where it is.
+      const when = this.warpByBirth ? h >>> 16 : h & 0xffff;
+      if (when < code0 || when > code1) return false;
+      const [cs, sn, tx, tz] = corrFor(when);
       const x = this.latX + (I + 0.5) * r - px, z = this.latZ + (K + 0.5) * r - pz;
       const X = px + cs * x + sn * z + tx, Z = pz - sn * x + cs * z + tz;
       const I2 = Math.floor((X - this.latX) / r), K2 = Math.floor((Z - this.latZ) / r);
@@ -1166,7 +1206,7 @@ export class WorldModel {
       yield;
       let touched = false;
       for (let q = 0; q < ch.hitVal.length && !touched; q++) {
-        const h = ch.hitVal[q] & 0xffff;
+        const h = this.warpByBirth ? ch.hitVal[q] >>> 16 : ch.hitVal[q] & 0xffff;
         if (h >= code0 && h <= code1) touched = true;
       }
       if (!touched) continue;
@@ -1228,6 +1268,8 @@ export class WorldModel {
     g.version++;
     return m;
   }
+  /** Warp by when structure was laid down (birth) rather than when it was last seen. */
+  warpByBirth = true;
   /** Loop-closure warps applied (diagnostics). */
   warps = 0;
 
