@@ -821,7 +821,7 @@ export class WorldModel {
   }
 
   /** See VoxelGrid.shieldedCarving. */
-  shieldedCarving = false;
+  shieldedCarving = true;
   /** See ingestDepthImage: hold back frames that contradict the map (on by default). */
   holdOnConflict = true;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */

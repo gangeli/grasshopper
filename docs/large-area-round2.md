@@ -107,3 +107,53 @@ local precision 22%, falseFree 38%).
   re-integrated a few per frame, place memories merged) and the pet is
   re-anchored. `test/reattach.test.ts`: a 57 cm / 0.12 rad jump in a scanned
   room → reattached within 10 s, frame error < 8 cm, no second copy.
+
+### 4. Loop closure that fires — and why it is off again
+
+With `loopPendingSeconds` fixed and place memory, loop closures fire (1–3
+per 10-minute walk). They make the map worse. Bisect, house-hard, fast
+pans, four homes (10×12 s1, 12×15 s2, 14×16 s6, 8×12 s4) × 600 s:
+
+| arm | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm (max) | pathColl% | resets | loops |
+|---|---|---|---|---|---|---|---|---|---|
+| off (all round-2 loop changes off) | 75.9 | 69.3 | 73.4 | 7.1 | 15.6 | 23 (74) | 33.4 | 2.0 | 0 |
+| place loops + warp | 70.0 | 55.5 | 69.1 | 9.9 | 18.0 | 43 (94) | 48.4 | 2.8 | 2.5 |
+| place loops, no warp | 70.2 | 52.7 | 65.4 | 11.0 | 18.4 | 33 (84) | 41.6 | 3.0 | 2.2 |
+| place loops, warp last 30 s only | 64.9 | 52.1 | 66.4 | 12.5 | 21.6 | 56 (101) | 32.5 | 3.2 | 2.8 |
+
+(Six homes, same story: with the post-loss place fallback and detach, prec
+59.5%; with a wider search, 62.0%; baseline 73.3%.)
+
+What the ground truth says (`la-loop-truth`, now trustworthy: truth at the
+camera, per-frame truth through realignments and re-attaches, submaps
+bookkept from creation, and each matched visit's cells checked against the
+real geometry — 66–82% of them land on it, so the bookkeeping is right):
+
+- of 51 realignments in these runs, 30 reduced the frame error (often a lot:
+  −46, −55, −130 cm), 17 increased it, four by 54–96 cm;
+- when the estimator finds the right correction it is accurate (2–9 cm,
+  e.g. a 57 cm / 0.1 rad drift recovered to 4 cm);
+- but there are confident wrong ones that no single-look test separates:
+  e.g. 89% of the readings land on the visit after a correction that is
+  1.5 m off the truth, unique (no other peak), well constrained, with the
+  right yaw. The visit was picked by where the camera *thinks* it is; with
+  1.1 m of real drift the right place was outside it and a look-alike (walls,
+  a doorway, furniture of the same kind) was inside. Support, uniqueness,
+  ICP constraint, a drift bound on the search range and a free-space check
+  (the visit's structure must not land where the camera sees empty space)
+  were all tried against the labelled estimates; none separates them.
+- Even right closures cost local precision when the drift built up unevenly:
+  the warp spreads the correction linearly over the walk since the visit and
+  moves structure that was mapped right (8×12 s4: a closure that cut the
+  frame error 43 → 16 cm took precision 95% → 50%); without the warp, the
+  recent map near the player is left offset and holds fight the corrected
+  frame.
+
+So the defaults keep loop closure off (`placeLoop: false`,
+`loopPendingSeconds: 0`), as in round 1, but now knowingly; all of it is
+there as options (`DRIFT={"placeLoop":true,"loopPendingSeconds":8,...}`).
+What it needs next: a real pose graph (per-submap poses with odometry edges
+between consecutive submaps and loop edges, solved, then the voxel map
+re-rendered or warped per submap instead of linearly), and aliasing
+protection from more than one look (two different earlier visits, or a
+look from a clearly different view, must agree).

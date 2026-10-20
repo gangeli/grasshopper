@@ -78,7 +78,7 @@ export interface DriftOptions {
   relocMaxYaw: number;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 0, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false, placeLoop: false, placeMinSupport: 0.15, loopUnique: 1.3, relocMaxShift: 1.0, relocMaxYaw: 0.3, placeHold: false, placeEvent: false, loopWarpWindow: 0, loopDriftBound: { floor: 0.15, perM: 0.03 } };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 0, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false, placeLoop: false, placeMinSupport: 0.15, loopUnique: 1.3, relocMaxShift: 1.0, relocMaxYaw: 0.3, placeHold: false, placeEvent: true, loopWarpWindow: 0, loopDriftBound: { floor: 0.15, perM: 0.03 } };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -192,21 +192,30 @@ export class DriftMonitor {
   private *afterEvent(t: number): Generator<void, boolean, void> {
     const O = this.opts;
     let m: Est | null = yield* this.world.misalignmentSearch({ maxShift: 0.5, maxYaw: 0.1, snapshot: 'event' });
-    // The snapshot taken at the loss is gone once the window moves (or never
-    // existed): look for the frames since the loss in place memory instead
-    // (wide: a relocalisation can be off by a lot).
+    // The copy of the map taken at the loss is matched with a narrow search
+    // and only readings in space it knew: when that says nothing clear (no
+    // estimate, or a degenerate / weak one), look for the frames since the
+    // loss in place memory instead (wide: a relocalisation can be off by a lot).
     let place: (Est & { unique: number; constraint: number }) | null = null;
-    if (!m && O.placeLoop && O.placeEvent) {
+    const snapClear = !!m && !m.degenerate && m.n >= O.minPoints && m.best >= O.minSupport * m.n;
+    if (!snapClear && O.placeEvent) {
       place = yield* this.world.placeSearch({ since: this.world.lastTrackingEvent, minAge: 0.5, maxShift: O.relocMaxShift, maxYaw: O.relocMaxYaw, penalty: 0.005, frames: 60, span: 6 });
-      m = place;
+      if (place) m = place;
     }
     this.last = { t, m, fired: false };
     if (!m) {
       this.note('event: no estimate yet');
       return false;
     }
-    // Place estimates count support over all readings (not only those near old structure) and have their own ambiguity tests.
-    const clear = !place || (place.unique >= O.loopUnique && place.best >= O.placeMinSupport * place.n);
+    // Place estimates count support over all readings (not only those near
+    // old structure) and have their own ambiguity tests. They compare with
+    // older visits, which carry whatever drift had built up by then: only
+    // trusted when they undo a position jump the pose gate saw at the loss
+    // (otherwise they act as a loop closure, which measured worse).
+    const J = this.world.poseGate.lastJump;
+    const jumpMag = J && J.t >= this.world.lastTrackingEvent - 2 ? Math.hypot(J.dx, J.dz) : 0;
+    const undoes = !!place && jumpMag >= 0.1 && Math.hypot(place.dx + J!.dx, place.dz + J!.dz) < 0.15 + 0.3 * jumpMag;
+    const clear = !place || (undoes && place.unique >= O.loopUnique && place.best >= O.placeMinSupport * place.n);
     // Only looks that line up with known structure somehow say anything:
     // nothing matching at any shift is new territory, not a contradiction.
     // (Place looks compare with older visits, which carry whatever drift had
@@ -229,7 +238,7 @@ export class DriftMonitor {
       return false;
     }
     const mag = displacement(m, null);
-    const ok = place ? !m.degenerate && clear && m.n >= O.loopMinPoints && m.best >= O.minRatio * Math.max(m.base, 0.05 * m.n) : !m.degenerate && m.n >= O.minPoints && m.best >= O.minSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n);
+    const ok = place ? !m.degenerate && clear && m.n >= O.loopMinPoints && m.best >= 1.15 * Math.max(m.base, 0.05 * m.n) : !m.degenerate && m.n >= O.minPoints && m.best >= O.minSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n);
     // A confident "nothing moved" (most readings on known surfaces as they are) votes against a jump.
     if (!m.degenerate && m.n >= 800 && m.base >= 0.6 * m.n && mag < O.minCorrection) this.against++;
     // Fewer readings, but the old map plainly doesn't fit where it is and does
