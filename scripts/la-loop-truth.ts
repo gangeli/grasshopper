@@ -56,6 +56,7 @@ protoC.close = function (this: { submaps: Submap[] }) {
   for (const sm of this.submaps) if (!subM.has(sm)) subM.set(sm, frameAt(sm.t0));
 };
 let subsOf: (t0: number) => M | null = () => null;
+const visitQ = new Map<number, number>();
 // The visit's truth transform measured directly: its cells fitted (ICP, x/z + yaw) onto the real
 // geometry, starting from the bookkept transform. Robust to bookkeeping gaps (re-attaches, warps).
 const fitCache = new Map<string, M>();
@@ -159,6 +160,20 @@ runLargeArea({
       const sm = pmem?.submaps.find((x) => x.t0 === t0);
       if (!sm || !pmem) return null;
       const M0 = subM.get(sm) ?? frameAt(sm.t0);
+      // How well the visit's cells sit on real geometry through this transform (bookkeeping check).
+      const Mi = inv(M0);
+      let good = 0, n = 0;
+      for (const x of pmem.submaps.filter((y) => y.t0 >= t0 && y.t0 <= t0 + 60))
+        for (let q = 0; q < x.cells.length; q += 3 * 8) {
+          const p = ap(Mi, { x: x.cells[q] / 100, y: x.cells[q + 1] / 100, z: x.cells[q + 2] / 100 });
+          n++;
+          for (const b of house.room.boxes)
+            if (p.x > b.min.x - 0.08 && p.x < b.max.x + 0.08 && p.y > b.min.y - 0.08 && p.y < b.max.y + 0.08 && p.z > b.min.z - 0.08 && p.z < b.max.z + 0.08) {
+              good++;
+              break;
+            }
+        }
+      visitQ.set(t0, n ? good / n : NaN);
       if (!process.env.REFIT) return M0;
       // The whole visit (submaps close in time from t0 on).
       const subs = pmem.submaps.filter((x) => x.t0 >= t0 && x.t0 <= t0 + 60);
@@ -185,11 +200,12 @@ runLargeArea({
       const old = { M: (m.visitT0 !== undefined ? subsOf(m.visitT0) : null) ?? histAt(m.oldT) };
       const p = camTrue;
       const a1 = ap(old.M, p), a0 = ap(now.M, p);
+      const pivErr = m.pivot ? Math.hypot(m.pivot.x - a0.x, m.pivot.z - a0.z) : NaN;
       const tx = a1.x - a0.x, tz = a1.z - a0.z;
       const e = Math.hypot(m.dx - tx, m.dz - tz);
       const tyaw = Math.atan2(old.M[8], old.M[0]) - Math.atan2(now.M[8], now.M[0]);
       if (kind !== 'none') errs.push(e);
-      rows.push(`${world.now.toFixed(1)} ${kind.padEnd(4)} est (${m.dx.toFixed(2)},${m.dz.toFixed(2)}) true (${tx.toFixed(2)},${tz.toFixed(2)}) err ${(e * 100).toFixed(0)}cm |true| ${(Math.hypot(tx, tz) * 100).toFixed(0)}cm yaw ${m.dyaw.toFixed(3)} true ${tyaw.toFixed(3)} oldT ${m.oldT.toFixed(0)} sup ${m.best}/${m.n} base ${m.base} truth ${(atTruth.get(m.visitT0) ?? NaN).toFixed(0)}${m.second !== undefined ? ` 2nd ${m.second} uniq ${m.unique?.toFixed(2)} c ${m.constraint?.toFixed(3)} open ${m.openShare?.toFixed(2)}` : ''}${m.degenerate ? ' DEG' : ''}`);
+      rows.push(`${world.now.toFixed(1)} ${kind.padEnd(4)} est (${m.dx.toFixed(2)},${m.dz.toFixed(2)}) true (${tx.toFixed(2)},${tz.toFixed(2)}) err ${(e * 100).toFixed(0)}cm |true| ${(Math.hypot(tx, tz) * 100).toFixed(0)}cm yaw ${m.dyaw.toFixed(3)} true ${tyaw.toFixed(3)} oldT ${m.oldT.toFixed(0)} sup ${m.best}/${m.n} base ${m.base} truth ${(atTruth.get(m.visitT0) ?? NaN).toFixed(0)} vq ${(visitQ.get(m.visitT0) ?? NaN).toFixed(2)} piv ${(pivErr * 100).toFixed(0)}cm${m.second !== undefined ? ` 2nd ${m.second} uniq ${m.unique?.toFixed(2)} c ${m.constraint?.toFixed(3)} open ${m.openShare?.toFixed(2)}` : ''}${m.degenerate ? ' DEG' : ''}`);
     };
   },
 });

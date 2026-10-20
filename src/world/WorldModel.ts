@@ -663,6 +663,7 @@ export class WorldModel {
     this.conflictRate = 0;
     this.conflictWin = [];
     this.multiView?.reset();
+    this.emit({ kind: 'detach', t: this.now });
   }
 
   /**
@@ -710,6 +711,7 @@ export class WorldModel {
     this.floorRefinements--;
     this.requeueArchived();
     this.replayQueue = frames;
+    this.emit({ kind: 'reattach', t: this.now, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } } });
   }
 
   /**
@@ -1263,6 +1265,7 @@ export class WorldModel {
       ch.hitIdx = idx.length ? Uint16Array.from(idx) : null;
       ch.hitVal = idx.length ? Uint32Array.from(val) : null;
     }
+    this.emit({ kind: 'warp', t: this.now, t0, t1, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } }, moved: m });
     if (!m) return 0;
     g.touchAll();
     g.version++;
@@ -1368,6 +1371,7 @@ export class WorldModel {
     this.grid = g;
     this.epoch = nextEpoch;
     this.recenters++;
+    this.emit({ kind: 'window', t, si, sk });
   }
 
   /** Memory held by the map (bytes): the grid's arrays, recovery snapshots, replay buffer. */
@@ -1635,6 +1639,7 @@ export class WorldModel {
     this.conflictWin = [];
     this.snapshots = [];
     this.replayFrames(() => true);
+    this.emit({ kind: 'rewrite', t: this.now, why: 'floor' });
   }
 
   /** Recovery: age all evidence so new observations quickly override a map that drifted out of line. */
@@ -1987,6 +1992,7 @@ export class WorldModel {
     }
     this.placeMemory?.realign({ dx, dz, dyaw, pivot }, since);
     this.applyRegistration(T);
+    this.emit({ kind: 'realign', t: this.now, since, correction: { dx, dz, dyaw, pivot: { x: pivot.x, z: pivot.z } } });
   }
 
   /**
@@ -2048,6 +2054,7 @@ export class WorldModel {
       this.conflictRate = 0;
       this.conflictWin = [];
       this.multiView?.reset();
+      this.emit({ kind: 'rewrite', t: this.now, why: 'reset' });
       return;
     }
     this.recoveries.hard++;
@@ -2065,6 +2072,7 @@ export class WorldModel {
     this.conflictRate = 0;
     this.conflictWin = [];
     this.multiView?.reset();
+    this.emit({ kind: 'rewrite', t: this.now, why: 'reset' });
   }
 
   /**
@@ -2133,6 +2141,61 @@ export class WorldModel {
 
   // --- Export / import (persistence) -------------------------------------------------
   /** Horizontal lattice of the map (chunk boundaries); fixed for the session. */
+  /**
+   * The map's lattice and where the window sits on it (lattice columns of
+   * window cell (0, ·, 0)); null before the floor is set. Session-fixed
+   * origin: chunk (cx, cz) of the export / archive is lattice columns
+   * [cx·32, cx·32+32) × [cz·32, cz·32+32).
+   */
+  windowLattice(): Lattice | null {
+    return this.grid ? this.lattice() : null;
+  }
+  /**
+   * When chunk (cx, cz) (lattice chunk coordinates) last got occupancy
+   * evidence (s, session clock), or null if never / not mapped. Window
+   * chunks are scanned (a few k voxels), archived ones read their stored
+   * hit times.
+   */
+  chunkLastSeen(cx: number, cz: number): number | null {
+    const g = this.grid;
+    if (!g || !g.hitTime) return null;
+    const C = CHUNK, W = this.windowChunks, wcx = this.wi / C, wcz = this.wk / C;
+    let best = 0;
+    if (cx >= wcx && cx < wcx + W && cz >= wcz && cz < wcz + W) {
+      const i0 = cx * C - this.wi, k0 = cz * C - this.wk, layer = g.nx * g.nz, h = g.hitTime;
+      for (let j = this.floorLayer; j < g.ny; j++)
+        for (let k = k0; k < k0 + C; k++) {
+          const row = j * layer + k * g.nx;
+          for (let i = i0; i < i0 + C; i++) {
+            const v = h[row + i] & 0xffff;
+            if (v > best) best = v;
+          }
+        }
+    } else {
+      const ch = this.archive.get(cx, cz);
+      if (!ch) return null;
+      if (ch.hitVal) for (let q = 0; q < ch.hitVal.length; q++) best = Math.max(best, ch.hitVal[q] & 0xffff);
+    }
+    return best > 0 ? this.timeOf(best) : null;
+  }
+
+  // --- Map events (for persistence and other consumers of the voxel map) ----------------
+  /**
+   * Things that change the map other than by integrating observations:
+   * - 'rewrite': the grid was replaced or rebuilt (reset, floor change, detach,
+   *   re-attach): window contents changed wholesale;
+   * - 'realign': the map frame was corrected (tracking → map changed; frames
+   *   since `since` re-integrated);
+   * - 'warp': structure laid down between t0 and t1 was moved (loop closure);
+   * - 'window': the window moved by (si, sk) chunks (contents kept: archive);
+   * - 'import': a map was imported;
+   * - 'detach' / 'reattach': the map was put aside / came back (see detachMap).
+   */
+  readonly mapListeners: ((e: MapEvent) => void)[] = [];
+  private emit(e: MapEvent): void {
+    for (const f of this.mapListeners) f(e);
+  }
+
   private lattice(): Lattice {
     const g = this.grid!;
     return { originX: this.latX, originY: g.origin.y, originZ: this.latZ, oi: this.wi, ok: this.wk };
@@ -2211,6 +2274,7 @@ export class WorldModel {
     if (n > 0 && this.depthPoints === 0 && m.chunks.some((c) => c.occ.some((v) => v < 0))) this.depthPoints = 1;
     this.snapshots = [];
     this.eventSnapshot = null;
+    this.emit({ kind: 'import', t: this.now, voxels: n });
     return n;
   }
 
@@ -2371,3 +2435,13 @@ function sameBytes(a: Int8Array | Uint8Array, b: Int8Array | Uint8Array): boolea
   for (; q < n; q++) if (a[q] !== b[q]) return false;
   return true;
 }
+
+/** See WorldModel.mapListeners. Corrections map old map-frame positions to new ones (x' = pivot + R(yaw)(x - pivot) + d, R as in realign). */
+export type MapEvent =
+  | { kind: 'rewrite'; t: number; why: 'floor' | 'reset' }
+  | { kind: 'realign'; t: number; since: number; correction: Correction }
+  | { kind: 'warp'; t: number; t0: number; t1: number; correction: Correction; moved: number }
+  | { kind: 'window'; t: number; si: number; sk: number }
+  | { kind: 'import'; t: number; voxels: number }
+  | { kind: 'detach'; t: number }
+  | { kind: 'reattach'; t: number; correction: Correction };

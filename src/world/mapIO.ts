@@ -77,7 +77,8 @@ const isIdentity = (T: ArrayLike<number> | undefined | null) => {
 };
 
 /** Combine an imported value into a voxel. */
-function combine(dst: number, src: number, mode: 'merge' | 'replace', w: number): number {
+function combine(dst: number, src: number, mode: 'merge' | 'replace' | 'exact', w: number): number {
+  if (mode === 'exact') return src;
   const s = scaleEvidence(src, w);
   if (mode === 'replace' || dst === 0) return s;
   const v = Math.round(dst + (s - dst) * (w / 2));
@@ -98,6 +99,18 @@ export function importIntoGrid(g: VoxelGrid, lat: Lattice, floorLayer: number, m
   let written = 0;
   const write = (n: number, col: number, gj: number, ch: SerializedChunk, q: number, colQ: number, ySrcCellBottom: number, yDstCellBottom: number) => {
     const s = ch.occ[q];
+    if (mode === 'exact') {
+      // Every voxel of an imported chunk as it is, unknown (0) included.
+      if (g.observed[col] !== ch.observed[colQ]) g.observed[col] = ch.observed[colQ];
+      if (gj < floorLayer) return;
+      if (g.data[n] !== s) {
+        g.data[n] = s;
+        written++;
+      }
+      g.underside[n] = ch.underside ? ch.underside[q] : 0;
+      g.topFrac[n] = ch.topFrac ? ch.topFrac[q] : 255;
+      return;
+    }
     if (ch.observed[colQ] && !g.observed[col]) g.observed[col] = 1;
     if (gj < floorLayer) return;
     if (s !== 0) {

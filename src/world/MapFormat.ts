@@ -71,8 +71,12 @@ export interface ImportOptions {
    *    imported value (scaled by `weight`); observed ones keep their own
    *    value, nudged towards the imported one by `weight / 2`.
    *  - 'replace': imported chunks overwrite the map where they have data.
+   *  - 'exact': every voxel and column of each imported chunk is written as
+   *    it is, unknown (0) and unobserved included (`weight` is ignored);
+   *    chunks absent from the import are left alone. For restoring a saved
+   *    chunk exactly (undo, persistence round trips).
    */
-  mode?: 'merge' | 'replace';
+  mode?: 'merge' | 'replace' | 'exact';
   /**
    * Confidence of the imported evidence, 0..1 (default 1). Below 1 an old
    * map is easier for fresh observations to overrule (things get moved
