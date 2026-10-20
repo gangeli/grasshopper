@@ -23,12 +23,17 @@ export class CameraDepthSource {
     this.every = opts.every ?? 2;
   }
   private every: number;
+  /** Tell the map its depth is sparse (WorldModel.navParams). Off: it measured no different (the columns lack any seen-empty voxel, not just one). */
+  sparseNav = false;
   private tick = 0;
   /** Tracking was lost: old frames' poses can't be trusted against new ones. */
   lost(): void {
     this.stereo.reset();
   }
+  /** Navigation for sparse (stereo) depth: see WorldModel.navParams. */
+  static readonly NAV = { seenFreeMin: 1 };
   sense(world: WorldModel, cam: SimCamera): void {
+    if (this.sparseNav && world.navParams.seenFreeMin === undefined) Object.assign(world.navParams, CameraDepthSource.NAV);
     // The tracker produces a pose every frame; the camera pipeline samples every `every` frames.
     const pose = this.sensor.trackedCamToWorld(cam);
     if (this.tick++ % this.every) return;

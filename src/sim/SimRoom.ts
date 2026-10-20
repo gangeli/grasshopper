@@ -156,6 +156,36 @@ export class SimRoom {
     return { range: Infinity, material: 'matte' };
   }
 
+  /**
+   * Move a piece of furniture by (dx, dz) (someone rearranged the room).
+   * Returns false (and moves nothing) if it would overlap another piece or
+   * leave the room's walls' inside.
+   */
+  movePiece(id: number, dx: number, dz: number, clearance = 0.05): boolean {
+    const pc = this.pieces[id];
+    if (!pc || pc.label === 'wall') return false;
+    for (const b of pc.boxes) {
+      const mn = { x: b.min.x + dx - clearance, z: b.min.z + dz - clearance }, mx = { x: b.max.x + dx + clearance, z: b.max.z + dz + clearance };
+      if (mn.x < -this.halfW || mx.x > this.halfW || mn.z < -this.halfD || mx.z > this.halfD) return false;
+      for (const o of this.boxes) {
+        if (o.piece === id) continue;
+        if (mn.x < o.max.x && mx.x > o.min.x && mn.z < o.max.z && mx.z > o.min.z && b.min.y < o.max.y && b.max.y > o.min.y) return false;
+      }
+    }
+    for (const b of pc.boxes) {
+      b.min.x += dx;
+      b.max.x += dx;
+      b.min.z += dz;
+      b.max.z += dz;
+    }
+    pc.min.x += dx;
+    pc.max.x += dx;
+    pc.min.z += dz;
+    pc.max.z += dz;
+    this.bvhCache = null;
+    return true;
+  }
+
   /** Is the point inside any solid box? */
   solidAt(p: Vec3, pad = 0): boolean {
     if (p.y < 0) return true;

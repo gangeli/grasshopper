@@ -44,6 +44,9 @@ const rep = runLargeArea({
   game: !process.env.NOGAME,
   multiView: !process.env.NOMULTIVIEW,
   depthFrom: process.env.CAMERA ? 'camera' : 'sensor',
+  windowChurn: Number(process.env.CHURN ?? 0),
+  moveFurniture: process.env.MOVE ? JSON.parse(process.env.MOVE) : undefined,
+  jumps: process.env.JUMPS ? JSON.parse(process.env.JUMPS) : undefined,
   setup: (world, stack) => {
     Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
     Object.assign(stack.game.health.drift.opts, JSON.parse(process.env.DRIFT ?? '{}'));

@@ -5,6 +5,7 @@ import type { ImportOptions, SerializedMap } from './MapFormat';
 import { CHUNK, exportGrid, importIntoGrid, type Lattice } from './mapIO';
 import { ChunkStore, keyCx, keyCz, mergeChunkInto, shiftCopy, shiftInPlace, type StoredChunk } from './ChunkStore';
 import type { Correction } from './warp';
+import { angDiff, frameHeading, PlaceMemory, type PlaceMatch } from './PlaceMemory';
 import type { SerializedChunk } from './MapFormat';
 
 /**
@@ -105,6 +106,13 @@ export class WorldModel {
   histogramRefine = false;
   /** Set false once play starts: rebuilding the map mid-round would be disruptive. */
   allowFloorRefine = true;
+  /**
+   * Navigation settings for this map's depth source (NavGrid takes them as
+   * defaults). Sparse depth (motion stereo from the camera, no depth API)
+   * carves the space just above the floor far less densely than a depth
+   * sensor: one observed-empty voxel above a column is evidence enough there.
+   */
+  navParams: Partial<import('./NavGrid').NavParams> = {};
   /** Number of depth points integrated so far (diagnostics/HUD). */
   depthPoints = 0;
 
@@ -128,7 +136,7 @@ export class WorldModel {
   /** Move the window with the camera (false: one fixed grid around the start). */
   followCamera = true;
   /** Map outside the window. */
-  readonly archive = new ChunkStore();
+  archive = new ChunkStore();
   /** Lattice origin (map frame x/z of lattice cell 0) and the window's offset on it (cells). */
   private latX = 0;
   private latZ = 0;
@@ -541,7 +549,12 @@ export class WorldModel {
       this.grid.now = t;
       this.grid.stamp = this.timeCode(t);
       this.grid.staleAfter = this.forgetStaleAfter;
+      this.grid.shieldedCarving = this.shieldedCarving;
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
+      // Frames waiting to be re-integrated (sliced replays, a re-attach): a few per frame.
+      this.stepReplayQueue(3);
+      // A warp in progress: a few window layers / archive chunks per frame.
+      this.stepWarp(2);
     }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
     const sig: number[] | undefined = img.sigma ? [] : undefined;
@@ -569,9 +582,246 @@ export class WorldModel {
       if (this.heldSince !== null) this.releaseHeld();
     }
     this.ingestDepth(eye, pts, 4.5, sig, t);
+    this.settlePlaces();
     return true;
   }
 
+  // --- Re-anchoring after a frame jump that couldn't be resolved ------------------------
+  /**
+   * The map from before a tracking jump the drift monitor couldn't resolve:
+   * the archive (window included) and place memory, in the old map frame.
+   * Mapping goes on in a fresh map; when the camera sees a place the old map
+   * knows, the drift monitor relocalises against its place memory and the
+   * old map comes back (reattach), corrected into one frame with the new.
+   */
+  dormant: { archive: ChunkStore; places: PlaceMemory; t: number } | null = null;
+  /** Detaches and successful re-attachments (diagnostics). */
+  detaches = 0;
+  reattaches = 0;
+  /** Frames to re-integrate a few per frame (after a reattach). */
+  private replayQueue: { eye: Vec3; pts: Float32Array; sig: Float32Array | null; t: number }[] = [];
+  private stepReplayQueue(n: number): void {
+    if (!this.replayQueue.length || !this.grid) return;
+    const batch = this.replayQueue.splice(0, n);
+    this.replaying = true;
+    try {
+      for (const f of batch) {
+        const pts: Vec3[] = [];
+        for (let q = 0; q < f.pts.length; q += 3) pts.push({ x: f.pts[q], y: f.pts[q + 1], z: f.pts[q + 2] });
+        this.ingestDepth(f.eye, pts, 4.5, f.sig ? Array.from(f.sig) : undefined, f.t);
+      }
+    } finally {
+      this.replaying = false;
+    }
+  }
+
+  /**
+   * Recovery that keeps the map: the view no longer fits the map and no
+   * correction was found. Instead of clearing it, put the whole map (window
+   * and archive) and its place memory aside as `dormant` and start a fresh
+   * one in the current frame. (If a dormant map is already waiting, it is
+   * kept and only the fresh one is cleared.)
+   */
+  detachMap(): void {
+    const g = this.grid;
+    if (!g) return;
+    this.finishWarp();
+    this.detaches++;
+    if (!this.dormant) {
+      this.loadPending();
+      // What the camera saw before things went wrong goes into the place
+      // memory now (not only frames settled for 10s): relocalisation needs it.
+      const ev = this.now - this.lastTrackingEvent < 30 ? this.lastTrackingEvent : Infinity;
+      if (this.placeMemory) {
+        const gr = g;
+        this.placeMemory.settle(this.replay, this.now, this.floorY, (x, y, z) => {
+          const i = gr.cellX(x), j = gr.cellY(y), k = gr.cellZ(z);
+          return gr.inBounds(i, j, k) ? gr.data[gr.idx(i, j, k)] >= 0 : null;
+        }, Math.min(ev, this.heldSince ?? Infinity), 0);
+      }
+      const C = CHUNK, W = this.windowChunks;
+      // The window joins the archive (from this grid, which is replaced below and never written again).
+      for (let a = 0; a < W; a++) for (let b = 0; b < W; b++) this.archive.defer(g, this.wi, this.wk, this.wi / C + a, this.wk / C + b, this.floorLayer, this.now);
+      this.placeMemory?.close();
+      this.dormant = { archive: this.archive, places: this.placeMemory ?? new PlaceMemory(), t: this.now };
+      this.archive = new ChunkStore();
+      if (this.placeMemory) this.placeMemory = new PlaceMemory();
+    } else {
+      this.archive.clear();
+      this.placeMemory?.clear();
+    }
+    this.recoveries.hard++;
+    this.pendingLoads = [];
+    this.replayQueue = [];
+    this.snapshots = [];
+    this.eventSnapshot = null;
+    this.replay = [];
+    this.replayPoints = 0;
+    this.rebuildAtFloor(this.floorY);
+    this.floorRefinements--; // not a refinement
+    this.floorWatch.fill(0);
+    this.conflictRate = 0;
+    this.conflictWin = [];
+    this.multiView?.reset();
+    this.emit({ kind: 'detach', t: this.now });
+  }
+
+  /**
+   * The current frame relocalised against the dormant map: `c` maps current
+   * map coordinates onto the dormant map's. The dormant map becomes the map
+   * again (its frame is the map frame from now on), what the fresh map
+   * learnt since the detach is re-integrated, corrected, from the replay
+   * buffer (a few frames per frame), and the fresh place memory joins the old.
+   */
+  reattach(c: { dx: number; dz: number; dyaw: number; pivot: Vec3 }): void {
+    const d = this.dormant;
+    if (!d || !this.grid) return;
+    this.finishWarp();
+    this.dormant = null;
+    this.reattaches++;
+    const cs = Math.cos(c.dyaw), sn = Math.sin(c.dyaw);
+    const fix = (x: number, z: number): [number, number] => {
+      const rx = x - c.pivot.x, rz = z - c.pivot.z;
+      return [c.pivot.x + cs * rx + sn * rz + c.dx, c.pivot.z - sn * rx + cs * rz + c.dz];
+    };
+    // Buffered frames since the detach, corrected.
+    const frames = this.replay.filter((f) => f.t >= d.t);
+    for (const f of frames) {
+      [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
+      for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
+    }
+    if (this.placeMemory) {
+      d.places.absorb(this.placeMemory, { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: c.pivot });
+      this.placeMemory = d.places;
+    }
+    d.archive.flush();
+    this.archive = d.archive;
+    this.pendingLoads = [];
+    this.snapshots = [];
+    this.eventSnapshot = null;
+    // Route input through the correction, then a blank window (same place on
+    // the lattice) that the archive refills over the next frames.
+    const T = [cs, 0, -sn, 0, 0, 1, 0, 0, sn, 0, cs, 0, 0, 0, 0, 1];
+    const o = fix(0, 0);
+    T[12] = o[0];
+    T[14] = o[1];
+    this.applyRegistration(T);
+    this.recoveries.realign--; // (applyRegistration counts one; this is a reattach)
+    this.rebuildAtFloor(this.floorY);
+    this.floorRefinements--;
+    this.requeueArchived();
+    this.replayQueue = frames;
+    this.emit({ kind: 'reattach', t: this.now, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } } });
+  }
+
+  /**
+   * Submaps of settled frames for loop closure (see PlaceMemory). Null: off.
+   */
+  placeMemory: PlaceMemory | null = new PlaceMemory();
+  private settlePlaces(): void {
+    const pm = this.placeMemory, g = this.grid;
+    if (!pm || !g) return;
+    pm.settle(this.replay, this.now, this.floorY, (x, y, z) => {
+      const i = g.cellX(x), j = g.cellY(y), k = g.cellZ(z);
+      if (!g.inBounds(i, j, k)) return null;
+      return g.data[g.idx(i, j, k)] >= 0;
+    }, this.heldSince ?? Infinity);
+  }
+
+  /**
+   * Loop closure against place memory: align the recent frames (or those
+   * from `since` on) with the submaps of one earlier visit to this place
+   * (the oldest one that saw enough of it) that ended at least `minAge`
+   * seconds before them. Resumable.
+   */
+  /** Where the camera is (map frame) and which way it looks (x/z heading), from the newest buffered frame. */
+  viewNow(): { x: number; z: number; h: number } | null {
+    const f = this.replay[this.replay.length - 1];
+    if (!f) return null;
+    return { x: f.eye.x, z: f.eye.z, h: frameHeading(f, this.floorY) ?? 0 };
+  }
+  /** Why the last place search returned nothing (diagnostics). */
+  placeWhy = '';
+  private noPlace(why: string): null {
+    this.placeWhy = why;
+    return null;
+  }
+  *placeSearch(opts: { frames?: number; since?: number; minAge: number; maxShift: number; maxYaw: number; memory?: PlaceMemory; penalty?: number; span?: number; drift?: { floor: number; perM: number } }): Generator<void, (Misalignment & { second: number; secondAt: PlaceMatch['secondAt']; constraint: number; unique: number; visitT0: number; openShare: number }) | null, void> {
+    const pm = opts.memory ?? this.placeMemory, g = this.grid;
+    if (!pm || !g || !this.replay.length) return this.noPlace('no memory/grid/frames');
+    let frames = this.replay.slice(-(opts.frames ?? 20));
+    if (opts.since !== undefined) frames = frames.filter((f) => f.t >= opts.since!);
+    // At most the last few seconds (the frame drifts while the camera moves on).
+    const tEnd = frames.length ? frames[frames.length - 1].t : 0;
+    frames = frames.filter((f) => f.t >= tEnd - (opts.span ?? 3));
+    if (!frames.length) return this.noPlace('no frames in span');
+    const pts: number[] = [];
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    const headings: number[] = [];
+    for (const f of frames) {
+      const h = frameHeading(f, this.floorY);
+      if (h !== null && !headings.some((x) => angDiff(x, h) < 0.2)) headings.push(h);
+      for (let q = 0; q < f.pts.length; q += 3) {
+        const x = f.pts[q], y = f.pts[q + 1], z = f.pts[q + 2];
+        if (y < this.floorY + 0.06 || y > this.floorY + 2.2) continue;
+        if (f.sig && f.sig[q / 3] > 0.08) continue;
+        if (Math.hypot(x - f.eye.x, y - f.eye.y, z - f.eye.z) > 2.5) continue;
+        const i = g.cellX(x), j = g.cellY(y), k = g.cellZ(z);
+        if (g.inBounds(i, j, k) && g.isTransient(g.idx(i, j, k))) continue;
+        pts.push(x, y, z);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+    }
+    if (pts.length < 180 || !headings.length) return this.noPlace('too few readings');
+    const pad = opts.maxShift + 0.3;
+    const eye = frames[frames.length - 1].eye;
+    const visits = pm.visitsNear({ minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }, frames[0].t - opts.minAge, { x: eye.x, z: eye.z, headings, maxDist: 2.5 + opts.maxShift, maxTurn: 1.0 + opts.maxYaw });
+    if (!visits.length) return this.noPlace('no visit seen from here');
+    // The oldest visit and the two that saw the most of this place: whichever explains the view best.
+    const cand = [...new Set([visits[0], ...visits.slice().sort((a, b) => b.cells - a.cells).slice(0, 1)])].filter((v) => v.cells >= 150);
+    if (!cand.length) return this.noPlace('no visit with enough structure');
+    const pivot = frames[frames.length - 1].eye;
+    const epoch = this.epoch, fv = this.frameVersion;
+    // Odometry drift since a visit is bounded by the walk since then: don't
+    // search (or believe) corrections larger than that (a parallel wall across
+    // a corridor otherwise "matches" at its distance).
+    const D = opts.drift;
+    const visitsIn = D ? cand.map((v) => ({ ...v, maxShift: D.floor + D.perM * Math.max(0, this.walked - this.walkedAt(this.timeCode(v.t1))) })) : cand;
+    const m: PlaceMatch | null = yield* pm.alignBest(pts, pivot, visitsIn, opts.maxShift, opts.maxYaw, opts.penalty);
+    if (!m || this.epoch !== epoch || this.frameVersion !== fv) return this.noPlace(`search gave up${pm.why ? `: ${pm.why}` : ''}`);
+    // Free-space check: the matched visit's structure, brought into the
+    // current frame, must not lie where the camera currently sees empty space
+    // (a parallel wall across a corridor "matches" the near one at its
+    // distance, but then the near wall's old copy lands in the open).
+    const visit = cand.find((v) => v.t0 === m.visitT0)!;
+    const c = Math.cos(m.dyaw), sn = Math.sin(m.dyaw), P = m.pivot;
+    let seen = 0, open = 0;
+    for (const sub of visit.subs) {
+      const C = sub.cells;
+      for (let q = 0; q < C.length; q += 9) {
+        const x = C[q] / 100, y = C[q + 1] / 100, z = C[q + 2] / 100;
+        if (x < minX - 0.3 || x > maxX + 0.3 || z < minZ - 0.3 || z > maxZ + 0.3) continue;
+        // Inverse of x' = P + R(x - P) + d.
+        const ux = x - P.x - m.dx, uz = z - P.z - m.dz;
+        const X = P.x + c * ux - sn * uz, Z = P.z + sn * ux + c * uz;
+        if (Math.hypot(X - eye.x, Z - eye.z) > 2.5) continue;
+        const i = g.cellX(X), j = g.cellY(y), k = g.cellZ(Z);
+        if (!g.inBounds(i, j, k)) continue;
+        const v = g.data[g.idx(i, j, k)];
+        if (v === 0) continue;
+        seen++;
+        if (v <= -20) open++;
+      }
+    }
+    const openShare = seen >= 30 ? open / seen : 0;
+    return { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot, base: m.base, best: m.best, n: m.n, degenerate: m.degenerate, snapT: frames[0].t, oldT: m.visitT1, second: m.second, secondAt: m.secondAt, constraint: m.constraint, unique: m.unique, visitT0: m.visitT0, openShare };
+  }
+
+  /** See VoxelGrid.shieldedCarving. */
+  shieldedCarving = true;
   /** See ingestDepthImage: hold back frames that contradict the map (on by default). */
   holdOnConflict = true;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */
@@ -694,6 +944,8 @@ export class WorldModel {
   follow(eye: Vec3, t = this.now): void {
     const g = this.grid;
     if (!g || !Number.isFinite(eye.x + eye.z)) return;
+    // (A warp in progress holds the window where it is: it works in window indices.)
+    if (this.warpTask) return;
     const W = this.windowChunks, lo = Math.min(2, (W - 1) >> 1), hi = W - 1 - lo;
     const ci = Math.floor(g.cellX(eye.x) / CHUNK), ck = Math.floor(g.cellZ(eye.z) / CHUNK);
     // Where the camera's chunk should end up; if a companion point (the pet)
@@ -719,6 +971,7 @@ export class WorldModel {
       // back what it entered, and have fresh arrays ready for the next one
       // (all of it off the move's frame).
       this.archive.step(2);
+      this.dormant?.archive.step(2);
       this.loadPending(2);
       this.prepareSpare();
     }
@@ -808,12 +1061,53 @@ export class WorldModel {
    * was right at t0 and off by `c` at t1; structure observed in between is
    * moved by its share of `c` (linear in distance walked), in the live window
    * and in the archive, chunk by chunk (memory: only the moving voxels).
-   * Returns the number of voxels moved.
+   * Returns the number of voxels moved (0 when sliced: see sliceWarps).
    */
   warpSince(t0: number, t1: number, c: Correction): number {
+    this.finishWarp();
+    const it = this.warpSteps(t0, t1, c);
+    if (this.sliceWarps) {
+      this.warpTask = it;
+      this.stepWarp(1);
+      return 0;
+    }
+    for (;;) {
+      const r = it.next();
+      if (r.done) return r.value;
+    }
+  }
+  /**
+   * Spread a warp over the following depth frames (a pass over the whole
+   * window and the archive: 100+ ms in one go on a phone). Meanwhile the
+   * window stays put and recovery operations finish it first.
+   */
+  sliceWarps = true;
+  private warpTask: Generator<void, number, void> | null = null;
+  /** A warp is being applied (drift checks wait for it). */
+  get warpBusy(): boolean {
+    return this.warpTask !== null;
+  }
+  /** Advance the warp in progress by up to n steps (each ~one window layer or archive chunk). */
+  stepWarp(n: number): void {
+    const it = this.warpTask;
+    if (!it) return;
+    for (let q = 0; q < n; q++)
+      if (it.next().done) {
+        this.warpTask = null;
+        return;
+      }
+  }
+  /** Complete a warp in progress now (before anything that replaces or moves the grid). */
+  finishWarp(): void {
+    const it = this.warpTask;
+    if (!it) return;
+    this.warpTask = null;
+    while (!it.next().done);
+  }
+
+  private *warpSteps(t0: number, t1: number, c: Correction): Generator<void, number, void> {
     const g = this.grid;
     if (!g || !g.hitTime || !(t1 > t0)) return 0;
-    this.loadPending();
     const code0 = this.timeCode(t0), code1 = this.timeCode(t1);
     const w0 = this.walkedAt(code0), w1 = this.walkedAt(code1);
     const span = w1 - w0;
@@ -837,9 +1131,12 @@ export class WorldModel {
     const px = c.pivot.x, pz = c.pivot.z;
     const visit = (I: number, J: number, K: number, v: number, h: number, top: number, under: number): boolean => {
       if (v <= 0 || v === 127) return false;
-      const last = h & 0xffff;
-      if (last < code0 || last > code1) return false;
-      const [cs, sn, tx, tz] = corrFor(last);
+      // When the voxel was laid down (birth) or last hit: structure from
+      // before t0 that was merely seen again since (in the drifting frame,
+      // landing on the same voxel) belongs where it is.
+      const when = this.warpByBirth ? h >>> 16 : h & 0xffff;
+      if (when < code0 || when > code1) return false;
+      const [cs, sn, tx, tz] = corrFor(when);
       const x = this.latX + (I + 0.5) * r - px, z = this.latZ + (K + 0.5) * r - pz;
       const X = px + cs * x + sn * z + tx, Z = pz - sn * x + cs * z + tz;
       const I2 = Math.floor((X - this.latX) / r), K2 = Math.floor((Z - this.latZ) / r);
@@ -853,9 +1150,34 @@ export class WorldModel {
       unders.push(under);
       return true;
     };
+    // Right away (before the passes below are spread over frames): recovery
+    // copies predate the warp (restoring one would undo it); buffered frames
+    // from the interval move with what they mapped (replays then land where
+    // the warped map is); place memory moves along.
+    this.snapshots = [];
+    this.eventSnapshot = null;
+    for (const f of this.replay) {
+      if (f.t < t0 || f.t > t1) continue;
+      const [cs, sn, tx, tz] = corrFor(this.timeCode(f.t));
+      const fix = (x: number, z: number): [number, number] => {
+        const rx = x - px, rz = z - pz;
+        return [px + cs * rx + sn * rz + tx, pz - sn * rx + cs * rz + tz];
+      };
+      [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
+      for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
+    }
+    this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)), c.pivot);
+    this.warps++;
+    // Chunks still coming back into the window, or still being archived from
+    // an earlier window, must be where the passes below look (a few per step).
+    while (this.pendingLoads.length) {
+      this.loadPending(2);
+      yield;
+    }
+    while (this.archive.step(2)) yield;
     // Pass 1a: the window.
     const gh = g.hitTime;
-    for (let j = fl; j < ny; j++)
+    for (let j = fl; j < ny; j++, yield)
       for (let k = 0; k < g.nz; k++)
         for (let i = 0; i < g.nx; i++) {
           const q = j * layer + k * g.nx + i;
@@ -879,13 +1201,14 @@ export class WorldModel {
       }
       return d;
     };
-    for (const [key, ch] of this.archive.map) {
+    for (const [key, ch] of [...this.archive.map]) {
       if (!ch.hitVal) continue;
       const cx = keyCx(key), cz = keyCz(key);
       if (inWin(cx, cz)) continue;
+      yield;
       let touched = false;
       for (let q = 0; q < ch.hitVal.length && !touched; q++) {
-        const h = ch.hitVal[q] & 0xffff;
+        const h = this.warpByBirth ? ch.hitVal[q] >>> 16 : ch.hitVal[q] & 0xffff;
         if (h >= code0 && h <= code1) touched = true;
       }
       if (!touched) continue;
@@ -906,6 +1229,7 @@ export class WorldModel {
     // Pass 2: write the movers where they belong (the stronger evidence wins).
     const m = vals.length;
     for (let q = 0; q < m; q++) {
+      if (q % 20000 === 19999) yield;
       const I = dI[q], K = dK[q], J = dJ[q];
       const cx = Math.floor(I / C), cz = Math.floor(K / C);
       if (inWin(cx, cz)) {
@@ -935,31 +1259,20 @@ export class WorldModel {
     }
     // Back to sparse hit times.
     for (const { ch, hit } of dense.values()) {
+      yield;
       const idx: number[] = [], val: number[] = [];
       for (let q = 0; q < n; q++) if (hit[q] !== 0 && ch.data[q] > 0) (idx.push(q), val.push(hit[q]));
       ch.hitIdx = idx.length ? Uint16Array.from(idx) : null;
       ch.hitVal = idx.length ? Uint32Array.from(val) : null;
     }
+    this.emit({ kind: 'warp', t: this.now, t0, t1, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } }, moved: m });
     if (!m) return 0;
     g.touchAll();
     g.version++;
-    // Recovery copies predate the warp: restoring one would undo it.
-    this.snapshots = [];
-    this.eventSnapshot = null;
-    // Buffered frames from the interval move with what they mapped.
-    for (const f of this.replay) {
-      if (f.t < t0 || f.t > t1) continue;
-      const [cs, sn, tx, tz] = corrFor(this.timeCode(f.t));
-      const fix = (x: number, z: number): [number, number] => {
-        const rx = x - px, rz = z - pz;
-        return [px + cs * rx + sn * rz + tx, pz - sn * rx + cs * rz + tz];
-      };
-      [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
-      for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
-    }
-    this.warps++;
     return m;
   }
+  /** Warp by when structure was laid down (birth) rather than when it was last seen. */
+  warpByBirth = true;
   /** Loop-closure warps applied (diagnostics). */
   warps = 0;
 
@@ -972,6 +1285,7 @@ export class WorldModel {
 
   /** Move the window by (si, sk) chunks. */
   moveWindow(si: number, sk: number, t = this.now): void {
+    this.finishWarp();
     const old = this.grid;
     if (!old || (!si && !sk)) return;
     const C = CHUNK, W = this.windowChunks, r = this.res;
@@ -1057,17 +1371,19 @@ export class WorldModel {
     this.grid = g;
     this.epoch = nextEpoch;
     this.recenters++;
+    this.emit({ kind: 'window', t, si, sk });
   }
 
   /** Memory held by the map (bytes): the grid's arrays, recovery snapshots, replay buffer. */
-  memoryBytes(): { grid: number; snapshots: number; replay: number; archive: number; total: number } {
+  memoryBytes(): { grid: number; snapshots: number; replay: number; archive: number; places: number; total: number } {
     const g = this.grid;
     const grid = g ? g.data.byteLength + g.observed.byteLength + g.underside.byteLength + g.topFrac.byteLength + (g.shadow?.byteLength ?? 0) + (g.hitTime?.byteLength ?? 0) : 0;
     const snapshots = this.snapshotBytes();
     let replay = 0;
     for (const f of this.replay) replay += f.pts.byteLength + (f.sig?.byteLength ?? 0) + 64;
     const archive = this.archive.bytes();
-    return { grid, snapshots, replay, archive, total: grid + snapshots + replay + archive };
+    const places = (this.placeMemory?.bytes() ?? 0) + (this.dormant ? this.dormant.places.bytes() + this.dormant.archive.bytes() : 0);
+    return { grid, snapshots, replay, archive, places, total: grid + snapshots + replay + archive + places };
   }
 
   /**
@@ -1294,6 +1610,7 @@ export class WorldModel {
    */
   relevelFloor(y: number): void {
     if (!this.grid || !Number.isFinite(y)) return;
+    this.finishWarp();
     this.recoveries.relevel++;
     // Chunks still being brought back must be in the grid that gets copied.
     this.loadPending();
@@ -1322,11 +1639,13 @@ export class WorldModel {
     this.conflictWin = [];
     this.snapshots = [];
     this.replayFrames(() => true);
+    this.emit({ kind: 'rewrite', t: this.now, why: 'floor' });
   }
 
   /** Recovery: age all evidence so new observations quickly override a map that drifted out of line. */
   softReset(factor = 0.3, around?: { x: number; z: number; radius: number }): void {
     if (!this.grid) return;
+    this.finishWarp();
     this.recoveries.soft++;
     const g = this.grid;
     this.grid.ageEvidence(factor, FLOOR_LAYERS_BELOW, around ? { i0: g.cellX(around.x - around.radius), i1: g.cellX(around.x + around.radius), k0: g.cellZ(around.z - around.radius), k1: g.cellZ(around.z + around.radius) } : undefined);
@@ -1628,6 +1947,7 @@ export class WorldModel {
    */
   realign(dx: number, dz: number, dyaw: number, pivot: Vec3, since: number): void {
     if (!this.grid) return;
+    this.finishWarp();
     const c = Math.cos(dyaw), s = Math.sin(dyaw);
     const fix = (p: { x: number; y: number; z: number }) => {
       const rx = p.x - pivot.x, rz = p.z - pivot.z;
@@ -1670,10 +1990,25 @@ export class WorldModel {
       this.snapshots = [];
       this.replayFrames((f) => f.t >= since);
     }
+    this.placeMemory?.realign({ dx, dz, dyaw, pivot }, since);
     this.applyRegistration(T);
+    this.emit({ kind: 'realign', t: this.now, since, correction: { dx, dz, dyaw, pivot: { x: pivot.x, z: pivot.z } } });
   }
 
+  /**
+   * Re-integrate buffered frames a few per depth frame instead of all at
+   * once (a realignment replays up to ~10s of frames: 100+ms in one frame on
+   * a phone). Until they are in, the map lacks the last seconds' detail.
+   */
+  sliceReplays = false;
   private replayFrames(which: (f: { t: number }) => boolean): void {
+    if (this.sliceReplays) {
+      const q = this.replay.filter(which);
+      // (Frames already queued and replayed again replace their queued copy.)
+      const set = new Set(q);
+      this.replayQueue = [...this.replayQueue.filter((f) => !set.has(f)), ...q];
+      return;
+    }
     this.replaying = true;
     try {
       for (const f of this.replay) {
@@ -1690,6 +2025,7 @@ export class WorldModel {
   /** Recovery of last resort: forget the depth map (keep the floor and planes) and start mapping afresh. */
   hardReset(around?: { x: number; z: number; radius: number }): void {
     if (!this.grid) return;
+    this.finishWarp();
     if (around) {
       // A large map: forget what's around the player (it contradicts what
       // the camera sees) and weaken the rest of the window so it gives way
@@ -1718,6 +2054,7 @@ export class WorldModel {
       this.conflictRate = 0;
       this.conflictWin = [];
       this.multiView?.reset();
+      this.emit({ kind: 'rewrite', t: this.now, why: 'reset' });
       return;
     }
     this.recoveries.hard++;
@@ -1735,6 +2072,7 @@ export class WorldModel {
     this.conflictRate = 0;
     this.conflictWin = [];
     this.multiView?.reset();
+    this.emit({ kind: 'rewrite', t: this.now, why: 'reset' });
   }
 
   /**
@@ -1803,6 +2141,61 @@ export class WorldModel {
 
   // --- Export / import (persistence) -------------------------------------------------
   /** Horizontal lattice of the map (chunk boundaries); fixed for the session. */
+  /**
+   * The map's lattice and where the window sits on it (lattice columns of
+   * window cell (0, ·, 0)); null before the floor is set. Session-fixed
+   * origin: chunk (cx, cz) of the export / archive is lattice columns
+   * [cx·32, cx·32+32) × [cz·32, cz·32+32).
+   */
+  windowLattice(): Lattice | null {
+    return this.grid ? this.lattice() : null;
+  }
+  /**
+   * When chunk (cx, cz) (lattice chunk coordinates) last got occupancy
+   * evidence (s, session clock), or null if never / not mapped. Window
+   * chunks are scanned (a few k voxels), archived ones read their stored
+   * hit times.
+   */
+  chunkLastSeen(cx: number, cz: number): number | null {
+    const g = this.grid;
+    if (!g || !g.hitTime) return null;
+    const C = CHUNK, W = this.windowChunks, wcx = this.wi / C, wcz = this.wk / C;
+    let best = 0;
+    if (cx >= wcx && cx < wcx + W && cz >= wcz && cz < wcz + W) {
+      const i0 = cx * C - this.wi, k0 = cz * C - this.wk, layer = g.nx * g.nz, h = g.hitTime;
+      for (let j = this.floorLayer; j < g.ny; j++)
+        for (let k = k0; k < k0 + C; k++) {
+          const row = j * layer + k * g.nx;
+          for (let i = i0; i < i0 + C; i++) {
+            const v = h[row + i] & 0xffff;
+            if (v > best) best = v;
+          }
+        }
+    } else {
+      const ch = this.archive.get(cx, cz);
+      if (!ch) return null;
+      if (ch.hitVal) for (let q = 0; q < ch.hitVal.length; q++) best = Math.max(best, ch.hitVal[q] & 0xffff);
+    }
+    return best > 0 ? this.timeOf(best) : null;
+  }
+
+  // --- Map events (for persistence and other consumers of the voxel map) ----------------
+  /**
+   * Things that change the map other than by integrating observations:
+   * - 'rewrite': the grid was replaced or rebuilt (reset, floor change, detach,
+   *   re-attach): window contents changed wholesale;
+   * - 'realign': the map frame was corrected (tracking → map changed; frames
+   *   since `since` re-integrated);
+   * - 'warp': structure laid down between t0 and t1 was moved (loop closure);
+   * - 'window': the window moved by (si, sk) chunks (contents kept: archive);
+   * - 'import': a map was imported;
+   * - 'detach' / 'reattach': the map was put aside / came back (see detachMap).
+   */
+  readonly mapListeners: ((e: MapEvent) => void)[] = [];
+  private emit(e: MapEvent): void {
+    for (const f of this.mapListeners) f(e);
+  }
+
   private lattice(): Lattice {
     const g = this.grid!;
     return { originX: this.latX, originY: g.origin.y, originZ: this.latZ, oi: this.wi, ok: this.wk };
@@ -1815,6 +2208,7 @@ export class WorldModel {
   exportMap(): SerializedMap | null {
     const g = this.grid;
     if (!g) return null;
+    this.finishWarp();
     this.loadPending();
     const lat = this.lattice();
     return {
@@ -1868,6 +2262,7 @@ export class WorldModel {
    */
   importMap(m: SerializedMap, transform?: ArrayLike<number> | null, opts: ImportOptions = {}): number {
     if (!m || m.version !== 1) return 0;
+    this.finishWarp();
     if (transform && !Array.from(transform).every(Number.isFinite)) return 0;
     if (!this.grid) {
       const fy = transform ? transform[13] + transform[5] * m.floorY : m.floorY;
@@ -1879,6 +2274,7 @@ export class WorldModel {
     if (n > 0 && this.depthPoints === 0 && m.chunks.some((c) => c.occ.some((v) => v < 0))) this.depthPoints = 1;
     this.snapshots = [];
     this.eventSnapshot = null;
+    this.emit({ kind: 'import', t: this.now, voxels: n });
     return n;
   }
 
@@ -2039,3 +2435,13 @@ function sameBytes(a: Int8Array | Uint8Array, b: Int8Array | Uint8Array): boolea
   for (; q < n; q++) if (a[q] !== b[q]) return false;
   return true;
 }
+
+/** See WorldModel.mapListeners. Corrections map old map-frame positions to new ones (x' = pivot + R(yaw)(x - pivot) + d, R as in realign). */
+export type MapEvent =
+  | { kind: 'rewrite'; t: number; why: 'floor' | 'reset' }
+  | { kind: 'realign'; t: number; since: number; correction: Correction }
+  | { kind: 'warp'; t: number; t0: number; t1: number; correction: Correction; moved: number }
+  | { kind: 'window'; t: number; si: number; sk: number }
+  | { kind: 'import'; t: number; voxels: number }
+  | { kind: 'detach'; t: number }
+  | { kind: 'reattach'; t: number; correction: Correction };

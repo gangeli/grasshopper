@@ -32,6 +32,8 @@ export type HealthIssue =
   | 'unsettledTimeout'
   | 'mapContradictory'
   | 'mapReset'
+  | 'mapDetached'
+  | 'mapReattached'
   | 'floorTooLow'
   | 'floorTooHigh'
   | 'petNaN'
@@ -62,6 +64,12 @@ export interface HealthOptions {
    * weaken the rest of the window, instead of the whole window. 0 = whole.
    */
   localResetRadius: number;
+  /**
+   * Instead of clearing the map when it can't be trusted any more, put it
+   * aside (WorldModel.detachMap) and re-attach it when the camera is found
+   * in it again.
+   */
+  detach: boolean;
 }
 
 export const DEFAULT_HEALTH: HealthOptions = {
@@ -75,6 +83,7 @@ export const DEFAULT_HEALTH: HealthOptions = {
   maxMoveSeconds: 90,
   enabled: true,
   localResetRadius: 0,
+  detach: true,
 };
 
 export class HealthMonitor {
@@ -170,7 +179,23 @@ export class HealthMonitor {
   }
 
   // --- Map frame -------------------------------------------------------------------
+  /** The map can't be trusted: put it aside (or clear it). */
+  private clearMap() {
+    if (this.opts.detach && !this.opts.localResetRadius) this.world.detachMap();
+    else this.world.hardReset(this.around());
+  }
+
+  private seenReattaches = 0;
   private onRealigned() {
+    if (this.world.reattaches !== this.seenReattaches) {
+      this.seenReattaches = this.world.reattaches;
+      this.lastRealign = this.t;
+      this.conflictSince = null;
+      this.report('mapReattached', 'found our place in the map from before the jump: it is back');
+      this.game.mapChanged();
+      this.game.reanchorPet();
+      return;
+    }
     this.lastRealign = this.t;
     this.conflictSince = null;
     const m = this.drift.last?.m;
@@ -192,9 +217,9 @@ export class HealthMonitor {
         // The world moved a lot and we couldn't say how: parts of the map we
         // haven't re-seen are now simply wrong (a remembered gap may be a crate).
         // Start the map afresh in the current frame and bring the pet back.
-        w.hardReset(this.around());
+        this.clearMap();
         this.softResetAt = this.t;
-        this.report('mapReset', `after a tracking loss the world shifted ~${(verdict.mag * 100).toFixed(0)}cm and couldn't be realigned: map cleared, pet re-anchored`);
+        this.report(this.opts.detach ? 'mapDetached' : 'mapReset', `after a tracking loss the world shifted ~${(verdict.mag * 100).toFixed(0)}cm and couldn't be realigned: ${this.opts.detach ? 'map put aside until we find our place in it' : 'map cleared'}, pet re-anchored`);
         this.game.mapChanged();
         this.game.reanchorPet();
         this.game.say('Whoa, everything moved! Look around a bit so I can find my way again.');
@@ -222,8 +247,8 @@ export class HealthMonitor {
     if (this.conflictSince !== null && w.conflictRate > this.opts.conflictHigh && this.t - this.conflictSince > this.opts.conflictSustain && this.t - this.lastRealign > this.opts.conflictSustain) {
       const rate = (w.conflictRate * 100).toFixed(0);
       if (this.t - this.softResetAt < 20) {
-        w.hardReset(this.around());
-        this.report('mapReset', `contradictions ${rate}% persisted after ageing: map cleared`);
+        this.clearMap();
+        this.report(this.opts.detach ? 'mapDetached' : 'mapReset', `contradictions ${rate}% persisted after ageing: ${this.opts.detach ? 'map put aside' : 'map cleared'}`);
         this.game.say('I got confused about your room — look around a little so I can learn it again!');
       } else {
         w.softReset(0.3, this.around());

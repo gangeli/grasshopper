@@ -40,9 +40,10 @@ export interface LiveLattice {
 function windowOf(world: WorldModel): Lattice | null {
   const g = world.grid;
   if (!g) return null;
-  // WorldModel keeps this private (its lattice()); read it through the
-  // index escape hatch rather than re-deriving it. Older world models
-  // without a moving window: the grid origin is the lattice.
+  // WorldModel.windowLattice() (public); older world models had only the
+  // private lattice(), and ones without a moving window use the grid origin.
+  const pub = (world as unknown as { windowLattice?: () => Lattice | null }).windowLattice;
+  if (typeof pub === 'function') return pub.call(world);
   const f = (world as unknown as { lattice?: () => Lattice })['lattice'];
   if (typeof f === 'function') return f.call(world);
   return { originX: g.origin.x, originY: g.origin.y, originZ: g.origin.z, oi: 0, ok: 0 };
