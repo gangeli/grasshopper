@@ -350,3 +350,46 @@ learning. → `MapStore.makeRoom`: on QuotaExceededError drop backup generations
 smallest other fragments, and retry (up to 4×); the newest save always wins. Corrupted
 records fall back to the backup generation or are skipped. **50% relocalized, 0 wrong,
 no crashes**, every session's faults handled.
+
+### Round 14 — the moving window (merge of the large-area world model)
+
+The world model's grid became a camera-following window (12.8 m in the app) plus an
+archive of the chunks outside it. Each window move replaced the grid object, which the
+persistence layer read as a rewrite; snapshots saw only the window.
+
+* The adapter now presents **window + archive as one map on the session lattice**
+  (`liveLattice` = fixed lattice origin + window offset). Window moves are not
+  rewrites (stamp = rebuilds, not moves). Snapshots copy the window in slices, then the
+  archived chunks; exact imports write both (archive chunks the import doesn't change
+  keep their hit times). Test: export equals `exportMap()` after moves, exact replace
+  round trip.
+* Imported voxels lose stale **hit times**, so a loop-closure warp can't move restored
+  voxels as if the session had mapped them.
+* Bench with a small window (W1, 6.4 m, ~11 moves/session) found the world model
+  **dropping archived chunks** (interface note 8). The persistence side then read
+  "now − base" as evidence: restored free space turned into obstacles. One correct restore
+  was undone and its stored map fused with garbage (precision 0.98 → 0.67). Fixes on
+  this side: dropped chunks are detected (≥ 60% of known voxels gone to unknown) → the
+  bookkeeping re-bases and re-applies the restored maps; columns the live map forgot keep
+  the session's own evidence; a **save-time guard** folds a session into a stored map only
+  if its evidence agrees with it then (inlier ≥ 0.85).
+  W1: 39% relocalized, 3 undos of correct restores, precision 0.870 → W1b: 43%, 0 undos,
+  precision 0.898, 0 wrong. The rest waits on the world-model fix.
+* App-size window (W2, 12.8 m, 1.8 moves/session): **64%, 0 wrong, 0 undos**, error
+  2.5 / 4.6 cm p90, precision 0.937, the same as without moves (M1 after the merge: 64%,
+  0 wrong, 2.4 / 4.6 cm).
+
+## Where it stands
+
+| bench (8 homes × ~5.5 sessions unless noted) | relocalized | wrong restores | error mean / p90 | stored precision |
+|---|---|---|---|---|
+| B0 first run (8 ms/step page budget) | 9% | 0 | 1.0 cm / – | – |
+| B4 / M1 standard (after merge) | 64% | 0 | 2.4 / 4.6 cm | 0.934 |
+| W2 app-size moving window | 64% | 0 | 2.5 / 4.6 cm | 0.937 |
+| W1b small window (6.4 m) | 43% | 0 | 3.2 / 6.7 cm | 0.898 |
+| L1e long histories (3×2 rooms, 20 sessions) | 64% | 0 | 1.9 / 4.0 cm | 0.928 |
+| S1b symmetric furnished | 53% | 0 | – | – |
+| S0c symmetric bare | 1 / 30 (by design) | 0 | – | – |
+| C1 camera-only depth | 53% | 0 | – | – |
+| J1 big drift | 62% | 0 | – / 12.8 cm | – |
+| F1 storage faults | 50% | 0 | – | – |
