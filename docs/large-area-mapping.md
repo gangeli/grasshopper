@@ -239,4 +239,33 @@ the player, structure seen in the last 5 s is 84% within 8 cm of the truth,
 structure last seen over a minute ago only 50% — local error is old
 structure from a drifted past, not the mapper.
 
+### Round 7 — a jump detector that cried wolf; new defaults (d584fb0)
+
+The one home where hold + loop closure hurt on the easy profile (precision
+92→77%) traced to a hold "resolution" that undid what looked like a series
+of tracker jumps. They weren't jumps: the pose gate predicts each pose from
+the previous velocity and froze that velocity after a jump, so after a
+real change of walking speed *every* following frame was flagged (30 in a
+row), each extending the frame gate and each feeding `lastJump`. Now a
+residual that repeats is a change of speed: neither it nor the first one
+counts as a jump. In the bot's 30 s mapping walk: posJumps 53 → 2, frames
+gated 68 → 27. (A "trust the tracker's own corrections" rule tried first
+never fired once the jump log was clean, and was dropped.)
+
+Wider yaw search (±0.18 rad) helps again on the hard profile. With that,
+hold on conflict and loop closure (≤0.6 m) are now **on by default**:
+
+| profile | config | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | resets |
+|---|---|---|---|---|---|---|---|---|
+| house-hard 600 s | round-3 system | 66.2 | 58.5 | 73.9 | 8.8 | 17.5 | 42.8 | 2.3 |
+| house-hard 600 s | new defaults | 75.2 | 73.3 | 75.2 | 6.1 | 18.2 | 19.8 | 1.2 |
+| house 300 s | without hold/loop | 69.4 | 91.2 | 94.4 | 3.1 | 2.7 | 8.2 | 0.2 |
+| house 300 s | new defaults | 70.1 | 91.2 | 94.4 | 3.1 | 2.9 | 8.2 | 0.2 |
+
+One unit test's setup was made explicit rather than relying on timing:
+"a pet left floating in mid-air comes down" now lifts the pet while it
+stands still (with fewer spurious jumps the bot's game runs ahead, and a
+walking pet is put back on the floor by its gait, not by the health check
+under test). The assertions are unchanged.
+
 (continued below as rounds complete)
