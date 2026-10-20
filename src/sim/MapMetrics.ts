@@ -63,7 +63,7 @@ export function penetration(room: SimRoom, p: Vec3, minThick = 0.045): number {
   return worst;
 }
 
-function bodyPenetration(room: SimRoom, at: Vec3): number {
+export function bodyPenetration(room: SimRoom, at: Vec3): number {
   let w = 0;
   for (const o of BODY) w = Math.max(w, penetration(room, { x: at.x + o.x, y: at.y + o.y, z: at.z + o.z }));
   return w;

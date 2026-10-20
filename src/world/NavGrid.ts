@@ -27,6 +27,14 @@ export interface NavParams {
   minPlatform: number;
   /** Voxels of observed-empty space required right above a surface. */
   seenFreeMin: number;
+  /**
+   * Infer the space just above observed floor as empty when nothing was ever
+   * measured in it and the column is seen empty no higher than this (m above
+   * the floor): rays passed over it without meeting anything, and depth that
+   * rarely measures the floor itself (motion stereo on a blank floor) never
+   * carves the bottom layers. 0 = off.
+   */
+  inferLowFree: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
@@ -41,6 +49,7 @@ export const DEFAULT_NAV: NavParams = {
   knownFreeMin: 0.5,
   minPlatform: 0.12,
   seenFreeMin: 2,
+  inferLowFree: 0,
 };
 
 export interface Waypoint {
@@ -608,6 +617,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     // queried (bumping the grid version), so the first query still goes there.
     const nx = g.nx, ny = g.ny, nz = g.nz;
     const T = columnMask(g, sh, scratch);
+    if (p.inferLowFree > 0 && world.depthPoints > 0) inferLowFree(g, T, world.floorLayer, Math.round(p.inferLowFree / g.res));
     const inb = (i: number, j: number, k: number) => i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz;
     const solid = (i: number, j: number, k: number) => {
       if (!inb(i, j, k)) return false;
@@ -781,6 +791,31 @@ function columnNeighbor(g: VoxelGrid, colStart: Int32Array, colCount: Uint8Array
     }
   }
   return best;
+}
+
+/**
+ * NavParams.inferLowFree on the column mask: in floor-observed columns, the
+ * never-measured voxels from the floor up to the lowest seen-empty voxel
+ * (if that is at most `maxCells` up, with nothing solid, guessed solid or
+ * shadowed below it) count as seen empty.
+ */
+function inferLowFree(g: VoxelGrid, T: Uint8Array, floorLayer: number, maxCells: number): void {
+  const ny = g.ny, layer = g.nx * g.nz;
+  for (let c = 0; c < layer; c++) {
+    if (!g.observed[c]) continue;
+    const o = c * ny;
+    let top = -1;
+    for (let j = floorLayer; j < Math.min(ny, floorLayer + maxCells); j++) {
+      const b = T[o + j];
+      // Solid, guessed solid, shadowed, a live dynamic obstacle, or any occupancy evidence below: nothing to infer.
+      if (b & (1 | 16) || g.data[j * layer + c] > 0) break;
+      if (b & 2) {
+        top = j;
+        break;
+      }
+    }
+    for (let j = floorLayer; j < top; j++) T[o + j] |= 2 | 8;
+  }
 }
 
 /** Column-major per-voxel bits for computeNav (see there). */

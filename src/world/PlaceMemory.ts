@@ -91,6 +91,12 @@ export class PlaceMemory {
     this.building = null;
   }
 
+  /** Forget submaps with frames after t (they were taken in a frame that turned out wrong). */
+  dropAfter(t: number): void {
+    for (let q = this.submaps.length - 1; q >= 0; q--) if (this.submaps[q].t1 > t) this.submaps.splice(q, 1);
+    this.building = null;
+  }
+
   /**
    * Take over another memory's submaps (newer than these), moved by a
    * correction into this memory's frame (after a relocalisation).
@@ -270,11 +276,12 @@ export class PlaceMemory {
    * Visits (runs of submaps close in time) older than `before` whose
    * structure overlaps the box, oldest first, with the number of cells inside.
    */
-  visitsNear(box: { minX: number; maxX: number; minZ: number; maxZ: number }, before: number, view?: { x: number; z: number; headings: number[]; maxDist: number; maxTurn: number }, gap = 8): { t0: number; t1: number; subs: Submap[]; cells: number }[] {
+  visitsNear(box: { minX: number; maxX: number; minZ: number; maxZ: number }, before: number, view?: { x: number; z: number; headings: number[]; maxDist: number; maxTurn: number }, gap = 8, after = -Infinity): { t0: number; t1: number; subs: Submap[]; cells: number }[] {
     const out: { t0: number; t1: number; subs: Submap[]; cells: number }[] = [];
     let cur: { t0: number; t1: number; subs: Submap[]; cells: number } | null = null;
     for (const s of this.submaps) {
       if (s.t1 > before) break;
+      if (s.t1 < after) continue;
       // Seen from about here, looking about the same way (what it saw is what we see).
       if (view && (Math.hypot(s.ex - view.x, s.ez - view.z) > view.maxDist || !view.headings.some((h) => s.headings.some((x) => angDiff(h, x) <= view.maxTurn)))) continue;
       if (s.maxX < box.minX || s.minX > box.maxX || s.maxZ < box.minZ || s.minZ > box.maxZ) continue;

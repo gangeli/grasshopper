@@ -312,10 +312,65 @@ export class VoxelGrid {
       }
     }
     if (hit) {
+      const before = this.fadeBelowNew >= 0 && this.inBounds(ti, tj, tk) ? this.data[this.idx(ti, tj, tk)] : 127;
       this.add(ti, tj, tk, hitDelta);
       this.noteHeight(ti, tj, tk, to.y);
+      if (before <= OCC_THRESHOLD && this.data[this.idx(ti, tj, tk)] > OCC_THRESHOLD) this.fadeBelow(ti, tj, tk);
     }
     return conflicts;
+  }
+
+  /**
+   * A surface just became solid here (a new one, or an old one seen again
+   * from a frame that has drifted since): free space in its column below it
+   * was seen from elsewhere, before this surface was known, and is the
+   * likeliest to be wrong (the inside of a sofa an old, shifted copy of the
+   * room had in front of it). With fadeBelowNew ≥ 0, that free belief is
+   * scaled by it (0: back to unknown, so it must be seen empty again; under
+   * an observed top, unknown counts as solid). < 0 = off.
+   */
+  fadeBelowNew = -1;
+  /** First layer above the floor (fadeBelow stops there). */
+  fadeFloorJ = 0;
+  private fadeBelow(i: number, j: number, k: number): void {
+    const keep = this.fadeBelowNew, layer = this.nx * this.nz, c = k * this.nx + i;
+    for (let jj = j - 1; jj >= this.fadeFloorJ; jj--) {
+      const n = jj * layer + c, v = this.data[n];
+      if (v > OCC_THRESHOLD) break;
+      if (v >= 0) continue;
+      const nv = Math.trunc(v * keep);
+      this.data[n] = nv;
+      this.touch(n);
+      if (v <= -2 && nv > -2) this.version++;
+    }
+  }
+
+  /**
+   * Weaken free-space belief (towards unknown, ×keep) in the voxels behind
+   * `to` along the ray from `from`, over `dist` metres. Occupied and unknown
+   * voxels are left alone.
+   */
+  decayBehind(from: Vec3, to: Vec3, dist: number, keep: number): void {
+    const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 1e-4) return;
+    const r = this.res, step = r * 0.5;
+    let lastN = -1;
+    for (let t = step; t <= dist + 1e-6; t += step) {
+      const x = to.x + (dx / len) * t, y = to.y + (dy / len) * t, z = to.z + (dz / len) * t;
+      const i = this.cellX(x), j = this.cellY(y), k = this.cellZ(z);
+      if (!this.inBounds(i, j, k)) return;
+      const n = this.idx(i, j, k);
+      if (n === lastN) continue;
+      lastN = n;
+      const v = this.data[n];
+      if (v >= 0) continue;
+      const nv = Math.trunc(v * keep);
+      this.data[n] = nv;
+      this.touch(n);
+      // Nav reads "seen empty" as data <= -2: a crossing changes the graph.
+      if (v <= -2 && nv > -2) this.version++;
+    }
   }
 
   /**

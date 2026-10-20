@@ -454,6 +454,7 @@ export class WorldModel {
     // Loss and recovery both report; snapshot at the first of a burst.
     if (this.grid && !(t - this.lastTrackingEvent < 20 && this.eventSnapshot)) this.eventSnapshot = { t, data: this.grid.data.slice(), epoch: this.epoch };
     this.lastTrackingEvent = t;
+    if (this.lossUnverified === null) this.lossUnverified = t;
   }
 
   /** Correction from a world anchor (tracking → map), e.g. WebXR anchors that the platform keeps glued to the real world. */
@@ -463,6 +464,25 @@ export class WorldModel {
     this.anchorC = next;
     this.updateFrame();
   }
+
+  /**
+   * The platform moved the tracking origin (WebXR XRReferenceSpace 'reset'):
+   * `transform` is the new origin's pose in the old tracking coordinates
+   * (column-major), when the platform knows it. Then tracking coordinates
+   * change by exactly that and the map frame follows, so nothing has to be
+   * rediscovered. Either way it is a tracking event (a jump to check for).
+   */
+  trackingOriginReset(transform: ArrayLike<number> | null, t: number): void {
+    if (transform && transform.length === 16 && Array.from(transform).every(Number.isFinite)) {
+      // map = t2m·p_old = t2m·T·p_new: the new correction is (t2m·T·t2m⁻¹)·t2m.
+      this.applyRegistration(mul4(mul4(this.t2m, transform), this.m2t));
+      this.recoveries.realign--; // not a self-registration
+      this.originResets++;
+    }
+    this.noteTrackingEvent(t);
+  }
+  /** Tracking-origin resets with a known transform, applied (diagnostics). */
+  originResets = 0;
 
   /** Apply an extra map-frame correction on top of the current one (from self-registration). */
   applyRegistration(delta: ArrayLike<number>): void {
@@ -550,6 +570,8 @@ export class WorldModel {
       this.grid.stamp = this.timeCode(t);
       this.grid.staleAfter = this.forgetStaleAfter;
       this.grid.shieldedCarving = this.shieldedCarving;
+      this.grid.fadeBelowNew = this.fadeBelowNew;
+      this.grid.fadeFloorJ = this.floorLayer;
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
       // Frames waiting to be re-integrated (sliced replays, a re-attach): a few per frame.
       this.stepReplayQueue(3);
@@ -568,15 +590,29 @@ export class WorldModel {
       // Writing it in would double walls and carve through furniture: hold
       // it back (it stays in the replay buffer) until the drift monitor
       // finds the correction, or for a few seconds at most.
-      const c = t >= this.holdCooldownUntil || this.heldSince !== null ? this.probeConflict(eye, pts, sig) : { n: 0, rate: 0 };
+      const watchLoss = this.detachAfterLossHold > 0 && this.lossUnverified !== null;
+      const c = t >= this.holdCooldownUntil || this.heldSince !== null || watchLoss ? this.probeConflict(eye, pts, sig) : { n: 0, rate: 0, on: 0 };
       const contradicts = c.n >= 40 && c.rate >= this.holdConflictRate;
       // Once holding, keep holding until a view clearly agrees with the map
       // again (or the drift monitor resolves it, or time runs out).
       const agrees = c.n >= 40 && c.rate < this.holdConflictRate / 3;
+      // After a tracking loss: a view that lands on known structure and agrees with the map says the frame didn't move.
+      if (this.lossUnverified !== null && agrees && c.on >= 0.35 * c.n && this.heldSince === null) this.lossUnverified = null;
       if (contradicts && this.heldSince === null) this.heldSince = t;
       if (this.heldSince !== null && !agrees && t - this.heldSince < this.holdMaxSeconds) {
         this.remember(eye, pts, sig, t);
         this.heldFrames++;
+        return true;
+      }
+      // Held frames that still contradict the map right after a tracking
+      // loss, with no correction found: the tracker most likely came back in
+      // a moved frame. Writing them in would lay a second, shifted copy of
+      // the room over the first; releasing them is what let jumps wreck the
+      // map. Put the map aside instead (it comes back when the camera is
+      // found in it again, see detachMap/reattach) and map on from the held frames.
+      if (this.heldSince !== null && !agrees && this.detachAfterLossHold > 0 && this.lossUnverified !== null && this.heldSince - this.lossUnverified < this.detachAfterLossHold) {
+        this.detachHeld();
+        this.ingestDepth(eye, pts, 4.5, sig, t);
         return true;
       }
       if (this.heldSince !== null) this.releaseHeld();
@@ -746,7 +782,7 @@ export class WorldModel {
     this.placeWhy = why;
     return null;
   }
-  *placeSearch(opts: { frames?: number; since?: number; minAge: number; maxShift: number; maxYaw: number; memory?: PlaceMemory; penalty?: number; span?: number; drift?: { floor: number; perM: number } }): Generator<void, (Misalignment & { second: number; secondAt: PlaceMatch['secondAt']; constraint: number; unique: number; visitT0: number; openShare: number }) | null, void> {
+  *placeSearch(opts: { frames?: number; since?: number; minAge: number; maxShift: number; maxYaw: number; memory?: PlaceMemory; penalty?: number; span?: number; drift?: { floor: number; perM: number }; visitAfter?: number }): Generator<void, (Misalignment & { second: number; secondAt: PlaceMatch['secondAt']; constraint: number; unique: number; visitT0: number; openShare: number }) | null, void> {
     const pm = opts.memory ?? this.placeMemory, g = this.grid;
     if (!pm || !g || !this.replay.length) return this.noPlace('no memory/grid/frames');
     let frames = this.replay.slice(-(opts.frames ?? 20));
@@ -778,7 +814,7 @@ export class WorldModel {
     if (pts.length < 180 || !headings.length) return this.noPlace('too few readings');
     const pad = opts.maxShift + 0.3;
     const eye = frames[frames.length - 1].eye;
-    const visits = pm.visitsNear({ minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }, frames[0].t - opts.minAge, { x: eye.x, z: eye.z, headings, maxDist: 2.5 + opts.maxShift, maxTurn: 1.0 + opts.maxYaw });
+    const visits = pm.visitsNear({ minX: minX - pad, maxX: maxX + pad, minZ: minZ - pad, maxZ: maxZ + pad }, frames[0].t - opts.minAge, { x: eye.x, z: eye.z, headings, maxDist: 2.5 + opts.maxShift, maxTurn: 1.0 + opts.maxYaw }, 8, opts.visitAfter);
     if (!visits.length) return this.noPlace('no visit seen from here');
     // The oldest visit and the two that saw the most of this place: whichever explains the view best.
     const cand = [...new Set([visits[0], ...visits.slice().sort((a, b) => b.cells - a.cells).slice(0, 1)])].filter((v) => v.cells >= 150);
@@ -822,6 +858,13 @@ export class WorldModel {
 
   /** See VoxelGrid.shieldedCarving. */
   shieldedCarving = true;
+  /** See VoxelGrid.fadeBelowNew (< 0: off). */
+  fadeBelowNew = -1;
+  /** Depth (m) behind a surprising surface over which stale free space is weakened (see ingestDepth); 0 = off. */
+  staleFreeDecay = 0;
+  /** ...when the reading lands in a voxel at most this free; what is left of the free belief (×). */
+  staleFreeTrigger = -8;
+  staleFreeKeep = 0.5;
   /** See ingestDepthImage: hold back frames that contradict the map (on by default). */
   holdOnConflict = true;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */
@@ -845,6 +888,45 @@ export class WorldModel {
     this.replayFrames((f) => f.t >= since);
   }
 
+  /**
+   * Held frames contradicting the map after a tracking loss that nothing
+   * has verified yet (s between the loss and the hold) put the map aside
+   * instead of going into it (see ingestDepthImage). 0 = off: they are
+   * released into the map.
+   */
+  detachAfterLossHold = 0;
+  /**
+   * Time of a tracking loss after which nothing has yet shown that the frame
+   * still fits the map (a view agreeing with known structure, or a
+   * realignment); null once verified. A loss is when trackers come back in
+   * a moved frame.
+   */
+  lossUnverified: number | null = null;
+  /** The drift monitor (or a view) confirmed the frame after a tracking loss. */
+  frameVerified(): void {
+    this.lossUnverified = null;
+  }
+  /** Detaches the world model decided on itself (the game re-anchors the pet on a change). */
+  selfDetaches = 0;
+  private detachHeld(): void {
+    const since = this.heldSince!, loss = this.lossUnverified ?? since;
+    const held = this.replay.filter((f) => f.t >= since);
+    this.heldSince = null;
+    const hadDormant = !!this.dormant;
+    this.detachMap();
+    this.lossUnverified = null;
+    this.selfDetaches++;
+    // What was settled after the loss is in the moved frame: no place to relocalise against.
+    if (!hadDormant) this.dormant?.places.dropAfter(loss);
+    // The held frames are the fresh map's first: back into the buffer (relocalisation
+    // matches them) and into the map a few per frame.
+    for (const f of held) {
+      this.replay.push(f);
+      this.replayPoints += f.pts.length / 3;
+    }
+    this.replayQueue = held.slice();
+  }
+
   /** The drift monitor corrected the frame for the held frames (realign replayed them): stop holding. */
   heldResolved(): void {
     if (this.heldSince === null) return;
@@ -857,10 +939,10 @@ export class WorldModel {
    * map: the reading lies in space the map is sure is empty, or its ray
    * passes through an occupied voxel well before reaching it.
    */
-  probeConflict(eye: Vec3, pts: Vec3[], sig?: number[]): { n: number; rate: number } {
+  probeConflict(eye: Vec3, pts: Vec3[], sig?: number[]): { n: number; rate: number; on: number } {
     const g = this.grid!;
     const stride = Math.max(1, Math.floor(pts.length / 300));
-    let n = 0, bad = 0;
+    let n = 0, bad = 0, on = 0;
     for (let q = 0; q < pts.length; q += stride) {
       const p = pts[q];
       if (p.y < this.floorY + 0.08) continue;
@@ -877,6 +959,8 @@ export class WorldModel {
         bad++;
         continue;
       }
+      // (On structure the map knows: support for the frame as it is.)
+      if (g.inBounds(pi, pj, pk) && g.data[g.idx(pi, pj, pk)] > OCC_THRESHOLD) on++;
       // ...or its ray through something the map is sure is there.
       let hits = 0, last = -1;
       for (let s = 0.1; s < stop; s += g.res * 0.7) {
@@ -890,7 +974,7 @@ export class WorldModel {
       }
       if (hits >= 1) bad++;
     }
-    return { n, rate: n ? bad / n : 0 };
+    return { n, rate: n ? bad / n : 0, on };
   }
 
   /**
@@ -1461,11 +1545,19 @@ export class WorldModel {
         continue;
       }
       const hitDelta = Math.round(14 * Math.min(1, Math.max(0.4, 0.025 / sigma)));
-      let landedInFree = false;
+      let landedInFree = false, endV = 0;
       if (sigma < 0.04) {
         const i = g.cellX(p.x), j = g.cellY(p.y), k = g.cellZ(p.z);
-        landedInFree = g.inBounds(i, j, k) && g.data[g.idx(i, j, k)] <= -20;
+        endV = g.inBounds(i, j, k) ? g.data[g.idx(i, j, k)] : 0;
+        landedInFree = endV <= -20;
       }
+      // A precise surface where the map believes it saw empty space: the map
+      // there is stale (the frame drifted since, or something moved in). The
+      // space just behind that surface can't have been seen empty from here,
+      // and the old "empty" belief there is the likeliest to be wrong (the
+      // inside of a sofa the old, shifted copy of the room had in front of
+      // it): weaken it towards unknown, so that only fresh looks clear it again.
+      if (this.staleFreeDecay > 0 && sigma < 0.04 && endV <= this.staleFreeTrigger && p.y > this.floorY + 0.06) g.decayBehind(eye, p, this.staleFreeDecay, this.staleFreeKeep);
       const c = g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
       if (sigma < 0.04) {
         rays++;
@@ -1948,6 +2040,7 @@ export class WorldModel {
   realign(dx: number, dz: number, dyaw: number, pivot: Vec3, since: number): void {
     if (!this.grid) return;
     this.finishWarp();
+    this.lossUnverified = null;
     const c = Math.cos(dyaw), s = Math.sin(dyaw);
     const fix = (p: { x: number; y: number; z: number }) => {
       const rx = p.x - pivot.x, rz = p.z - pivot.z;

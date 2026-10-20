@@ -9,7 +9,8 @@ import { OCC_THRESHOLD } from '../world/VoxelGrid';
 import { WorldModel } from '../world/WorldModel';
 import { generateHouse, type House } from './House';
 import { houseWalk, type WalkOptions } from './HouseWalk';
-import { evaluateMap, pathPenetration } from './MapMetrics';
+import { bodyPenetration, evaluateMap, pathPenetration, penetration } from './MapMetrics';
+import { findHideSpots } from '../game/HideSpots';
 import { Rng } from '../core/rng';
 import { CameraDepthSource, senseFrame } from './scan';
 import { cameraBasis, SimSensor, type NoiseName, type NoiseProfile, type SimCamera } from './SimSensor';
@@ -107,6 +108,19 @@ export interface LargeAreaSample {
    * frame: share that run into real furniture (>2cm), sampled every 6s.
    */
   localPathColl: number;
+  /**
+   * Pet-safety near the player through the current frame (what the user
+   * sees): share of nav nodes within 3m where the pet's body would be inside
+   * real furniture (>2cm), sampled every 6s; falseFree of the furniture
+   * within 3.5m (sampled every 2s); and of the hide spots the game would
+   * pick right now (top 5, every 20s), the share inside real furniture.
+   */
+  localNodeColl?: number;
+  /** Same nodes, the crouched core (see hideCorePenetration) inside real furniture: the pet *in* the furniture, not brushing it. */
+  localNodeDeep?: number;
+  localFalseFree?: number;
+  hideTested?: number;
+  hideBad?: number;
   /** Max frame error over the last interval. */
   frameErrMax: number;
   memMB: number;
@@ -214,6 +228,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   let frameErrMax = 0, walked = 0, spawned = false;
   let abPeak = 0;
   let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
+  let nodeTested = 0, nodeHit = 0, nodeDeep = 0, ffShell = 0, ffBad = 0, hideTested = 0, hideBad = 0;
+  const hideRng = new Rng(seed * 7 + 5);
   const pathRng = new Rng(seed * 13 + 1);
   const churnRng = new Rng(seed * 31 + 7);
   let churnBack: [number, number] | null = null;
@@ -229,6 +245,39 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     realigns.push({ t: world.now, before, after, what: game.health.drift.trace[game.health.drift.trace.length - 1] ?? '' });
     if (process.env.TRACE) log(`  realign at ${world.now.toFixed(1)}s: frame error ${(before * 100).toFixed(0)} → ${(after * 100).toFixed(0)}cm`);
   };
+  const origReattach = world.reattach.bind(world);
+  world.reattach = (c) => {
+    const before = curCam ? frameError(world, sensor, curCam) : 0;
+    origReattach(c);
+    const after = curCam ? frameError(world, sensor, curCam) : 0;
+    realigns.push({ t: world.now, before, after, what: 'reattach' });
+    if (process.env.TRACE) log(`  reattach at ${world.now.toFixed(1)}s: frame error ${(before * 100).toFixed(0)} → ${(after * 100).toFixed(0)}cm`);
+  };
+  // TRACE=place: every place-memory estimate next to the frame error it would leave (truth).
+  if (process.env.TRACE === 'place') {
+    const orig = world.placeSearch.bind(world);
+    world.placeSearch = function* (opts) {
+      const r = yield* orig(opts);
+      if (r && curCam) {
+        const now = frameError(world, sensor, curCam), after = frameErrorWith(world, sensor, curCam, r);
+        log(`  place ${world.now.toFixed(1)}s ${opts.visitAfter !== undefined ? 'recent' : opts.memory ? 'dormant' : 'any'}: (${r.dx.toFixed(2)},${r.dz.toFixed(2)},${r.dyaw.toFixed(3)}) ${r.best}/${r.n} base ${r.base} uniq ${r.unique.toFixed(2)}${r.degenerate ? ' degenerate' : ''} → frame error ${(now * 100).toFixed(0)} → ${(after * 100).toFixed(0)}cm ${after < now - 0.1 ? 'RIGHT' : after > now + 0.1 ? 'WRONG' : ''}`);
+      }
+      return r;
+    };
+  }
+  // TRACE=mis: every voxel-map misalignment estimate next to the frame error it would leave (truth).
+  if (process.env.TRACE === 'mis') {
+    const orig = world.misalignmentSearch.bind(world);
+    world.misalignmentSearch = function* (opts) {
+      const r = yield* orig(opts);
+      if (r && curCam) {
+        const now = frameError(world, sensor, curCam), after = frameErrorWith(world, sensor, curCam, r);
+        log(`  mis ${world.now.toFixed(1)}s ${opts?.snapshot ?? 'newest'}${world.heldSince !== null ? ' HELD' : ''}: (${r.dx.toFixed(2)},${r.dz.toFixed(2)},${r.dyaw.toFixed(3)}) ${r.best}/${r.n} base ${r.base}${r.degenerate ? ' degenerate' : ''} → frame error ${(now * 100).toFixed(0)} → ${(after * 100).toFixed(0)}cm ${after < now - 0.05 ? 'RIGHT' : after > now + 0.05 ? 'WRONG' : ''}`);
+      }
+      return r;
+    };
+  }
+  let lossJumpsSeen = 0;
   try {
     for (let f = 0; f < path.length; f++) {
       const step = path[f];
@@ -299,6 +348,10 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         }
       }
       const t1 = performance.now();
+      if (sensor.lossJumps !== lossJumpsSeen) {
+        lossJumpsSeen = sensor.lossJumps;
+        if (process.env.TRACE) log(`  sim: tracking came back in a moved frame at ${step.t.toFixed(1)}s (frame error now ${(frameError(world, sensor, step.cam) * 100).toFixed(0)}cm)`);
+      }
       if (o.game !== false) {
         if (!spawned && step.t > 2) {
           spawned = true;
@@ -325,9 +378,20 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         const lc = localPathCollisions(world, game.nav, sensor, room, step.cam, 12, pathRng);
         pathTested += lc.tested;
         pathHit += lc.colliding;
+        nodeTested += lc.nodesTested;
+        nodeHit += lc.nodesColliding;
+        nodeDeep += lc.nodesDeep;
+      }
+      if (f % 600 === 300 && spawned && world.grid && game.nav && game.nav.g === world.grid && game.nav.count > 50) {
+        const hs = hideSpotSafety(world, game.nav, sensor, room, step.cam, game.pet.pos, hideRng);
+        hideTested += hs.tested;
+        hideBad += hs.bad;
       }
       if (f % 60 === 0 && world.grid) {
         const lp = localPrecision(world, sensor, room, step.cam);
+        const ff = localFalseFree(world, sensor, room, step.cam);
+        ffShell += ff.shell;
+        ffBad += ff.bad;
         if (lp.occ > 20) {
           localSum += lp.precision;
           ghostSum += lp.ghostM2;
@@ -355,7 +419,13 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         s.localPrecRecent = recOcc ? recGood / recOcc : 1;
         s.localOldShare = oldOcc + recOcc ? oldOcc / (oldOcc + recOcc) : 0;
         s.localPathColl = pathTested ? pathHit / pathTested : 0;
+        s.localNodeColl = nodeTested ? nodeHit / nodeTested : 0;
+        s.localNodeDeep = nodeTested ? nodeDeep / nodeTested : 0;
+        s.localFalseFree = ffShell ? ffBad / ffShell : 0;
+        s.hideTested = hideTested;
+        s.hideBad = hideBad;
         localSum = ghostSum = localN = oldGood = oldOcc = recGood = recOcc = pathTested = pathHit = 0;
+        nodeTested = nodeHit = nodeDeep = ffShell = ffBad = hideTested = hideBad = 0;
         samples.push(s);
         log(fmtSample(s));
       }
@@ -409,6 +479,24 @@ function trackedView(sensor: SimSensor, cam: SimCamera) {
 }
 
 /** Where the map puts real points around the camera now vs where they are (m, worst of a few). */
+/** frameError after a map-frame correction c (x' = pivot + R(x − pivot) + d) of what the camera sees. */
+export function frameErrorWith(world: WorldModel, sensor: SimSensor, cam: SimCamera, c: { dx: number; dz: number; dyaw: number; pivot: { x: number; z: number } }): number {
+  const T = sensor.trackingFromTruth();
+  const { forward } = cameraBasis(cam);
+  const cs = Math.cos(c.dyaw), sn = Math.sin(c.dyaw);
+  let worst = 0;
+  for (const [a, b] of [[1, 0], [1.5, 0.5], [1.5, -0.5]]) {
+    const fx = forward.x, fz = forward.z, L = Math.hypot(fx, fz) || 1;
+    const p = { x: cam.pos.x + (fx / L) * a - (fz / L) * b, y: 0.3, z: cam.pos.z + (fz / L) * a + (fx / L) * b };
+    const tr = { x: T[0] * p.x + T[4] * p.y + T[8] * p.z + T[12], y: T[1] * p.x + T[5] * p.y + T[9] * p.z + T[13], z: T[2] * p.x + T[6] * p.y + T[10] * p.z + T[14] };
+    const m = world.toMapPoint(tr);
+    const rx = m.x - c.pivot.x, rz = m.z - c.pivot.z;
+    const x = c.pivot.x + cs * rx + sn * rz + c.dx, z = c.pivot.z - sn * rx + cs * rz + c.dz;
+    worst = Math.max(worst, Math.hypot(x - p.x, z - p.z));
+  }
+  return worst;
+}
+
 export function frameError(world: WorldModel, sensor: SimSensor, cam: SimCamera): number {
   const T = sensor.trackingFromTruth();
   const { forward } = cameraBasis(cam);
@@ -490,21 +578,22 @@ export function localPrecision(world: WorldModel, sensor: SimSensor, room: SimRo
 }
 
 /** Random nav paths between nodes within 3m of the player, checked against reality through the current frame. */
-function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor, room: SimRoom, cam: SimCamera, n: number, rng: Rng): { tested: number; colliding: number } {
-  const T = sensor.trackingFromTruth();
-  const Ti = [T[0], T[4], T[8], 0, T[1], T[5], T[9], 0, T[2], T[6], T[10], 0, 0, 0, 0, 1];
-  Ti[12] = -(Ti[0] * T[12] + Ti[4] * T[13] + Ti[8] * T[14]);
-  Ti[13] = -(Ti[1] * T[12] + Ti[5] * T[13] + Ti[9] * T[14]);
-  Ti[14] = -(Ti[2] * T[12] + Ti[6] * T[13] + Ti[10] * T[14]);
-  const M = mulCM(Ti, world.mapToTracking());
-  const p = cam.pos;
-  const cm = world.toMapPoint({ x: T[0] * p.x + T[8] * p.z + T[12], y: 1, z: T[2] * p.x + T[10] * p.z + T[14] });
+function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor, room: SimRoom, cam: SimCamera, n: number, rng: Rng): { tested: number; colliding: number; nodesTested: number; nodesColliding: number; nodesDeep: number } {
+  const M = mapToTruth(world, sensor);
+  const cm = cameraInMap(world, sensor, cam);
   const near: number[] = [];
   for (let a = 0; a < nav.count; a += 3) {
     const q = nav.pos(a);
     if (Math.hypot(q.x - cm.x, q.z - cm.z) < 3) near.push(a);
   }
-  if (near.length < 20) return { tested: 0, colliding: 0 };
+  if (near.length < 20) return { tested: 0, colliding: 0, nodesTested: 0, nodesColliding: 0, nodesDeep: 0 };
+  let nodesTested = 0, nodesColliding = 0, nodesDeep = 0;
+  for (let q = 0; q < 40; q++) {
+    const w = xf(M, nav.pos(near[rng.int(0, near.length - 1)]));
+    nodesTested++;
+    if (bodyPenetration(room, w) > 0.02) nodesColliding++;
+    if (hideCorePenetration(room, w) > 0.02) nodesDeep++;
+  }
   let tested = 0, colliding = 0;
   for (let q = 0; q < n * 3 && tested < n; q++) {
     const a = near[rng.int(0, near.length - 1)], b = near[rng.int(0, near.length - 1)];
@@ -515,7 +604,90 @@ function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor,
     const real = path.map((w) => ({ ...w, x: M[0] * w.x + M[4] * w.y + M[8] * w.z + M[12], y: M[1] * w.x + M[5] * w.y + M[9] * w.z + M[13], z: M[2] * w.x + M[6] * w.y + M[10] * w.z + M[14] }));
     if (pathPenetration(room, real) > 0.02) colliding++;
   }
-  return { tested, colliding };
+  return { tested, colliding, nodesTested, nodesColliding, nodesDeep };
+}
+
+/** Map frame → truth (through the current frame chain), column-major 4×4. */
+function mapToTruth(world: WorldModel, sensor: SimSensor): number[] {
+  const T = sensor.trackingFromTruth();
+  const Ti = [T[0], T[4], T[8], 0, T[1], T[5], T[9], 0, T[2], T[6], T[10], 0, 0, 0, 0, 1];
+  Ti[12] = -(Ti[0] * T[12] + Ti[4] * T[13] + Ti[8] * T[14]);
+  Ti[13] = -(Ti[1] * T[12] + Ti[5] * T[13] + Ti[9] * T[14]);
+  Ti[14] = -(Ti[2] * T[12] + Ti[6] * T[13] + Ti[10] * T[14]);
+  return mulCM(Ti, world.mapToTracking());
+}
+function rigidInverse(M: number[]): number[] {
+  const R = [M[0], M[4], M[8], 0, M[1], M[5], M[9], 0, M[2], M[6], M[10], 0, 0, 0, 0, 1];
+  R[12] = -(R[0] * M[12] + R[4] * M[13] + R[8] * M[14]);
+  R[13] = -(R[1] * M[12] + R[5] * M[13] + R[9] * M[14]);
+  R[14] = -(R[2] * M[12] + R[6] * M[13] + R[10] * M[14]);
+  return R;
+}
+function xf(M: number[], w: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return { x: M[0] * w.x + M[4] * w.y + M[8] * w.z + M[12], y: M[1] * w.x + M[5] * w.y + M[9] * w.z + M[13], z: M[2] * w.x + M[6] * w.y + M[10] * w.z + M[14] };
+}
+function cameraInMap(world: WorldModel, sensor: SimSensor, cam: SimCamera): { x: number; y: number; z: number } {
+  const T = sensor.trackingFromTruth(), p = cam.pos;
+  return world.toMapPoint({ x: T[0] * p.x + T[4] * p.y + T[8] * p.z + T[12], y: T[1] * p.x + T[5] * p.y + T[9] * p.z + T[13], z: T[2] * p.x + T[6] * p.y + T[10] * p.z + T[14] });
+}
+
+/** falseFree (as falseFreeShare) of the real furniture within `radius` of the player, looked up in the live map through the current frame. */
+function localFalseFree(world: WorldModel, sensor: SimSensor, room: SimRoom, cam: SimCamera, radius = 3.5): { shell: number; bad: number } {
+  const g = world.grid!;
+  const Mi = rigidInverse(mapToTruth(world, sensor));
+  let shell = 0, bad = 0;
+  const cx = cam.pos.x, cz = cam.pos.z;
+  for (const b of room.boxes) {
+    const pc = room.pieces[b.piece];
+    if (pc.label === 'wall') continue;
+    if (Math.min(b.max.x - b.min.x, b.max.z - b.min.z) < 0.16) continue;
+    const dx = Math.max(b.min.x - cx, 0, cx - b.max.x), dz = Math.max(b.min.z - cz, 0, cz - b.max.z);
+    if (Math.hypot(dx, dz) > radius) continue;
+    for (let y = Math.max(b.min.y, 0.03) + 0.02; y < Math.min(b.max.y, 0.25); y += 0.04)
+      for (let x = b.min.x; x <= b.max.x + 1e-6; x += 0.04)
+        for (let z = b.min.z; z <= b.max.z + 1e-6; z += 0.04) {
+          const edge = Math.min(x - b.min.x, b.max.x - x, z - b.min.z, b.max.z - z);
+          if (edge <= 0.06 || edge >= 0.11) continue;
+          const m = xf(Mi, { x, y, z });
+          const i = g.cellX(m.x), j = g.cellY(m.y), k = g.cellZ(m.z);
+          if (!g.inBounds(i, j, k)) continue;
+          const v = g.data[g.idx(i, j, k)];
+          if (v === 0) continue;
+          shell++;
+          if (v < -2) bad++;
+        }
+  }
+  return { shell, bad };
+}
+
+/** The hide spots the game would pick right now (seeker at the camera), checked in reality: how many put the pet inside furniture. */
+function hideSpotSafety(world: WorldModel, nav: NavGrid, sensor: SimSensor, room: SimRoom, cam: SimCamera, petPos: { x: number; y: number; z: number }, rng: Rng): { tested: number; bad: number } {
+  const M = mapToTruth(world, sensor);
+  const eye = cameraInMap(world, sensor, cam);
+  let spots: ReturnType<typeof findHideSpots> = [];
+  for (const minHiddenNow of [0.85, 0.5]) {
+    spots = findHideSpots(nav, petPos, eye, { difficulty: 0.5, maxPathCost: 9, previous: [], rng, objects: [], eyeHeight: 1.4, minHiddenNow }, world.floorY);
+    if (spots.length) break;
+  }
+  let bad = 0;
+  for (const s of spots) if (hideCorePenetration(room, xf(M, s.pos)) > 0.02) bad++;
+  return { tested: spots.length, bad };
+}
+
+/**
+ * A hiding pet crouches (and crawls under things): its core, 4–11cm up
+ * within 5cm of where it stands. If that is inside real furniture, the pet
+ * is hiding *in* the furniture.
+ */
+const HIDE_CORE = [
+  { x: 0, y: 0.05, z: 0 },
+  { x: 0, y: 0.11, z: 0 },
+  ...[0, 1, 2, 3, 4, 5].map((a) => ({ x: Math.cos((a / 6) * Math.PI * 2) * 0.05, y: 0.07, z: Math.sin((a / 6) * Math.PI * 2) * 0.05 })),
+];
+export function hideCorePenetration(room: SimRoom, at: { x: number; y: number; z: number }): number {
+  let w = 0;
+  for (const o of HIDE_CORE) w = Math.max(w, penetration(room, { x: at.x + o.x, y: at.y + o.y, z: at.z + o.z }));
+  return w;
 }
 
 function mulCM(A: ArrayLike<number>, B: ArrayLike<number>): number[] {

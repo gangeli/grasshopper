@@ -186,6 +186,17 @@ export class HealthMonitor {
   }
 
   private seenReattaches = 0;
+  private seenSelfDetaches = 0;
+  /** The world model put the map aside by itself (a hold after a tracking loss): tell the game. */
+  private checkSelfDetach() {
+    const w = this.world;
+    if (w.selfDetaches === this.seenSelfDetaches) return;
+    this.seenSelfDetaches = w.selfDetaches;
+    this.softResetAt = this.t;
+    this.report('mapDetached', 'after a tracking loss the view contradicted the map and no correction was found: map put aside until we find our place in it, pet re-anchored');
+    this.game.mapChanged();
+    this.game.reanchorPet();
+  }
   private onRealigned() {
     if (this.world.reattaches !== this.seenReattaches) {
       this.seenReattaches = this.world.reattaches;
@@ -205,6 +216,7 @@ export class HealthMonitor {
 
   private checkDrift() {
     const w = this.world;
+    this.checkSelfDetach();
     const wasInEvent = this.drift.inEvent;
     const fixed = this.drift.update(this.t);
     const verdict = wasInEvent && !this.drift.inEvent && !fixed ? this.drift.eventVerdict() : null;

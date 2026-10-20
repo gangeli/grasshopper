@@ -40,6 +40,26 @@ describe('VoxelGrid', () => {
     expect(g.version).toBeGreaterThan(0);
   });
 
+  it('decayBehind weakens free space just behind a surface, leaves occupied and unknown voxels alone', () => {
+    const g = mk();
+    const from = { x: -0.85, y: 1.05, z: 0.05 }, to = { x: 0.05, y: 1.05, z: 0.05 };
+    // Old free space behind the surface, an occupied voxel further in, unknown beyond.
+    for (const x of [0.15, 0.25]) g.set(g.cellX(x), g.cellY(1.05), g.cellZ(0.05), -40);
+    g.set(g.cellX(0.35), g.cellY(1.05), g.cellZ(0.05), 60);
+    g.set(g.cellX(-0.25), g.cellY(1.05), g.cellZ(0.05), -40); // in front: untouched
+    const v0 = g.version;
+    g.decayBehind(from, to, 0.35, 0.5);
+    expect(g.get(g.cellX(0.15), g.cellY(1.05), g.cellZ(0.05))).toBe(-20);
+    expect(g.get(g.cellX(0.25), g.cellY(1.05), g.cellZ(0.05))).toBe(-20);
+    expect(g.get(g.cellX(0.35), g.cellY(1.05), g.cellZ(0.05))).toBe(60);
+    expect(g.get(g.cellX(0.45), g.cellY(1.05), g.cellZ(0.05))).toBe(0);
+    expect(g.get(g.cellX(-0.25), g.cellY(1.05), g.cellZ(0.05))).toBe(-40);
+    // Repeated surprising readings take it to "unknown" (nav no longer counts it as seen empty).
+    for (let r = 0; r < 6; r++) g.decayBehind(from, to, 0.35, 0.5);
+    expect(g.get(g.cellX(0.15), g.cellY(1.05), g.cellZ(0.05))).toBeGreaterThan(-2);
+    expect(g.version).toBeGreaterThan(v0);
+  });
+
   it('segmentClear respects skipEnd', () => {
     const g = mk();
     g.set(g.cellX(0.5), g.cellY(1), g.cellZ(0), 100);

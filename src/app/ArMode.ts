@@ -126,6 +126,8 @@ export class ArMode {
     anchorCorrection: null as number[] | null,
     /** noteTrackingEvent calls (loss + regain). */
     trackingEvents: 0,
+    /** XRReferenceSpace 'reset' events (tracking origin moved). */
+    originResets: 0,
   };
   onExit: ((reason?: string) => void) | null = null;
   /** Remembered rooms (set once storage is open; see app/Memory). */
@@ -215,6 +217,14 @@ export class ArMode {
       });
       await r.xr.setSession(session);
       this.refSpace = r.xr.getReferenceSpace();
+      // A discontinuity of the tracking origin (the runtime relocalised or
+      // restarted its map): when it says by how much, the map frame follows
+      // exactly; either way it is a tracking event the map is checked after.
+      this.refSpace?.addEventListener('reset', (ev: Event) => {
+        const tr = (ev as Event & { transform?: { matrix?: Float32Array } | null }).transform;
+        this.stats.originResets++;
+        this.guard('reset', () => this.stack.world.trackingOriginReset(tr?.matrix ?? null, performance.now() / 1000));
+      });
       this.stats.depthUsage = (() => {
         // Without the feature some runtimes still report a usage; getDepthInformation would throw.
         if (enabled.length && !enabled.includes('depth-sensing')) return '';
