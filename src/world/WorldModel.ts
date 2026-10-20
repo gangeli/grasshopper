@@ -1,6 +1,8 @@
 import type { Vec3 } from '../core/math';
 import { OCC_THRESHOLD, STRONG_OCC, VoxelGrid } from './VoxelGrid';
 import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
+import type { ImportOptions, SerializedMap } from './MapFormat';
+import { CHUNK, exportGrid, importIntoGrid, type Lattice } from './mapIO';
 
 /**
  * Everything the pet knows about the physical room. It fuses the sensor
@@ -1150,6 +1152,59 @@ export class WorldModel {
     for (const pl of this.planeInputs.values()) this.ingestPlaneMap(pl);
     for (const m of this.meshInputs.values()) this.ingestMeshMap(m);
     return true;
+  }
+
+  // --- Export / import (persistence) -------------------------------------------------
+  /** Horizontal lattice of the map (chunk boundaries); fixed for the session. */
+  private lattice(): Lattice {
+    const g = this.grid!;
+    return { originX: g.origin.x, originY: g.origin.y, originZ: g.origin.z, oi: 0, ok: 0 };
+  }
+
+  /**
+   * The voxel map as plain data (see MapFormat.ts): every chunk holding any
+   * observation. Map frame. Null before the floor is set.
+   */
+  exportMap(): SerializedMap | null {
+    const g = this.grid;
+    if (!g) return null;
+    const lat = this.lattice();
+    return {
+      version: 1,
+      res: g.res,
+      chunkSize: CHUNK,
+      ny: g.ny,
+      originX: lat.originX,
+      originY: lat.originY,
+      originZ: lat.originZ,
+      floorY: this.floorY,
+      floorLayer: this.floorLayer,
+      chunks: exportGrid(g, lat, this.floorY, this.floorLayer),
+    };
+  }
+
+  /**
+   * Load a serialized map (e.g. from an earlier session). `transform`
+   * (column-major 4x4 rigid) maps the serialized map's frame into this map's
+   * frame; omit it when the frames coincide. If the floor isn't set yet, it
+   * is set from the imported map. Recovery snapshots taken before the import
+   * are dropped (restoring one would undo the import). Returns the number of
+   * voxels changed.
+   */
+  importMap(m: SerializedMap, transform?: ArrayLike<number> | null, opts: ImportOptions = {}): number {
+    if (!m || m.version !== 1) return 0;
+    if (transform && !Array.from(transform).every(Number.isFinite)) return 0;
+    if (!this.grid) {
+      const fy = transform ? transform[13] + transform[5] * m.floorY : m.floorY;
+      this.allocateGrid(fy, { x: 0, y: fy, z: 0 });
+    }
+    const n = importIntoGrid(this.grid!, this.lattice(), this.floorLayer, m, transform ?? null, opts);
+    // The imported map carries depth evidence (seen-empty space): navigation
+    // applies the same seen-free rules as for a depth-built map.
+    if (n > 0 && this.depthPoints === 0 && m.chunks.some((c) => c.occ.some((v) => v < 0))) this.depthPoints = 1;
+    this.snapshots = [];
+    this.eventSnapshot = null;
+    return n;
   }
 
   private addLabel(id: string, label: string, pts: Vec3[], padBelow: number) {
