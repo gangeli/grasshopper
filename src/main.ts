@@ -84,8 +84,12 @@ async function main() {
 
   setupInstall(note, installMode);
 
-  // Showcase: Hopper waves on the landing page.
-  const showcase = startShowcase();
+  // Showcase: Hopper waves on the landing page, and giggles when tapped.
+  const showcase = startShowcase(() => {
+    voice.unlock();
+    voice.giggle();
+    document.getElementById('tapme')?.classList.add('gone');
+  });
 
   const enter = async (mode: 'ar' | 'sim' | 'camera') => {
     // iOS only shows the motion-sensor prompt from inside the tap itself.
@@ -227,13 +231,13 @@ function supportNote(arOk: boolean, camOk: boolean): string {
   const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   const android = /Android/.test(ua);
   const chrome = /Chrome\//.test(ua) && !/Edg|OPR|SamsungBrowser|Firefox/.test(ua);
-  if (arOk) return 'Hopper will map your room through your camera — have a bit of floor and some furniture in view.';
-  if (!camOk) return 'This browser can’t use the camera. Open this page in Chrome on Android for full AR, or try the virtual room.';
-  if (android && !chrome)
-    return 'This browser can’t do full AR, but Chrome on this phone can: Hopper learns your furniture and hides behind your real couch. Camera mode here shows Hopper in your room without that.';
-  if (android) return 'Full AR isn’t available on this phone (it needs “Google Play Services for AR”). Camera mode still puts Hopper in your room.';
-  if (ios) return 'iPhone browsers don’t support full AR yet, so Hopper can’t see your furniture — it hides around you instead. Turn around to find it!';
-  return 'Camera mode works best on a phone. For full AR, open this page in Chrome on Android.';
+  // One short line; the details belong in the messages shown if something goes wrong.
+  if (arOk) return '';
+  if (!camOk) return 'Best in Chrome on Android.';
+  if (android && !chrome) return 'Chrome lets Hopper hide behind your real furniture.';
+  if (android) return '';
+  if (ios) return 'On iPhone, Hopper plays all around you.';
+  return 'Best on a phone.';
 }
 
 function arErrorMessage(e: unknown): string {
@@ -255,7 +259,7 @@ function cameraErrorMessage(e: unknown): string {
   return `The camera didn’t start (${(e as Error)?.message ?? e}). Try again.`;
 }
 
-function startShowcase() {
+function startShowcase(onTap?: () => void) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
@@ -296,8 +300,8 @@ function startShowcase() {
   const cam = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.01, 10);
   const portrait = innerHeight > innerWidth;
   // Frame Hopper in the upper part of the screen, above the title and buttons.
-  cam.position.set(0, 0.36, portrait ? 2.2 : 2.1);
-  cam.lookAt(0, portrait ? -0.2 : -0.28, 0);
+  cam.position.set(0, 0.36, portrait ? 2.05 : 2.3);
+  cam.lookAt(0, portrait ? 0.02 : -0.08, 0);
   // ?icon=1: a head-and-shoulders portrait (used to render the app icons).
   const icon = q.get('icon') === '1';
   if (icon) {
@@ -308,6 +312,27 @@ function startShowcase() {
   const cycle = ['wave', 'idle', 'giggle', 'lookAround', 'celebrate', 'idle', 'peek', 'idle'] as const;
   let i = 0, t = 0, last = performance.now();
   anim.play(icon ? 'idle' : 'wave', 0);
+  // The "tap me!" bubble floats beside Hopper's head.
+  const bubble = document.getElementById('tapme');
+  const head = new THREE.Vector3();
+  const placeBubble = () => {
+    if (!bubble) return;
+    rig.bones.head.getWorldPosition(head);
+    head.y += 0.12;
+    head.x += 0.16;
+    head.project(cam);
+    bubble.style.left = `${((head.x + 1) / 2) * innerWidth}px`;
+    bubble.style.top = `${((1 - head.y) / 2) * innerHeight}px`;
+  };
+  // Tap Hopper (anywhere above the buttons) for a reaction.
+  const reactions = ['giggle', 'celebrate', 'wave', 'giggle', 'surprised'] as const;
+  let r = 0;
+  renderer.domElement.style.cursor = 'pointer';
+  renderer.domElement.addEventListener('pointerdown', () => {
+    anim.play(reactions[r++ % reactions.length], 0.15, true);
+    t = 0;
+    onTap?.();
+  });
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
@@ -320,6 +345,7 @@ function startShowcase() {
       anim.play(cycle[i], 0.3, true);
     }
     rig.group.rotation.y = icon ? 0.18 : Math.sin(now / 2400) * 0.35;
+    placeBubble();
     anim.update(dt);
     renderer.render(scene, cam);
   });

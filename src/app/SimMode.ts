@@ -68,6 +68,7 @@ export class SimMode {
     perf.instrument(this.sim.anim, 'update', 'game.anim');
     perf.instrument(this.ui, 'update', 'ui');
     applyPetEnvironment(stage.renderer, this.sim.rig);
+    stage.precompile(this.sim.rig.group);
     if (this.camera) {
       // Video shows through the transparent canvas; keep the grounding shadow.
       stage.scene.background = null;

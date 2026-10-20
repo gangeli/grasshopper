@@ -28,7 +28,7 @@
   #landing {
     position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
     padding: 24px 20px calc(26px + env(safe-area-inset-bottom)); box-sizing: border-box; z-index: 5; pointer-events: none;
-    background: linear-gradient(180deg, rgba(14,18,30,0) 38%, rgba(14,18,30,.72) 62%, rgba(14,18,30,.94) 100%);
+    background: linear-gradient(180deg, rgba(14,18,30,0) 50%, rgba(14,18,30,.65) 72%, rgba(14,18,30,.9) 100%);
     font-family: "Fredoka", ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
   }
   #landing > * { pointer-events: auto; }
@@ -47,11 +47,18 @@
     100% { opacity: 0; transform: translate(-14px,-80px) scale(.5); }
   }
   @media (prefers-reduced-motion: reduce) { #sky i { animation: none; opacity: .5; } }
+  #tapme { position: fixed; left: 50%; top: 12%; transform: translate(-20%, -100%); z-index: 6; pointer-events: none;
+    background: #fff8e8; color: #2b2340; font-weight: 600; font-size: 15px; padding: 7px 14px; border-radius: 16px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.25); animation: bob 2.4s ease-in-out infinite; transition: opacity .4s; }
+  #tapme::after { content: ""; position: absolute; left: 14px; bottom: -6px; border: 6px solid transparent; border-bottom: 0; border-top-color: #fff8e8; }
+  #tapme.gone { opacity: 0; }
+  @keyframes bob { 50% { transform: translate(-20%, -100%) translateY(-5px); } }
+  @media (prefers-reduced-motion: reduce) { #tapme { animation: none; } }
   #landing .brand { text-align: center; margin-bottom: 4px; }
   #landing h1 { margin: 0; font-weight: 700; font-size: clamp(46px, 13vw, 76px); line-height: 1; letter-spacing: 1px;
     background: linear-gradient(180deg, #fff8e8 20%, #ffd56a 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
     filter: drop-shadow(0 4px 18px rgba(255,200,90,.25)); }
-  #landing .tag { margin: 6px 0 0; color: #e6e9f5; font-size: 18px; font-weight: 500; text-align: center; }
+  #landing .tag { margin: 4px 0 22px; color: #e6e9f5; font-size: 19px; font-weight: 500; text-align: center; }
   #landing .steps { list-style: none; display: flex; gap: 8px; margin: 18px 0 20px; padding: 0; flex-wrap: wrap; justify-content: center; max-width: 460px; }
   #landing .steps li { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 16px;
     background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1); color: #dfe4f2; font-size: 14px; font-weight: 500;
@@ -133,15 +140,11 @@
 <body>
 <div id="sky" aria-hidden="true"></div>
 <div id="landing">
+  <div id="tapme" aria-hidden="true">tap me!</div>
   <div class="brand">
     <h1>Hopper</h1>
-    <p class="tag">a tiny creature that plays hide &amp; seek in your room</p>
+    <p class="tag">wants to play in your room</p>
   </div>
-  <ol class="steps">
-    <li><b>1</b>Look around your room</li>
-    <li><b>2</b>Cover your eyes, count to ten</li>
-    <li><b>3</b>Find where Hopper hid</li>
-  </ol>
   <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
   <div class="row2" id="chrome-row" style="display:none">
     <a id="btn-chrome" class="cta">Open in Chrome</a>

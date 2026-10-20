@@ -102,12 +102,19 @@ export class PerfMonitor {
     }
     this.lastFrameT = t;
     this.frameT0 = now;
+    this.frameSecs.clear();
   }
 
   endFrame() {
     const cpu = performance.now() - this.frameT0;
     push(this.cpu, cpu, this.window);
     this.emaCpu += (cpu - this.emaCpu) * 0.05;
+    // Stutters (frames whose own work took >50ms), with when they happened:
+    // the max column can't tell a one-off at startup from a recurring hitch.
+    if (cpu > 50) {
+      this.hitches.push({ at: this.frameT0, ms: cpu, top: this.topSection() });
+      if (this.hitches.length > 200) this.hitches.shift();
+    }
     this.frames++;
     if (!this.detailed) return;
     const now = performance.now();
@@ -121,6 +128,15 @@ export class PerfMonitor {
     }
   }
 
+  private hitches: { at: number; ms: number; top: string }[] = [];
+  private frameSecs = new Map<string, number>();
+  /** The section that took longest in the current frame. */
+  private topSection(): string {
+    let top = '', best = 0;
+    for (const [k, v] of this.frameSecs) if (v > best && !k.endsWith('*')) [top, best] = [k, v];
+    return top;
+  }
+
   /** Add a measured duration (ms) to a section. */
   add(name: string, ms: number) {
     let s = this.secs.get(name);
@@ -128,6 +144,7 @@ export class PerfMonitor {
     s.sum += ms;
     s.calls++;
     if (ms > s.max) s.max = ms;
+    this.frameSecs.set(name, (this.frameSecs.get(name) ?? 0) + ms);
   }
 
   /** Time fn() as section `name`. */
@@ -217,11 +234,20 @@ export class PerfMonitor {
     };
   }
 
+  /** Stutters in the last minute (and the worst one's cause), plus the session total. */
+  private hitchLine(): string {
+    const now = performance.now();
+    const recent = this.hitches.filter((h) => now - h.at < 60000);
+    const worst = recent.reduce<{ ms: number; top: string } | null>((w, h) => (!w || h.ms > w.ms ? h : w), null);
+    return `stutters >50ms: ${recent.length} in last 60s${worst ? ` (worst ${worst.ms.toFixed(0)}ms ${worst.top})` : ''}, ${this.hitches.length} total`;
+  }
+
   format(s: PerfSummary): string {
     const lines = [
       `${s.fps.toFixed(1)} fps  int ${s.intervalP50.toFixed(1)}/${s.intervalP95.toFixed(1)}ms  cpu ${s.cpuMean.toFixed(2)} p95 ${s.cpuP95.toFixed(1)}ms  gpu ${s.gpuMs === null ? 'n/a' : s.gpuMs.toFixed(2) + 'ms'}`,
       `draws ${s.render.calls}  tris ${(s.render.triangles / 1000).toFixed(0)}k  progs ${s.render.programs}  px ${(s.pixels / 1e6).toFixed(2)}M  pet ${(s.petCoverage * 100).toFixed(1)}% x${s.petLayers} = ${s.fragMpx.toFixed(2)}Mfrag`,
       `q: ${s.quality}`,
+      this.hitchLine(),
     ];
     const secs = Object.entries(s.sections).sort((a, b) => b[1].msPerFrame - a[1].msPerFrame);
     for (const [k, v] of secs.slice(0, 14)) lines.push(`${k.padEnd(22).slice(0, 22)} ${v.msPerFrame.toFixed(3).padStart(7)}  max ${v.max.toFixed(1)}`);

@@ -105,6 +105,30 @@ export class Stage {
     this.setPetRig(stack.rig);
     this.mapRoot.add(stack.rig.group);
     applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
+    this.precompile(stack.rig.group);
+  }
+
+  /**
+   * Compile the pet's shaders now (in parallel where the browser supports it),
+   * not on its first visible frame: that first frame cost ~300ms on phones.
+   * (Hidden parts — fur shells the quality governor thinned out — included.)
+   */
+  precompile(group: THREE.Object3D) {
+    const hidden: THREE.Object3D[] = [];
+    group.traverse((o) => {
+      if (!o.visible) {
+        hidden.push(o);
+        o.visible = true;
+      }
+    });
+    try {
+      // compileAsync collects the materials synchronously, then compiles.
+      this.renderer.compileAsync(this.scene, this.camera).catch(() => undefined);
+    } catch {
+      /* best effort */
+    } finally {
+      for (const o of hidden) o.visible = false;
+    }
   }
 
   /**
