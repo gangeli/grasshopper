@@ -193,10 +193,18 @@ export class DepthConsistency {
       if (!(depth[i] > 0.05 && depth[i] < 50)) continue; // same test as depthImageToPoints
       const p = pts[q++];
       let support = 0, contra = false;
-      for (const f of others) {
-        const z = sampleDepthAt(f.img, f.inv, p);
-        if (z === null) continue;
-        const { proj, seen } = z;
+      for (let fi = 0; fi < others.length; fi++) {
+        // Project p into frame f: its z-depth there, and the depth f recorded at that pixel.
+        // (Inline, no per-sample allocation: this runs ~100k times per depth frame.)
+        const f = others[fi], inv = f.inv, fim = f.img, P = fim.invProj;
+        const cx = inv[0] * p.x + inv[4] * p.y + inv[8] * p.z + inv[12];
+        const cy = inv[1] * p.x + inv[5] * p.y + inv[9] * p.z + inv[13];
+        const cz = inv[2] * p.x + inv[6] * p.y + inv[10] * p.z + inv[14];
+        if (cz > -0.05) continue;
+        const nx = (cx / -cz - (P[12] - P[8])) / P[0], ny = (cy / -cz - (P[13] - P[9])) / P[5];
+        if (nx < -1 || nx > 1 || ny < -1 || ny > 1) continue;
+        const px = Math.min(fim.w - 1, Math.floor(((nx + 1) / 2) * fim.w)), py = Math.min(fim.h - 1, Math.floor(((1 - ny) / 2) * fim.h));
+        const proj = -cz, seen = fim.depth[py * fim.w + px];
         if (!(seen > 0.05)) continue;
         const tol = Math.max(O.tolAbs, O.tolRel * proj);
         if (Math.abs(seen - proj) <= tol) support++;
@@ -224,17 +232,3 @@ function invertRigidArr(M: ArrayLike<number>): number[] {
   return o;
 }
 
-/** Project world point p into a depth image: its z-depth there, and the depth the image recorded at that pixel. */
-function sampleDepthAt(img: DepthImage, inv: number[], p: Vec3): { proj: number; seen: number } | null {
-  const cx = inv[0] * p.x + inv[4] * p.y + inv[8] * p.z + inv[12];
-  const cy = inv[1] * p.x + inv[5] * p.y + inv[9] * p.z + inv[13];
-  const cz = inv[2] * p.x + inv[6] * p.y + inv[10] * p.z + inv[14];
-  if (cz > -0.05) return null;
-  // Inverse of depthImageToPoints: with the inverse projections used here (no
-  // z terms in x/y), a view direction is (P0·nx + P12 − P8, P5·ny + P13 − P9, −1).
-  const P = img.invProj;
-  const nx = (cx / -cz - (P[12] - P[8])) / P[0], ny = (cy / -cz - (P[13] - P[9])) / P[5];
-  if (nx < -1 || nx > 1 || ny < -1 || ny > 1) return null;
-  const x = Math.min(img.w - 1, Math.floor(((nx + 1) / 2) * img.w)), y = Math.min(img.h - 1, Math.floor(((1 - ny) / 2) * img.h));
-  return { proj: -cz, seen: img.depth[y * img.w + x] };
-}

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { livingRoom, bedroom, randomRoom, type SimRoom } from '../src/sim/SimRoom';
-import { scanRoom } from '../src/sim/scan';
+import { scanRoom, scanRoomHuman } from '../src/sim/scan';
+import { dressRoom } from '../src/sim/Realism';
 import { NavGrid } from '../src/world/NavGrid';
-import { segmentObjects } from '../src/world/Segmentation';
+import { objectNear, segmentObjects } from '../src/world/Segmentation';
 import type { Vec3 } from '../src/core/math';
 
 type Caps = { depth: boolean; planes: boolean; mesh: boolean };
@@ -93,6 +94,25 @@ describe('segmentation ("object detection")', () => {
     expect(['basket', 'box']).toContain(near(2.57, 1.95)?.label);
     expect(objs.some((o) => o.label === 'wall')).toBe(true);
   });
+
+  it('open floor is not "near the shelf" after a realistic phone scan (walls seen only part way up)', () => {
+    for (const [name, room] of [['living', dressRoom(livingRoom(), 2)], ['bedroom', dressRoom(bedroom(), 3)]] as const) {
+      const { world } = scanRoomHuman(room, { seed: 5, noise: 'real', seconds: 45 });
+      const objs = segmentObjects(world);
+      const nav = new NavGrid(world);
+      let open = 0, shelf = 0;
+      for (let a = 0; a < nav.count; a += 3) {
+        const p = nav.pos(a);
+        if (Math.abs(p.y - world.floorY) > 0.05) continue;
+        // Open floor: no real furniture (or wall) within 50cm.
+        if (room.solidAt({ x: p.x, y: 0.3, z: p.z }, 0.5) || room.solidAt({ x: p.x, y: 1.0, z: p.z }, 0.5)) continue;
+        open++;
+        if (objectNear(objs, p)?.label === 'shelf') shelf++;
+      }
+      expect(open, name).toBeGreaterThan(50);
+      expect(shelf / open, `${name}: open floor called "near the shelf"`).toBeLessThan(0.02);
+    }
+  }, 120_000);
 
   it('works in other rooms without crashing and finds several objects', () => {
     for (const room of [bedroom(), randomRoom(4), randomRoom(11)]) {

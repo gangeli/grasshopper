@@ -126,7 +126,7 @@ export function seekerViewpoints(nav: NavGrid, eyeHeight: number, count: number,
   return pts.map((p) => ({ x: p.x, y: p.y + eyeHeight, z: p.z }));
 }
 
-export function classifySpot(g: VoxelGrid, nav: NavGrid, a: number, floorY: number): { kind: SpotKind; walls: number; openYaw: number } {
+export function classifySpot(g: VoxelGrid, nav: NavGrid, a: number, floorY: number): { kind: SpotKind; walls: number; openYaw: number; covered: boolean } {
   const p = nav.pos(a);
   const i = nav.ni[a], k = nav.nk[a];
   const j = g.cellY(p.y + 0.001);
@@ -168,7 +168,7 @@ export function classifySpot(g: VoxelGrid, nav: NavGrid, a: number, floorY: numb
   else if (elevated) kind = 'atop';
   else if (walls >= 3) kind = 'corner';
   else kind = 'behind';
-  return { kind, walls, openYaw };
+  return { kind, walls, openYaw, covered };
 }
 
 export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts: HideOptions, floorY: number, topN = 5): HideSpot[] {
@@ -199,6 +199,11 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     const minHidden = opts.minHiddenNow ?? 0.85;
     if (minHidden > 0.5 && visibleFractionUpTo(g, seekerEye, samplesAt(p), 0.5) > 0.5) continue; // quick reject
     const cls = classifySpot(g, nav, a, floorY);
+    // Walled in on (nearly) every side *and* covered: not a nook a pet could
+    // get into but a hole the map left inside furniture (a couch's dark
+    // fabric that depth couldn't see). Real "inside" spots — baskets, boxes —
+    // are open from above.
+    if (cls.kind === 'inside' && cls.covered) continue;
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
     const pts = samplesAt(p, offs, cls.openYaw);

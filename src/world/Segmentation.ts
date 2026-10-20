@@ -17,6 +17,9 @@ export interface WorldObject {
   /** Interior lower than its rim (baskets, boxes). */
   hollow: boolean;
   columns: number;
+  /** The footprint's grid columns (k * nx + i), for "is this spot near it" checks. */
+  cells: Set<number>;
+  grid: { ox: number; oz: number; res: number; nx: number; nz: number };
 }
 
 export function segmentObjects(world: WorldModel, maxHeight = 2.6): WorldObject[] {
@@ -84,6 +87,8 @@ export function segmentObjects(world: WorldModel, maxHeight = 2.6): WorldObject[
       overhang: over / cols,
       hollow: low > cols * 0.2 && h < 0.7,
       columns: cols,
+      cells: new Set(members),
+      grid: { ox: g.origin.x, oz: g.origin.z, res: g.res, nx: g.nx, nz: g.nz },
     };
     obj.label = classify(obj, world);
     objects.push(obj);
@@ -116,8 +121,11 @@ function classify(o: WorldObject, world: WorldModel): string {
   const area = w * d;
   const thin = Math.min(w, d);
   const fill = (o.columns * world.res * world.res) / Math.max(area, 1e-6);
-  if (h > 1.5 && (thin < 0.25 || fill < 0.3)) return 'wall';
-  if (h > 1.2) return 'shelf';
+  // Tall and thin or sparse: walls (often seen only up to ~1.3m, as the phone
+  // looks down), or walls joined with what stands against them — not a shelf.
+  if (h > 1.0 && (thin < 0.25 || fill < 0.35)) return 'wall';
+  if (h > 1.2 && thin < 0.7) return 'shelf';
+  if (h > 1.2) return 'thing';
   if (o.hollow) return 'basket';
   if (o.overhang > 0.5 && area < 0.4) return h > 1.0 ? 'plant' : 'chair';
   if (o.overhang > 0.5) {
@@ -131,17 +139,30 @@ function classify(o: WorldObject, world: WorldModel): string {
   return 'thing';
 }
 
+/**
+ * The object whose footprint is nearest to p (within `pad`). Footprint cells,
+ * not bounding boxes: an L-shaped run of walls has a box covering half the
+ * room, which made open floor "near the shelf".
+ */
 export function objectNear(objects: WorldObject[], p: Vec3, pad = 0.25): WorldObject | null {
   let best: WorldObject | null = null, bd = Infinity;
   for (const o of objects) {
     if (o.label === 'wall') continue;
     const dx = Math.max(o.min.x - p.x, 0, p.x - o.max.x);
     const dz = Math.max(o.min.z - p.z, 0, p.z - o.max.z);
-    const d = Math.hypot(dx, dz);
-    if (d < pad && d < bd) {
-      bd = d;
-      best = o;
-    }
+    if (Math.hypot(dx, dz) >= pad) continue; // cheap reject on the box
+    const G = o.grid, ci = Math.floor((p.x - G.ox) / G.res), ck = Math.floor((p.z - G.oz) / G.res);
+    const R = Math.ceil(pad / G.res);
+    for (let dk = -R; dk <= R; dk++)
+      for (let di = -R; di <= R; di++) {
+        const i = ci + di, k = ck + dk;
+        if (i < 0 || k < 0 || i >= G.nx || k >= G.nz || !o.cells.has(k * G.nx + i)) continue;
+        const d = Math.hypot(G.ox + (i + 0.5) * G.res - p.x, G.oz + (k + 0.5) * G.res - p.z);
+        if (d < pad && d < bd) {
+          bd = d;
+          best = o;
+        }
+      }
   }
   return best;
 }

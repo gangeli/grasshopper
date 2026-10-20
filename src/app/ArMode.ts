@@ -3,6 +3,7 @@ import type { GameStack } from '../game/stack';
 import { viewFromCamera, type ViewPose } from '../game/Visibility';
 import type { DepthImage } from '../world/DepthFrame';
 import { Recorder } from './Recorder';
+import { DepthConsistency } from '../world/DepthFrame';
 import type { Vec3 } from '../core/math';
 import type { Hud } from './Hud';
 import type { Stage } from './Stage';
@@ -131,6 +132,12 @@ export class ArMode {
     this.ui = new GameUI(stack, hud, voice);
     // Spread drift checks over frames (a few ms each) instead of stalling one frame.
     stack.game.health.drift.budgetMs = 3;
+    // WebXR depth is densified with no confidence: surfaces the sensor can't
+    // see (dark fabric, glass) get interpolated, which can carve phantom free
+    // space through a couch. Keep only depth that another recent view agrees
+    // with (on real camera data: phantoms 31% → 10%, real objects intruding
+    // into walkable space 2.1% → 0.3%).
+    stack.world.multiView = new DepthConsistency();
     // Profiler (?perf=1): the overlay must live in the dom-overlay root to show in AR.
     const perf = stage.perf;
     perf.attachOverlay(hud.root);
