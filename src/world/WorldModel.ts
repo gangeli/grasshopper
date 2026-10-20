@@ -3,6 +3,9 @@ import { OCC_THRESHOLD, STRONG_OCC, VoxelGrid } from './VoxelGrid';
 import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 import type { ImportOptions, SerializedMap } from './MapFormat';
 import { CHUNK, exportGrid, importIntoGrid, type Lattice } from './mapIO';
+import { ChunkStore, copyOverlap, keyCx, keyCz, shiftInPlace } from './ChunkStore';
+import { warpGrid, type Correction } from './warp';
+import type { SerializedChunk } from './MapFormat';
 
 /**
  * Everything the pet knows about the physical room. It fuses the sensor
@@ -37,7 +40,7 @@ export interface LabeledRegion {
 
 export interface WorldModelOptions {
   res?: number;
-  /** Horizontal half-extent of the mapped area (meters). */
+  /** Horizontal half-extent of the dense window around the player (meters); rounded to whole chunks. */
   halfExtent?: number;
   height?: number;
 }
@@ -53,7 +56,15 @@ export interface MisalignmentOptions {
   frames?: number;
   maxShift?: number;
   maxYaw?: number;
-  snapshot?: 'newest' | 'oldest' | 'event';
+  /**
+   * What to match the recent frames against: a recent snapshot of the map,
+   * the oldest one kept, the one taken at the last tracking loss, or 'aged':
+   * the live map's structure that hasn't been re-observed for `minAge`
+   * seconds (what was mapped before the camera came back: loop closure).
+   */
+  snapshot?: 'newest' | 'oldest' | 'event' | 'aged';
+  /** For 'aged': structure last hit at least this long before the frames (s). */
+  minAge?: number;
 }
 export interface Misalignment {
   dx: number;
@@ -65,6 +76,8 @@ export interface Misalignment {
   n: number;
   degenerate: boolean;
   snapT: number;
+  /** 'aged' searches: median time the matched old structure was last observed (s), else NaN. */
+  oldT: number;
 }
 
 export class WorldModel {
@@ -99,7 +112,33 @@ export class WorldModel {
     this.res = opts.res ?? 0.05;
     this.halfExtent = opts.halfExtent ?? 6;
     this.height = opts.height ?? 2.6;
+    this.windowChunks = Math.max(3, Math.round((this.halfExtent * 2) / (this.res * CHUNK)));
   }
+
+  // --- The dense window and the archive --------------------------------------------
+  // `grid` is a dense window of windowChunks × windowChunks chunks on a lattice
+  // fixed at the first floor placement. It follows the camera: when the
+  // camera nears its edge, the window moves by whole chunks; chunks leaving
+  // it go to the archive and chunks entering it come back from there. So the
+  // map has no size limit while everything that runs on the map (navigation,
+  // shadow inference, occluders, hiding spots, drift checks) keeps working
+  // on one dense grid around the player.
+  /** Window size in chunks per side. */
+  readonly windowChunks: number;
+  /** Move the window with the camera (false: one fixed grid around the start). */
+  followCamera = true;
+  /** Map outside the window. */
+  readonly archive = new ChunkStore();
+  /** Lattice origin (map frame x/z of lattice cell 0) and the window's offset on it (cells). */
+  private latX = 0;
+  private latZ = 0;
+  private wi = 0;
+  private wk = 0;
+  private latticeSet = false;
+  /** Number of times the window moved. */
+  recenters = 0;
+  /** See VoxelGrid.staleAfter (s; 0 = off). */
+  forgetStaleAfter = 0;
 
   get ready(): boolean {
     return this.grid !== null;
@@ -125,17 +164,25 @@ export class WorldModel {
   private allocateGrid(y: number, center: Vec3): void {
     this.center = { ...center };
     const r = this.res;
-    const n = Math.ceil((this.halfExtent * 2) / r);
+    const n = this.windowChunks * CHUNK;
     const ny = Math.ceil(this.height / r) + FLOOR_LAYERS_BELOW;
     this.floorY = y;
+    if (!this.latticeSet) {
+      this.latX = center.x - (n / 2) * r;
+      this.latZ = center.z - (n / 2) * r;
+      this.wi = this.wk = 0;
+      this.latticeSet = true;
+    }
     // Snap the origin so the floor is exactly at a cell boundary.
     this.grid = new VoxelGrid({
-      origin: { x: center.x - (n / 2) * r, y: y - FLOOR_LAYERS_BELOW * r, z: center.z - (n / 2) * r },
+      origin: { x: this.latX + this.wi * r, y: y - FLOOR_LAYERS_BELOW * r, z: this.latZ + this.wk * r },
       res: r,
       nx: n,
       ny,
       nz: n,
     });
+    this.grid.hitTime = new Uint16Array(this.grid.data.length);
+    this.grid.stamp = this.timeCode(this.now);
     // The below-floor layers are solid everywhere; whether you may *walk* there
     // is governed by the observed mask.
     const g = this.grid;
@@ -479,6 +526,8 @@ export class WorldModel {
       this.garbageFrames++;
       return false;
     }
+    if (this.grid && !this.replaying && this.followCamera) this.follow(eye, t);
+    if (!this.replaying) this.noteWalk(eye, t);
     if (this.grid && !this.replaying && (!this.snapshots.length || t - this.snapshots[this.snapshots.length - 1].t >= this.snapshotEvery || t < this.snapshots[this.snapshots.length - 1].t)) {
       this.takeSnapshot(t);
     }
@@ -490,6 +539,8 @@ export class WorldModel {
     this.floorWatchT = t;
     if (this.grid) {
       this.grid.now = t;
+      this.grid.stamp = this.timeCode(t);
+      this.grid.staleAfter = this.forgetStaleAfter;
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
     }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
@@ -541,6 +592,219 @@ export class WorldModel {
     for (const s of this.snapshots) for (const a of [s.data, s.observed, s.underside, s.topFrac]) add(a);
     if (this.eventSnapshot) add(this.eventSnapshot.data);
     return n;
+  }
+
+  /**
+   * Keep the camera (map frame) inside the inner part of the window: when
+   * it gets within two chunks of an edge, move the window by whole chunks
+   * so the camera is near the middle again.
+   */
+  follow(eye: Vec3, t = this.now): void {
+    const g = this.grid;
+    if (!g || !Number.isFinite(eye.x + eye.z)) return;
+    const W = this.windowChunks, lo = Math.min(2, (W - 1) >> 1), hi = W - 1 - lo;
+    const ci = Math.floor(g.cellX(eye.x) / CHUNK), ck = Math.floor(g.cellZ(eye.z) / CHUNK);
+    const target = (c: number) => (c < lo ? Math.min(lo + 1, hi) : c > hi ? Math.max(hi - 1, lo) : c);
+    const si = ci - target(ci), sk = ck - target(ck);
+    if (si || sk) this.moveWindow(si, sk, t);
+  }
+
+  /** Session clock start (first depth frame), for hit time codes. */
+  private t0 = NaN;
+  /** Inverse of timeCode (start of that second). */
+  timeOf(code: number): number {
+    return (Number.isFinite(this.t0) ? this.t0 : 0) + code - 1;
+  }
+  /** Distance the camera has moved (m, map frame), and its value at each time code. */
+  walked = 0;
+  private walkLog = new Float32Array(65537);
+  private walkCode = 0;
+  private lastEye: Vec3 | null = null;
+  private noteWalk(eye: Vec3, t: number): void {
+    if (this.lastEye) {
+      const d = Math.hypot(eye.x - this.lastEye.x, eye.z - this.lastEye.z);
+      // Jumps of the tracking frame aren't walking.
+      if (d < 0.5) this.walked += d;
+    }
+    this.lastEye = { ...eye };
+    const code = this.timeCode(t);
+    for (let c = this.walkCode + 1; c <= code; c++) this.walkLog[c] = this.walkLog[this.walkCode];
+    if (code >= this.walkCode) {
+      this.walkLog[code] = this.walked;
+      this.walkCode = code;
+    }
+  }
+  /** Distance walked by time code `code`. */
+  walkedAt(code: number): number {
+    return this.walkLog[Math.max(0, Math.min(this.walkCode, code))];
+  }
+
+  /**
+   * Loop closure for what was mapped in between (pose graph lite): the frame
+   * was right at t0 and off by `c` at t1; structure observed in between is
+   * moved by its share of `c` (linear in distance walked), in the live window
+   * and in the archive. See warp.ts. Returns the number of voxels moved.
+   */
+  warpSince(t0: number, t1: number, c: Correction): number {
+    const g = this.grid;
+    if (!g || !g.hitTime || !(t1 > t0)) return 0;
+    const code0 = this.timeCode(t0), code1 = this.timeCode(t1);
+    const w0 = this.walkedAt(code0), w1 = this.walkedAt(code1);
+    const span = w1 - w0;
+    const alpha = (code: number) => (span > 0.05 ? (this.walkedAt(code) - w0) / span : (code - code0) / Math.max(1, code1 - code0));
+    const C = CHUNK, W = this.windowChunks, r = this.res;
+    // Region: the window plus every archived chunk observed in [t0, t1], one chunk of margin.
+    let cx0 = this.wi / C, cx1 = cx0 + W - 1, cz0 = this.wk / C, cz1 = cz0 + W - 1;
+    for (const [key, ch] of this.archive.map) {
+      if (!ch.hitTime) continue;
+      let touched = false;
+      for (let q = 0; q < ch.hitTime.length && !touched; q++) if (ch.hitTime[q] >= code0 && ch.hitTime[q] <= code1) touched = true;
+      if (!touched) continue;
+      cx0 = Math.min(cx0, keyCx(key));
+      cx1 = Math.max(cx1, keyCx(key));
+      cz0 = Math.min(cz0, keyCz(key));
+      cz1 = Math.max(cz1, keyCz(key));
+    }
+    cx0--;
+    cz0--;
+    cx1++;
+    cz1++;
+    const tnx = (cx1 - cx0 + 1) * C, tnz = (cz1 - cz0 + 1) * C;
+    const tmp = new VoxelGrid({ origin: { x: this.latX + cx0 * C * r, y: g.origin.y, z: this.latZ + cz0 * C * r }, res: r, nx: tnx, ny: g.ny, nz: tnz });
+    tmp.hitTime = new Uint16Array(tmp.data.length);
+    const tl = tnx * tnz;
+    for (let j = 0; j < FLOOR_LAYERS_BELOW; j++) tmp.data.fill(127, j * tl, (j + 1) * tl);
+    const inWin = (cx: number, cz: number) => cx >= this.wi / C && cx < this.wi / C + W && cz >= this.wk / C && cz < this.wk / C + W;
+    for (let cx = cx0; cx <= cx1; cx++) for (let cz = cz0; cz <= cz1; cz++) if (!inWin(cx, cz)) this.archive.loadInto(tmp, cx0 * C, cz0 * C, cx, cz, this.floorLayer);
+    // The window, into the temporary grid.
+    const oi = this.wi - cx0 * C, ok = this.wk - cz0 * C, layer = g.nx * g.nz;
+    const copyWin = (toTmp: boolean) => {
+      for (let j = 0; j < g.ny; j++)
+        for (let k = 0; k < g.nz; k++) {
+          const a = j * layer + k * g.nx, b = j * tl + (k + ok) * tnx + oi;
+          if (toTmp) {
+            tmp.data.set(g.data.subarray(a, a + g.nx), b);
+            tmp.underside.set(g.underside.subarray(a, a + g.nx), b);
+            tmp.topFrac.set(g.topFrac.subarray(a, a + g.nx), b);
+            tmp.hitTime!.set(g.hitTime!.subarray(a, a + g.nx), b);
+          } else {
+            g.data.set(tmp.data.subarray(b, b + g.nx), a);
+            g.underside.set(tmp.underside.subarray(b, b + g.nx), a);
+            g.topFrac.set(tmp.topFrac.subarray(b, b + g.nx), a);
+            g.hitTime!.set(tmp.hitTime!.subarray(b, b + g.nx), a);
+          }
+        }
+    };
+    copyWin(true);
+    const moved = warpGrid(tmp, code0, code1, alpha, c, this.floorLayer);
+    if (!moved) return 0;
+    copyWin(false);
+    g.touchAll();
+    g.version++;
+    for (let cx = cx0; cx <= cx1; cx++) for (let cz = cz0; cz <= cz1; cz++) if (!inWin(cx, cz)) this.archive.saveFrom(tmp, cx0 * C, cz0 * C, cx, cz, this.floorLayer, this.now);
+    // Recovery copies predate the warp: restoring one would undo it.
+    this.snapshots = [];
+    this.eventSnapshot = null;
+    // Buffered frames from the interval move with what they mapped.
+    for (const f of this.replay) {
+      if (f.t < t0 || f.t > t1) continue;
+      const a = Math.max(0, Math.min(1, alpha(this.timeCode(f.t))));
+      const cs = Math.cos(a * c.dyaw), sn = Math.sin(a * c.dyaw), tx = a * c.dx, tz = a * c.dz;
+      const fix = (x: number, z: number): [number, number] => {
+        const rx = x - c.pivot.x, rz = z - c.pivot.z;
+        return [c.pivot.x + cs * rx + sn * rz + tx, c.pivot.z - sn * rx + cs * rz + tz];
+      };
+      [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
+      for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
+    }
+    this.warps++;
+    return moved;
+  }
+  /** Loop-closure warps applied (diagnostics). */
+  warps = 0;
+
+  /** Whole seconds since the session started, from 1 (VoxelGrid.hitTime). */
+  timeCode(t: number): number {
+    if (!Number.isFinite(t)) return 1;
+    if (!Number.isFinite(this.t0)) this.t0 = t;
+    return Math.max(1, Math.min(65535, 1 + Math.floor(t - this.t0)));
+  }
+
+  /** Move the window by (si, sk) chunks. */
+  moveWindow(si: number, sk: number, t = this.now): void {
+    const old = this.grid;
+    if (!old || (!si && !sk)) return;
+    const C = CHUNK, W = this.windowChunks, r = this.res;
+    const oldWi = this.wi, oldWk = this.wk;
+    const newWi = oldWi + si * C, newWk = oldWk + sk * C;
+    const inWin = (cx: number, cz: number, wi: number, wk: number) => cx >= wi / C && cx < wi / C + W && cz >= wk / C && cz < wk / C + W;
+    // 1. Chunks leaving the window go to the archive.
+    for (let a = 0; a < W; a++)
+      for (let b = 0; b < W; b++) {
+        const cx = oldWi / C + a, cz = oldWk / C + b;
+        if (!inWin(cx, cz, newWi, newWk)) this.archive.saveFrom(old, oldWi, oldWk, cx, cz, this.floorLayer, t);
+      }
+    // 2. The new window: the overlap copied, the rest from the archive.
+    const g = new VoxelGrid({ origin: { x: this.latX + newWi * r, y: old.origin.y, z: this.latZ + newWk * r }, res: r, nx: old.nx, ny: old.ny, nz: old.nz });
+    const di = newWi - oldWi, dk = newWk - oldWk, layer = g.nx * g.nz;
+    for (let j = 0; j < FLOOR_LAYERS_BELOW; j++) g.data.fill(127, j * layer, (j + 1) * layer);
+    copyOverlap(old.data, g.data, g.nx, g.nz, g.ny, di, dk);
+    copyOverlap(old.underside, g.underside, g.nx, g.nz, g.ny, di, dk);
+    copyOverlap(old.topFrac, g.topFrac, g.nx, g.nz, g.ny, di, dk);
+    copyOverlap(old.observed, g.observed, g.nx, g.nz, 1, di, dk);
+    g.hitTime = new Uint16Array(g.data.length);
+    if (old.hitTime) copyOverlap(old.hitTime, g.hitTime, g.nx, g.nz, g.ny, di, dk);
+    g.stamp = old.stamp;
+    const entering: [number, number][] = [];
+    for (let a = 0; a < W; a++)
+      for (let b = 0; b < W; b++) {
+        const cx = newWi / C + a, cz = newWk / C + b;
+        if (!inWin(cx, cz, oldWi, oldWk)) entering.push([cx, cz]);
+      }
+    for (const [cx, cz] of entering) this.archive.loadInto(g, newWi, newWk, cx, cz, this.floorLayer);
+    g.stickyOccupied = old.stickyOccupied;
+    g.now = old.now;
+    g.version = old.version + 1;
+    g.touchAll();
+    // 3. Recovery copies move with the window, in place (the entering part as archived).
+    const moved = new Set<Int8Array | Uint8Array>();
+    const shiftArr = <A extends Int8Array | Uint8Array>(a: A, kind: 'data' | 'observed' | 'underside' | 'topFrac'): A => {
+      if (moved.has(a)) return a; // shared between snapshots
+      moved.add(a);
+      const fl = this.floorLayer;
+      shiftInPlace(a, g.nx, g.nz, kind === 'observed' ? 1 : g.ny, di, dk, kind === 'data' ? (j) => (j < fl ? 127 : 0) : kind === 'topFrac' ? () => 255 : () => 0);
+      const target = { nx: g.nx, ny: g.ny, nz: g.nz, res: r, origin: g.origin, [kind]: a };
+      for (const [cx, cz] of entering) this.archive.loadInto(target, newWi, newWk, cx, cz, fl);
+      return a;
+    };
+    this.snapshots = this.snapshots.filter((sn) => sn.epoch === this.epoch);
+    for (const sn of this.snapshots) {
+      sn.data = shiftArr(sn.data, 'data');
+      sn.observed = shiftArr(sn.observed, 'observed');
+      sn.underside = shiftArr(sn.underside, 'underside');
+      sn.topFrac = shiftArr(sn.topFrac, 'topFrac');
+    }
+    if (this.eventSnapshot && this.eventSnapshot.epoch === this.epoch) this.eventSnapshot.data = shiftArr(this.eventSnapshot.data, 'data');
+    else this.eventSnapshot = null;
+    const nextEpoch = this.epoch + 1;
+    for (const sn of this.snapshots) sn.epoch = nextEpoch;
+    if (this.eventSnapshot) this.eventSnapshot.epoch = nextEpoch;
+    this.wi = newWi;
+    this.wk = newWk;
+    this.grid = g;
+    this.epoch = nextEpoch;
+    this.recenters++;
+  }
+
+  /** Memory held by the map (bytes): the grid's arrays, recovery snapshots, replay buffer. */
+  memoryBytes(): { grid: number; snapshots: number; replay: number; archive: number; total: number } {
+    const g = this.grid;
+    const grid = g ? g.data.byteLength + g.observed.byteLength + g.underside.byteLength + g.topFrac.byteLength + (g.shadow?.byteLength ?? 0) + (g.hitTime?.byteLength ?? 0) : 0;
+    const snapshots = this.snapshotBytes();
+    let replay = 0;
+    for (const f of this.replay) replay += f.pts.byteLength + (f.sig?.byteLength ?? 0) + 64;
+    const archive = this.archive.bytes();
+    return { grid, snapshots, replay, archive, total: grid + snapshots + replay + archive };
   }
 
   /**
@@ -776,6 +1040,7 @@ export class WorldModel {
       g.data.set(old.data.subarray(jo * layer, (jo + 1) * layer), j * layer);
       g.underside.set(old.underside.subarray(jo * layer, (jo + 1) * layer), j * layer);
       g.topFrac.set(old.topFrac.subarray(jo * layer, (jo + 1) * layer), j * layer);
+      if (old.hitTime && g.hitTime) g.hitTime.set(old.hitTime.subarray(jo * layer, (jo + 1) * layer), j * layer);
     }
     g.observed.set(old.observed);
     g.touchAll();
@@ -834,8 +1099,15 @@ export class WorldModel {
     const t0 = frames[0].t;
     const usable = this.snapshots.filter((sn) => sn.t <= t0 - 1 && sn.epoch === this.epoch);
     const ev = this.eventSnapshot;
-    const snap =
-      opts.snapshot === 'event'
+    const aged = opts.snapshot === 'aged';
+    const hit = g.hitTime;
+    if (aged && !hit) return null;
+    // 'aged': occupied voxels hit since `cutoff` count as unseen (what the
+    // camera added lately, possibly in a drifted frame).
+    const cutoff = aged ? this.timeCode(t0 - (opts.minAge ?? 30)) : 0;
+    const snap = aged
+      ? { t: t0, data: g.data }
+      : opts.snapshot === 'event'
         ? ev && ev.epoch === this.epoch && ev.t <= t0
           ? ev
           : undefined
@@ -857,7 +1129,11 @@ export class WorldModel {
         if (g.inBounds(ti, tj, tk) && g.isTransient(g.idx(ti, tj, tk))) continue;
         // Space the old map never saw says nothing either way (and would let
         // the search "align" new territory with some look-alike elsewhere).
-        if (!g.inBounds(ti, tj, tk) || data[g.idx(ti, tj, tk)] === 0) continue;
+        if (!g.inBounds(ti, tj, tk)) continue;
+        // ('aged': these frames are already in the live map, so every point
+        // sits on structure it made itself; which points can say anything is
+        // decided below, by whether old structure is within reach.)
+        if (!aged && data[g.idx(ti, tj, tk)] === 0) continue;
         pts.push(x, y, z);
       }
     const n = pts.length / 3;
@@ -879,24 +1155,40 @@ export class WorldModel {
     for (let u = 0; u < m; u++) J[u] = J[u] >= 0 && J[u] < gny ? J[u] * layer : -1;
     // Each voxel's contribution only depends on the snapshot: memoise it
     // (0 none, 1 = +1, 2 = +0.7, 3 = +0.35, 4 = -0.5; 127 = not yet known).
-    const cls = this.scoreClasses(data);
-    const classOf = (n0: number) => {
-      let c = cls[n0];
-      if (c !== 127) return c;
-      if (data[n0] > STRONG_OCC) c = 1;
-      else if (data[n0] > OCC_THRESHOLD) c = 2;
-      else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - gnx] > STRONG_OCC || data[n0 + gnx] > STRONG_OCC) c = 3;
-      else if (data[n0] < -20) c = 4;
-      else c = 0;
-      cls[n0] = c;
-      return c;
-    };
+    const cls = aged ? this.agedClasses(data.length) : this.scoreClasses(data);
+    const strongOld = (n1: number) => data[n1] > STRONG_OCC && hit![n1] < cutoff;
+    const classOf = aged
+      ? (n0: number) => {
+          let c = cls[n0];
+          if (c !== 127) return c;
+          // Only structure that predates the frames counts; free space can't
+          // be dated (the frames being checked may have carved it), so
+          // landing in it neither helps nor hurts.
+          const old = hit![n0] < cutoff;
+          if (old && data[n0] > STRONG_OCC) c = 1;
+          else if (old && data[n0] > OCC_THRESHOLD) c = 2;
+          else if (strongOld(n0 - 1) || strongOld(n0 + 1) || strongOld(n0 - gnx) || strongOld(n0 + gnx)) c = 3;
+          else c = 0;
+          cls[n0] = c;
+          return c;
+        }
+      : (n0: number) => {
+          let c = cls[n0];
+          if (c !== 127) return c;
+          if (data[n0] > STRONG_OCC) c = 1;
+          else if (data[n0] > OCC_THRESHOLD) c = 2;
+          else if (data[n0 - 1] > STRONG_OCC || data[n0 + 1] > STRONG_OCC || data[n0 - gnx] > STRONG_OCC || data[n0 + gnx] > STRONG_OCC) c = 3;
+          else if (data[n0] < -20) c = 4;
+          else c = 0;
+          cls[n0] = c;
+          return c;
+        };
     // Rotated offsets per yaw (the search visits ~80 shifts per yaw).
     const X0 = new Float64Array(m), Z0 = new Float64Array(m);
     // ...and each point's x cell (+ layer) per (yaw, dx): the search sweeps dz innermost.
     const XI = new Int32Array(m);
     let cachedYaw = NaN, cachedDx = NaN;
-    const score = (dx: number, dz: number, yaw: number) => {
+    const score = (dx: number, dz: number, yaw: number, flags: Uint8Array | null = null) => {
       if (yaw !== cachedYaw) {
         const c = Math.cos(yaw), s = Math.sin(yaw);
         for (let u = 0; u < m; u++) {
@@ -940,6 +1232,7 @@ export class WorldModel {
         else if (c === 2) sc += 0.7;
         else if (c === 3) sc += 0.35;
         else if (c === 4) sc -= 0.5;
+        if (flags !== null && c >= 1 && c <= 3) flags[u] = 1;
       }
       return sc;
     };
@@ -947,7 +1240,23 @@ export class WorldModel {
     const epoch = this.epoch, frameV = this.frameVersion, snapT = snap.t;
     const stale = () => this.grid !== g || this.epoch !== epoch || this.frameVersion !== frameV || snap.t !== snapT || snap.data !== data;
     const maxShift = opts.maxShift ?? 0.5, maxYaw = opts.maxYaw ?? 0.1;
-    const used = Math.ceil(n / stride);
+    let used = Math.ceil(n / stride);
+    if (aged) {
+      // Which readings could match old structure under some correction? A
+      // coarse pass over the search range flags them; the rest (new
+      // territory) say nothing and don't count.
+      const flags = new Uint8Array(m);
+      for (let yaw = -maxYaw; yaw <= maxYaw + 1e-9; yaw += Math.max(0.05, maxYaw / 2)) {
+        for (let dx = -maxShift; dx <= maxShift + 1e-9; dx += 0.1) {
+          for (let dz = -maxShift; dz <= maxShift + 1e-9; dz += 0.1) score(dx, dz, yaw, flags);
+          yield;
+          if (stale()) return null;
+        }
+      }
+      used = 0;
+      for (let u = 0; u < m; u++) used += flags[u];
+      if (used < 60) return null;
+    }
     // Prefer small corrections among near-ties: a support penalty of 3% of the
     // readings per 10cm of displacement (yaw counted at 1m from the camera).
     const pen = (dx: number, dz: number, yaw: number) => (0.03 * used * (Math.hypot(dx, dz) + Math.abs(yaw))) / 0.1;
@@ -992,10 +1301,36 @@ export class WorldModel {
       slides = !(score(best.dx + ux, best.dz + uz, best.dyaw) < best.s - drop && score(best.dx - ux, best.dz - uz, best.dyaw) < best.s - drop);
     }
     const degenerate = flat >= 5 || slides;
-    return { dx: best.dx, dz: best.dz, dyaw: best.dyaw, pivot: { ...pivot }, base: Math.round(base), best: Math.round(best.s), n: used, degenerate, snapT: snap.t };
+    // When was the structure the frames matched mapped? (The median hit time
+    // of the old voxels the corrected readings land on.)
+    let oldT = NaN;
+    if (aged) {
+      const cs = Math.cos(best.dyaw), sn = Math.sin(best.dyaw), codes: number[] = [];
+      for (let u = 0; u < m; u++) {
+        if (J[u] < 0) continue;
+        const x = px + cs * RX[u] + sn * RZ[u] + best.dx, z = pz - sn * RX[u] + cs * RZ[u] + best.dz;
+        const i = Math.floor((x - ox) / res), k = Math.floor((z - oz) / res);
+        if (i < 0 || k < 0 || i >= gnx || k >= gnz) continue;
+        const n0 = J[u] + k * gnx + i;
+        const c = classOf(n0);
+        if (c === 1 || c === 2) codes.push(hit![n0]);
+      }
+      if (codes.length) {
+        codes.sort((a, b) => a - b);
+        oldT = this.timeOf(codes[codes.length >> 1]);
+      }
+    }
+    return { dx: best.dx, dz: best.dz, dyaw: best.dyaw, pivot: { ...pivot }, base: Math.round(base), best: Math.round(best.s), n: used, degenerate, snapT: snap.t, oldT };
   }
 
   private scoreMemo: { data: Int8Array | null; t: number; cls: Int8Array | null } = { data: null, t: NaN, cls: null };
+  private agedMemo: Int8Array | null = null;
+  /** A fresh class memo for an 'aged' search (the live map changes between searches). */
+  private agedClasses(len: number): Int8Array {
+    if (!this.agedMemo || this.agedMemo.length !== len) this.agedMemo = new Int8Array(len);
+    this.agedMemo.fill(127);
+    return this.agedMemo;
+  }
   /** Per-voxel score classes for estimateMisalignment, memoised per snapshot (127 = unknown). */
   private scoreClasses(data: Int8Array): Int8Array {
     const m = this.scoreMemo;
@@ -1052,11 +1387,11 @@ export class WorldModel {
       this.snapshots = this.snapshots.filter((sn) => sn.t <= snap.t);
       this.replayFrames((f) => f.t > snap.t);
     } else {
-      // No snapshot from before the jump: rebuild from what we have.
-      this.rebuildAtFloor(this.floorY);
-      this.floorRefinements--;
+      // No snapshot from before the jump: keep the map (everything outside
+      // the replay buffer would be lost by a rebuild) and lay the corrected
+      // frames over it; contradicted leftovers erode as they're seen through.
       this.snapshots = [];
-      this.replayFrames(() => true);
+      this.replayFrames((f) => f.t >= since);
     }
     this.applyRegistration(T);
   }
@@ -1158,7 +1493,7 @@ export class WorldModel {
   /** Horizontal lattice of the map (chunk boundaries); fixed for the session. */
   private lattice(): Lattice {
     const g = this.grid!;
-    return { originX: g.origin.x, originY: g.origin.y, originZ: g.origin.z, oi: 0, ok: 0 };
+    return { originX: this.latX, originY: g.origin.y, originZ: this.latZ, oi: this.wi, ok: this.wk };
   }
 
   /**
@@ -1179,8 +1514,35 @@ export class WorldModel {
       originZ: lat.originZ,
       floorY: this.floorY,
       floorLayer: this.floorLayer,
-      chunks: exportGrid(g, lat, this.floorY, this.floorLayer),
+      chunks: this.exportChunks(g, lat),
     };
+  }
+
+  /** The window's chunks plus the archived ones outside it, levelled to the current floor. */
+  private exportChunks(g: VoxelGrid, lat: Lattice): SerializedChunk[] {
+    const out = exportGrid(g, lat, this.floorY, this.floorLayer);
+    const C = CHUNK, W = this.windowChunks;
+    const tmp = new VoxelGrid({ origin: g.origin, res: g.res, nx: C, ny: g.ny, nz: C });
+    for (const [key, c] of this.archive.map) {
+      const cx = keyCx(key), cz = keyCz(key);
+      if (cx >= this.wi / C && cx < this.wi / C + W && cz >= this.wk / C && cz < this.wk / C + W) continue;
+      if (c.oy === g.origin.y) {
+        const ch: SerializedChunk = { cx, cz, occ: c.data.slice(), observed: c.observed.slice() };
+        if (c.underside) ch.underside = c.underside.slice();
+        if (c.topFrac) ch.topFrac = c.topFrac.slice();
+        out.push(ch);
+      } else {
+        // Stored against another floor height: re-level through a one-chunk grid.
+        tmp.data.fill(0);
+        tmp.observed.fill(0);
+        tmp.underside.fill(0);
+        tmp.topFrac.fill(255);
+        this.archive.loadInto(tmp, cx * C, cz * C, cx, cz, this.floorLayer);
+        for (let j = 0; j < FLOOR_LAYERS_BELOW; j++) tmp.data.fill(127, j * C * C, (j + 1) * C * C);
+        out.push(...exportGrid(tmp, { ...lat, oi: cx * C, ok: cz * C }, this.floorY, this.floorLayer));
+      }
+    }
+    return out;
   }
 
   /**
@@ -1198,12 +1560,52 @@ export class WorldModel {
       const fy = transform ? transform[13] + transform[5] * m.floorY : m.floorY;
       this.allocateGrid(fy, { x: 0, y: fy, z: 0 });
     }
-    const n = importIntoGrid(this.grid!, this.lattice(), this.floorLayer, m, transform ?? null, opts);
+    const n = this.importEverywhere(m, transform ?? null, opts);
     // The imported map carries depth evidence (seen-empty space): navigation
     // applies the same seen-free rules as for a depth-built map.
     if (n > 0 && this.depthPoints === 0 && m.chunks.some((c) => c.occ.some((v) => v < 0))) this.depthPoints = 1;
     this.snapshots = [];
     this.eventSnapshot = null;
+    return n;
+  }
+
+  /**
+   * Import into the whole map: the window directly, and the archive through
+   * window-sized tiles covering wherever the imported map lands.
+   */
+  private importEverywhere(m: SerializedMap, T: ArrayLike<number> | null, opts: ImportOptions): number {
+    const g = this.grid!, C = CHUNK, W = this.windowChunks, r = this.res;
+    let n = importIntoGrid(g, this.lattice(), this.floorLayer, m, T, opts);
+    // Where the imported chunks land (lattice chunk range).
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    const M = T ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    for (const c of m.chunks)
+      for (const [a, b] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        const x = m.originX + (c.cx + a) * m.chunkSize * m.res, z = m.originZ + (c.cz + b) * m.chunkSize * m.res;
+        const X = M[0] * x + M[8] * z + M[12], Z = M[2] * x + M[10] * z + M[14];
+        minX = Math.min(minX, X);
+        maxX = Math.max(maxX, X);
+        minZ = Math.min(minZ, Z);
+        maxZ = Math.max(maxZ, Z);
+      }
+    if (!Number.isFinite(minX)) return n;
+    const cx0 = Math.floor((minX - this.latX) / (r * C)), cx1 = Math.floor((maxX - this.latX) / (r * C));
+    const cz0 = Math.floor((minZ - this.latZ) / (r * C)), cz1 = Math.floor((maxZ - this.latZ) / (r * C));
+    const wcx = this.wi / C, wcz = this.wk / C;
+    const inWin = (cx: number, cz: number) => cx >= wcx && cx < wcx + W && cz >= wcz && cz < wcz + W;
+    for (let tx = cx0; tx <= cx1; tx += W)
+      for (let tz = cz0; tz <= cz1; tz += W) {
+        // Skip tiles entirely inside the window (already imported).
+        let outside = false;
+        for (let a = 0; a < W && !outside; a++) for (let b = 0; b < W && !outside; b++) if (!inWin(tx + a, tz + b)) outside = true;
+        if (!outside) continue;
+        const tile = new VoxelGrid({ origin: { x: this.latX + tx * C * r, y: g.origin.y, z: this.latZ + tz * C * r }, res: r, nx: W * C, ny: g.ny, nz: W * C });
+        const tl = W * C * W * C;
+        for (let j = 0; j < FLOOR_LAYERS_BELOW; j++) tile.data.fill(127, j * tl, (j + 1) * tl);
+        for (let a = 0; a < W; a++) for (let b = 0; b < W; b++) if (!inWin(tx + a, tz + b)) this.archive.loadInto(tile, tx * C, tz * C, tx + a, tz + b, this.floorLayer);
+        n += importIntoGrid(tile, { originX: this.latX, originY: g.origin.y, originZ: this.latZ, oi: tx * C, ok: tz * C }, this.floorLayer, m, T, opts);
+        for (let a = 0; a < W; a++) for (let b = 0; b < W; b++) if (!inWin(tx + a, tz + b)) this.archive.saveFrom(tile, tx * C, tz * C, tx + a, tz + b, this.floorLayer, this.now);
+      }
     return n;
   }
 

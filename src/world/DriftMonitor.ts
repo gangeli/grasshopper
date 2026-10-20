@@ -24,9 +24,22 @@ export interface DriftOptions {
   maxDriftShift: number;
   /** Seconds after a tracking loss/recovery during which big jumps are searched for. */
   eventWindow: number;
+  /**
+   * Loop closure: the camera is back where it mapped a while ago (structure
+   * not re-observed for `loopMinAge` s) and the odometry has drifted since.
+   * Searched up to loopMaxShift / loopMaxYaw; 0 shift turns it off.
+   */
+  loopMinAge: number;
+  loopMaxShift: number;
+  loopMaxYaw: number;
+  loopMinPoints: number;
+  /** Share of the readings that land on that older structure after the correction. */
+  loopMinSupport: number;
+  /** Also correct what was mapped since the old structure (see WorldModel.warpSince). */
+  loopWarp: boolean;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20 };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0, loopMaxYaw: 0.12, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -70,7 +83,10 @@ export class DriftMonitor {
     this.inWindow = inEvent;
     this.inEvent = inEvent && !this.contradicted;
     if (this.task) return this.resume(); // the previous check is still running
-    if (this.inEvent) this.task = this.afterEvent(t);
+    // Every other check looks for a loop closure (also while judging a
+    // tracking loss: losses are frequent when walking around a home).
+    if (this.opts.loopMaxShift > 0 && this.turn++ % 2 === 1) this.task = this.closing(t);
+    else if (this.inEvent) this.task = this.afterEvent(t);
     else if (inEvent) return false; // contradicted: waiting for the verdict to be taken
     else this.task = this.drifting(t);
     return this.resume();
@@ -206,6 +222,52 @@ export class DriftMonitor {
     if (v.length < 4) return { verdict: 'unknown', mag };
     const sorted = v.slice().sort((a, b) => a - b);
     return { verdict: sorted[sorted.length >> 1] < 0.2 ? 'unresolved' : 'fine', mag };
+  }
+
+  private turn = 0;
+  private pendingLoop: { m: Est; t: number; wt: number } | null = null;
+  /** Loop closures applied. */
+  loopClosures = 0;
+
+  /**
+   * Back in a place mapped a while ago? Match the recent frames against the
+   * structure that predates them by loopMinAge seconds (what the camera
+   * added since may be in a drifted frame); two agreeing, well-supported
+   * estimates realign everything since just before the first.
+   */
+  private *closing(t: number): Generator<void, boolean, void> {
+    const O = this.opts;
+    const m = yield* this.world.misalignmentSearch({ snapshot: 'aged', minAge: O.loopMinAge, maxShift: O.loopMaxShift, maxYaw: O.loopMaxYaw });
+    this.last = { t, m, fired: false };
+    if (!m) {
+      this.pendingLoop = null;
+      this.note('loop: no old structure in view');
+      return false;
+    }
+    const mag = displacement(m, null);
+    const ok = !m.degenerate && m.n >= O.loopMinPoints && m.best >= O.loopMinSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n) && mag >= O.minCorrection;
+    if (!ok) {
+      this.pendingLoop = null;
+      this.note(`loop: none (${m.degenerate ? 'degenerate ' : ''}n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm)`);
+      return false;
+    }
+    if (this.pendingLoop && displacement(m, this.pendingLoop.m) <= O.agree) {
+      const since = this.pendingLoop.wt - 2;
+      this.world.realign(m.dx, m.dz, m.dyaw, m.pivot, since);
+      // What was mapped between then and now drifted by a growing share of
+      // the same error: move it too, so the loop lines up all the way round.
+      if (this.opts.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) this.world.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      this.pendingLoop = null;
+      this.pending = null;
+      this.corrections++;
+      this.loopClosures++;
+      this.last.fired = true;
+      this.note(`LOOP CLOSED (map since ${m.oldT.toFixed(0)}s) ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n}`);
+      return true;
+    }
+    this.pendingLoop = { m, t, wt: this.world.now };
+    this.note(`loop candidate ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} base ${m.base}`);
+    return false;
   }
 
   private *drifting(t: number): Generator<void, boolean, void> {

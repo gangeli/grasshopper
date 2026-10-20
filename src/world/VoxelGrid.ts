@@ -69,6 +69,24 @@ export class VoxelGrid {
    * pet stand at the real height of a table instead of the voxel boundary.
    */
   readonly topFrac: Uint8Array;
+  /**
+   * Per voxel: time code (see `stamp`) of the last observation that added
+   * occupancy evidence there; 0 = never (or long before the session).
+   * Lets drift checks match what the camera sees now against structure
+   * mapped a while ago only. Null on grid copies that don't need it.
+   */
+  hitTime: Uint16Array | null = null;
+  /** Time code written by hits (whole seconds since the session started, from 1). */
+  stamp = 1;
+  /**
+   * Occupied voxels not re-observed for this many seconds (hitTime) lose
+   * their resistance to erosion: a ray through one erodes it `staleMissGain`×
+   * as fast as through free space. Doubled walls left by odometry drift, and
+   * furniture that was moved, then clear as soon as they're looked through,
+   * while structure the camera keeps seeing stays sticky. 0 = off.
+   */
+  staleAfter = 0;
+  staleMissGain = 3;
   /** See integrateRay: occupied voxels resist erosion by passing rays. */
   stickyOccupied = true;
   /** Increments whenever occupancy changes meaningfully, so derived data can be cached. */
@@ -133,6 +151,7 @@ export class VoxelGrid {
     if (v > MAX_LO) v = MAX_LO;
     if (v < MIN_LO) v = MIN_LO;
     this.data[n] = v;
+    if (delta > 0 && this.hitTime) this.hitTime[n] = this.stamp;
     this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
   }
@@ -142,6 +161,7 @@ export class VoxelGrid {
     const n = this.idx(i, j, k);
     const before = this.data[n];
     this.data[n] = v;
+    if (v > before && this.hitTime) this.hitTime[n] = this.stamp;
     this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
   }
@@ -229,6 +249,8 @@ export class VoxelGrid {
     const dX = dx / len, dY = dy / len, dZ = dz / len;
     const r = this.res, o = this.origin;
     const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
+    const hits = this.staleAfter > 0 ? this.hitTime : null;
+    const staleStamp = this.stamp - this.staleAfter, staleMiss = Math.min(-1, missDelta) * this.staleMissGain;
     let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
     const stepX = dX > 0 ? 1 : dX < 0 ? -1 : 0;
     const stepY = dY > 0 ? 1 : dY < 0 ? -1 : 0;
@@ -247,7 +269,7 @@ export class VoxelGrid {
         const q = (j * nz + k) * nx + i;
         const v = data[q];
         if (v > STRONG_OCC) conflicts++;
-        let nv = v + (v > OCC_THRESHOLD ? occMiss : missDelta);
+        let nv = v + (v > OCC_THRESHOLD ? (hits !== null && hits[q] < staleStamp && v !== 127 ? staleMiss : occMiss) : missDelta);
         if (nv > MAX_LO) nv = MAX_LO;
         if (nv < MIN_LO) nv = MIN_LO;
         data[q] = nv;

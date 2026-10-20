@@ -81,13 +81,14 @@ export class NavGrid {
   private jumpLift = new Map<number, number>();
   private edgeFlag: Uint8Array = new Uint8Array(0);
 
-  constructor(readonly world: WorldModel, params: Partial<NavParams> = {}) {
+  /** `deferred`: don't build now (empty graph until refresh(), e.g. in the background). */
+  constructor(readonly world: WorldModel, params: Partial<NavParams> = {}, deferred = false) {
     if (!world.grid) throw new Error('NavGrid needs an initialized world grid');
     this.g = world.grid;
     this.p = { ...DEFAULT_NAV, ...params };
     this.colStart = new Int32Array(this.g.nx * this.g.nz);
     this.colCount = new Uint8Array(this.g.nx * this.g.nz);
-    this.build();
+    if (!deferred) this.build();
   }
 
   /** Rebuild if the grid changed. Returns true if rebuilt. */
@@ -375,7 +376,8 @@ export class NavGrid {
    * false, jump links (whose arcs are computed lazily and are the expensive
    * part on freshly built graphs).
    */
-  search(start: number, goal: number = NONE, maxCost = 60, jumps = true): { cost: Float32Array; prev: Int32Array } {
+  /** `maxExpand`: give up after expanding this many nodes (bounds the time of a search for an unreachable goal). */
+  search(start: number, goal: number = NONE, maxCost = 60, jumps = true, maxExpand = Infinity): { cost: Float32Array; prev: Int32Array } {
     const n = this.count;
     const cost = new Float32Array(n).fill(Infinity);
     const prev = new Int32Array(n).fill(NONE);
@@ -387,11 +389,12 @@ export class NavGrid {
     heap.push(start, h(start));
     const r = this.g.res;
     const closed = new Uint8Array(n);
+    let expanded = 0;
     while (heap.size) {
       const a = heap.pop();
       if (closed[a]) continue;
       closed[a] = 1;
-      if (a === goal) break;
+      if (a === goal || ++expanded > maxExpand) break;
       const ca = cost[a];
       if (ca > maxCost) break;
       const ia = this.ni[a], ka = this.nk[a], ya = this.ny[a];
@@ -427,14 +430,14 @@ export class NavGrid {
     return { cost, prev };
   }
 
-  findPath(from: Vec3, to: Vec3): Waypoint[] | null {
+  findPath(from: Vec3, to: Vec3, maxCost = 60, maxExpand = Infinity): Waypoint[] | null {
     const s = this.nearest(from), t = this.nearest(to);
     if (s === NONE || t === NONE) return null;
-    return this.pathBetween(s, t);
+    return this.pathBetween(s, t, maxCost, maxExpand);
   }
 
-  pathBetween(s: number, t: number): Waypoint[] | null {
-    const { prev } = this.search(s, t);
+  pathBetween(s: number, t: number, maxCost = 60, maxExpand = Infinity): Waypoint[] | null {
+    const { prev } = this.search(s, t, maxCost, true, maxExpand);
     if (s !== t && prev[t] === NONE) return null;
     return this.reconstruct(prev, s, t);
   }
