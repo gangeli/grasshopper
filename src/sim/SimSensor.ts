@@ -3,6 +3,7 @@ import type { Vec3 } from '../core/math';
 import type { MeshInput, PlaneInput } from '../world/WorldModel';
 import { depthImageToPoints, filterDiscontinuities, type DepthImage } from '../world/DepthFrame';
 import type { SimRoom } from './SimRoom';
+import { densify } from '../world/StereoDepth';
 
 /** Pinhole camera pose. yaw=0 looks down -Z (three.js convention), pitch>0 looks up. */
 export interface SimCamera {
@@ -77,7 +78,47 @@ export interface NoiseProfile {
   lossRate?: number;
   /** Angular speed (rad/s) above which frames are too blurred to give depth. */
   blurAngVel?: number;
+  /** Fill every hole by interpolation, like ARCore's full (densified) depth in WebXR. */
+  densify?: boolean;
+  /**
+   * Visual-inertial odometry drift that grows with the path walked (only
+   * accumulates when the sensor is told about the camera's motion, see
+   * SimSensor.moveTo). The whole tracking frame slowly slides and turns
+   * about the camera, so what is near is consistent and what was mapped
+   * long ago no longer lines up.
+   */
+  odometry?: OdometryDrift;
 }
+
+export interface OdometryDrift {
+  /** Position drift as a fraction of the distance walked (direction wanders slowly). */
+  posPerM: number;
+  /** Yaw random walk per sqrt(m) walked (rad/√m). */
+  yawPerSqrtM: number;
+  /** Optional constant yaw bias per metre walked (rad/m). */
+  yawPerM?: number;
+  /** Yaw random walk per sqrt(rad) turned (gyro noise). */
+  yawPerSqrtRad: number;
+  /**
+   * The tracker's own loop closure: back near a place it saw at least
+   * `loopMinAge` s ago, it snaps its frame back to how it was then (a sudden
+   * jump) at this rate per second. 0 = never.
+   */
+  loopRate: number;
+  loopMinAge: number;
+  /**
+   * VIO stays locked onto features it has in its local map: drift grows at
+   * the full rate only through new territory. Near a place seen within
+   * `localAge` s it grows at `localFactor` of the rate, near older places at
+   * `oldFactor`. (Defaults 1: drift with every metre, wherever.)
+   */
+  localFactor?: number;
+  oldFactor?: number;
+  localAge?: number;
+}
+
+/** Typical hand-held VIO over a home: ~1% of the path, a degree or two of yaw per 20m, occasional loop closures. */
+export const HOUSE_ODOMETRY: OdometryDrift = { posPerM: 0.015, yawPerSqrtM: 0.002, yawPerSqrtRad: 0.002, loopRate: 0.15, loopMinAge: 30, localFactor: 0.1, oldFactor: 0.5, localAge: 30 };
 
 export const NOISE_PROFILES = {
   ideal: { name: 'ideal', depthRes: [40, 30], sigmaA: 0, sigmaB: 0.004, flyingPixels: 0, edgeBlur: 0, smooth: 0, dropout: 0, holeBlobs: 0, outliers: 0, maxRange: 6, driftPos: 0, driftRot: 0, jitterPos: 0, jitterRot: 0, planeEdgeErr: 0, planeHeightErr: 0, floorErr: 0 },
@@ -91,6 +132,8 @@ export const NOISE_PROFILES = {
    * and humanScanPath().
    */
   real: { name: 'real', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.004, blurAngVel: 2.5 },
+  /** 'real' plus odometry drift over long walks (multi-room homes). */
+  house: { name: 'house', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.004, blurAngVel: 2.5, odometry: HOUSE_ODOMETRY, densify: true },
   harsh: { name: 'harsh', depthRes: [32, 24], sigmaA: 0.01, sigmaB: 0.025, flyingPixels: 0.8, edgeBlur: 1, smooth: 0.5, dropout: 0.25, holeBlobs: 4, outliers: 0.02, maxRange: 4, driftPos: 0.025, driftRot: 0.01, jitterPos: 0.008, jitterRot: 0.005, planeEdgeErr: 0.1, planeHeightErr: 0.02, floorErr: 0.03 },
 } satisfies Record<string, NoiseProfile>;
 export type NoiseName = keyof typeof NOISE_PROFILES;
@@ -171,7 +214,7 @@ export class SimSensor {
     this.allPlanes = this.truePlanes.map((p) => this.perturbPlane(p));
     // Planes on texture-less surfaces (blank walls, bare floors) are harder to detect.
     for (const p of this.allPlanes) {
-      const m = p.id === 'floor' ? room.floorMaterial : room.boxes[Number(p.id.replace(/\D+(\d+).*/, '$1'))]?.material;
+      const m = p.id === 'floor' || p.id.startsWith('floor_') ? room.floorMaterial : room.boxes[Number(p.id.replace(/\D+(\d+).*/, '$1'))]?.material;
       if (this.noise.materials && m === 'textureless') this.texturelessPlanes.add(p.id);
     }
   }
@@ -302,7 +345,13 @@ export class SimSensor {
         if (!(z > 0.2) || z > N.maxRange) continue; // no reading
         out[(h - 1 - py) * w + px] = z; // image row 0 = top
       }
-    return { w, h, depth: out, invProj: invProjFor(cam), camToWorld: this.withShift(poseMatrix(cam, pose)) };
+    // ARCore's "full depth" (what WebXR hands out) has no holes: every
+    // pixel the sensor couldn't measure is interpolated from its
+    // surroundings, with no confidence attached (dark fabric seen as the wall
+    // behind it, a blank floor as a smooth guess).
+    const dense = N.densify ? densify(out, new Float32Array(w * h), w, h, 2) : out;
+    if (N.densify) for (let i = 0; i < dense.length; i++) if (dense[i] > N.maxRange * 1.6 || !(dense[i] > 0)) dense[i] = 0;
+    return { w, h, depth: dense, invProj: invProjFor(cam), camToWorld: this.withShift(poseMatrix(cam, pose)) };
   }
 
   /**
@@ -334,7 +383,7 @@ export class SimSensor {
 
   /** The camera position the device *believes* it is at (true pose + tracking error). */
   estimatedEye(cam: SimCamera): Vec3 {
-    const p = applyPoseError(this.poseErr, cam.pos, cam.pos), J = this.jump;
+    const p = applyPoseError(this.poseErr, cam.pos, cam.pos), J = this.trackingFromTruth();
     return { x: J[0] * p.x + J[4] * p.y + J[8] * p.z + J[12], y: J[1] * p.x + J[5] * p.y + J[9] * p.z + J[13], z: J[2] * p.x + J[6] * p.y + J[10] * p.z + J[14] };
   }
 
@@ -376,7 +425,91 @@ export class SimSensor {
   /** Persistent rigid world-frame offset of the tracking frame (injected faults); unlike drift it doesn't revert. */
   jump: number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   private withShift(M: number[]): number[] {
-    return mulCM(this.jump, M);
+    return mulCM(this.jump, mulCM(this.drift, M));
+  }
+
+  /**
+   * Odometry drift (world-frame rigid transform, tracking = jump · drift ·
+   * truth). Identity unless the profile has `odometry` and moveTo is called.
+   */
+  drift: number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  /** Truth → tracking frame (everything the device reports is in the tracking frame). */
+  trackingFromTruth(): number[] {
+    return mulCM(this.jump, this.drift);
+  }
+  private odo: { last: Vec3 | null; lastYaw: number; dirAngle: number; yawBias: number; walked: number; nextKey: number; keys: { p: Vec3; D: number[]; t: number }[] } = { last: null, lastYaw: 0, dirAngle: 0, yawBias: 0, walked: 0, nextKey: 0, keys: [] };
+  /** Loop closures performed by the simulated tracker. */
+  loopClosures = 0;
+  /** Distance walked so far (m). */
+  get walked(): number {
+    return this.odo.walked;
+  }
+
+  /**
+   * The camera moved to `cam` at time t (call every camera frame): grows
+   * the odometry drift with the motion, and maybe closes a loop.
+   */
+  moveTo(cam: SimCamera, t: number, dt = 1 / 30): void {
+    const O = this.noise.odometry;
+    if (!O) return;
+    const o = this.odo, p = cam.pos;
+    if (!o.last) {
+      o.last = { ...p };
+      o.lastYaw = cam.yaw;
+      o.dirAngle = this.rng.range(0, Math.PI * 2);
+      o.yawBias = (this.rng.chance(0.5) ? 1 : -1) * (O.yawPerM ?? 0);
+      return;
+    }
+    const dx = p.x - o.last.x, dz = p.z - o.last.z, dist = Math.hypot(dx, dz, p.y - o.last.y);
+    let dyaw = cam.yaw - o.lastYaw;
+    dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
+    o.last = { ...p };
+    o.lastYaw = cam.yaw;
+    o.walked += dist;
+    // How new is this place to the tracker? (Nearest keyframe within 1.5m.)
+    let novelty = 1;
+    if (O.localFactor !== undefined || O.oldFactor !== undefined) {
+      let recent = false, old = false;
+      for (let q = o.keys.length - 1; q >= 0 && !recent; q--) {
+        const k = o.keys[q];
+        if (Math.hypot(k.p.x - p.x, k.p.z - p.z) > 1.5) continue;
+        if (t - k.t < (O.localAge ?? 30)) recent = true;
+        else old = true;
+      }
+      novelty = recent ? (O.localFactor ?? 1) : old ? (O.oldFactor ?? 1) : 1;
+    }
+    const step = dist * novelty;
+    // Drift direction and yaw bias wander slowly with distance.
+    o.dirAngle += this.gauss() * 0.3 * Math.sqrt(dist);
+    const dpsi = o.yawBias * step + this.gauss() * O.yawPerSqrtM * Math.sqrt(step) + this.gauss() * O.yawPerSqrtRad * Math.sqrt(Math.abs(dyaw));
+    const tx = Math.cos(o.dirAngle) * O.posPerM * step, tz = Math.sin(o.dirAngle) * O.posPerM * step;
+    // Rotate about the camera's tracked position, then shift.
+    const D = this.drift;
+    const cx = D[0] * p.x + D[4] * p.y + D[8] * p.z + D[12], cz = D[2] * p.x + D[6] * p.y + D[10] * p.z + D[14];
+    const c = Math.cos(dpsi), sn = Math.sin(dpsi);
+    const R = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, cx - c * cx - sn * cz + tx, 0, cz + sn * cx - c * cz + tz, 1];
+    this.drift = mulCM(R, D);
+    // Keyframes every 0.5m walked; loop closure back near an old one.
+    if (o.walked >= o.nextKey) {
+      o.keys.push({ p: { ...p }, D: this.drift.slice(), t });
+      o.nextKey = o.walked + 0.5;
+    }
+    if (O.loopRate > 0 && this.rng.chance(O.loopRate * dt)) {
+      let best: { p: Vec3; D: number[]; t: number } | null = null, bd = 1.0;
+      for (const k of o.keys) {
+        if (t - k.t < O.loopMinAge) continue;
+        const d = Math.hypot(k.p.x - p.x, k.p.z - p.z);
+        if (d < bd) (bd = d), (best = k);
+      }
+      if (best) {
+        // Snap back to the frame the place was seen in.
+        const off = Math.hypot(best.D[12] - this.drift[12], best.D[14] - this.drift[14]) + Math.abs(Math.atan2(best.D[8], best.D[0]) - Math.atan2(this.drift[8], this.drift[0]));
+        if (off > 0.02) {
+          this.drift = best.D.slice();
+          this.loopClosures++;
+        }
+      }
+    }
   }
 
   /** A sudden pose correction (loop closure / relocalisation). */
@@ -423,7 +556,8 @@ export class SimSensor {
         if (inFrustum(cam, lifted, 0.95) && this.room.visible(cam.pos, lifted)) seen++;
       }
       // Blank surfaces need a much better look before a plane is found.
-      if (seen >= (this.texturelessPlanes.has(p.id) ? 8 : 2)) this.detectedPlanes.set(p.id, p);
+      // Detected in the tracking frame as it is now (it then stays put; any odometry drift is baked in).
+      if (seen >= (this.texturelessPlanes.has(p.id) ? 8 : 2)) this.detectedPlanes.set(p.id, this.noise.odometry ? transformPlane(p, this.drift) : p);
     }
     return [...this.detectedPlanes.values()];
   }
@@ -470,6 +604,11 @@ export class SimSensor {
   }
 }
 
+function transformPlane(p: PlaneInput, M: number[]): PlaneInput {
+  const tp = (q: Vec3, w: number) => ({ x: M[0] * q.x + M[4] * q.y + M[8] * q.z + M[12] * w, y: M[1] * q.x + M[5] * q.y + M[9] * q.z + M[13] * w, z: M[2] * q.x + M[6] * q.y + M[10] * q.z + M[14] * w });
+  return { ...p, polygon: p.polygon.map((q) => tp(q, 1)), normal: tp(p.normal, 0) };
+}
+
 function planeSamples(p: PlaneInput): Vec3[] {
   const c = p.polygon;
   const out: Vec3[] = [];
@@ -487,17 +626,20 @@ const lerp3 = (a: Vec3, b: Vec3, t: number): Vec3 => ({ x: a.x + (b.x - a.x) * t
 export function buildPlanes(room: SimRoom): PlaneInput[] {
   const planes: PlaneInput[] = [];
   const W = room.halfW, D = room.halfD;
-  planes.push({
-    id: 'floor',
-    polygon: [
-      { x: -W, y: 0, z: -D },
-      { x: W, y: 0, z: -D },
-      { x: W, y: 0, z: D },
-      { x: -W, y: 0, z: D },
-    ],
-    normal: { x: 0, y: 1, z: 0 },
-    label: 'floor',
-  });
+  const rects = room.floorRects ?? [{ x0: -W, z0: -D, x1: W, z1: D }];
+  rects.forEach((r, q) =>
+    planes.push({
+      id: room.floorRects ? `floor_${q}` : 'floor',
+      polygon: [
+        { x: r.x0, y: 0, z: r.z0 },
+        { x: r.x1, y: 0, z: r.z0 },
+        { x: r.x1, y: 0, z: r.z1 },
+        { x: r.x0, y: 0, z: r.z1 },
+      ],
+      normal: { x: 0, y: 1, z: 0 },
+      label: 'floor',
+    }),
+  );
   room.boxes.forEach((b, idx) => {
     const pc = room.pieces[b.piece];
     // Plane detection needs visual features: nothing on glass or mirrors.
@@ -531,6 +673,17 @@ export function buildPlanes(room: SimRoom): PlaneInput[] {
         faces.push([{ x: 0, y: 0, z: 1 }, [{ x: b.min.x, y: y0, z: b.max.z }, { x: b.max.x, y: y0, z: b.max.z }, { x: b.max.x, y: y1, z: b.max.z }, { x: b.min.x, y: y1, z: b.max.z }]]);
       if (b.min.z >= D - 1e-3 || (pc.label === 'bookshelf' && b.min.z > 0))
         faces.push([{ x: 0, y: 0, z: -1 }, [{ x: b.min.x, y: y0, z: b.min.z }, { x: b.max.x, y: y0, z: b.min.z }, { x: b.max.x, y: y1, z: b.min.z }, { x: b.min.x, y: y1, z: b.min.z }]]);
+      // Interior walls of a multi-room home: both faces.
+      const interior = pc.label === 'wall' && room.floorRects && b.min.x > -W + 1e-3 && b.max.x < W - 1e-3 && b.min.z > -D + 1e-3 && b.max.z < D - 1e-3 && b.min.y < 0.5;
+      if (interior) {
+        if (b.max.x - b.min.x < b.max.z - b.min.z) {
+          faces.push([{ x: -1, y: 0, z: 0 }, [{ x: b.min.x, y: y0, z: b.min.z }, { x: b.min.x, y: y0, z: b.max.z }, { x: b.min.x, y: y1, z: b.max.z }, { x: b.min.x, y: y1, z: b.min.z }]]);
+          faces.push([{ x: 1, y: 0, z: 0 }, [{ x: b.max.x, y: y0, z: b.min.z }, { x: b.max.x, y: y0, z: b.max.z }, { x: b.max.x, y: y1, z: b.max.z }, { x: b.max.x, y: y1, z: b.min.z }]]);
+        } else {
+          faces.push([{ x: 0, y: 0, z: -1 }, [{ x: b.min.x, y: y0, z: b.min.z }, { x: b.max.x, y: y0, z: b.min.z }, { x: b.max.x, y: y1, z: b.min.z }, { x: b.min.x, y: y1, z: b.min.z }]]);
+          faces.push([{ x: 0, y: 0, z: 1 }, [{ x: b.min.x, y: y0, z: b.max.z }, { x: b.max.x, y: y0, z: b.max.z }, { x: b.max.x, y: y1, z: b.max.z }, { x: b.min.x, y: y1, z: b.max.z }]]);
+        }
+      }
       faces.forEach(([normal, polygon], f) => planes.push({ id: `wall${idx}_${f}`, polygon, normal, label: pc.label === 'wall' ? 'wall' : undefined }));
     }
   });

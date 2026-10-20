@@ -47,6 +47,12 @@ export class SimRoom {
   time = 0;
   /** Material of the floor (blank floors are hard for depth-from-motion). */
   floorMaterial: Material = 'matte';
+  /**
+   * Multi-room homes: the floor of each room as its own rectangle, so plane
+   * detection finds them one by one (as a phone does) instead of the whole
+   * home's floor at the first glance. Null for single rooms.
+   */
+  floorRects: { x0: number; z0: number; x1: number; z1: number }[] | null = null;
   constructor(readonly width: number, readonly depth: number, readonly wallHeight = 2.4) {}
 
   private bvhCache: BoxBVH | null = null;
