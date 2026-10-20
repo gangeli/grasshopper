@@ -272,3 +272,31 @@ Wrong restores seen and what closed them:
   (inlier 0.90, rival at 0.42–0.57) → acceptance tightened to inlier ≥ 0.9 and rival
   ≤ 0.4. On the 320 recorded trial attempts this costs 2 of 34 session-level restores and
   removes the remaining single-attempt false accept.
+
+### Round 9 — long histories (3×2-room homes, 20 sessions each, 4 homes)
+
+First run (L1): 49% of known-room sessions relocalized, 0 wrong restores, but **1 wrong
+offline stitch** (two stored fragments merged 6.7 m apart: two-way agreement was not
+enough), 16 fragments per home (sessions restored late and ended before confirming, so
+each saved a duplicate), coverage of the biggest fragment 41%.
+
+* Offline stitching now only re-checks **hints**: a session that found and verified a
+  placement but ended before confirming saves its own fragment with that placement; a
+  later session re-checks exactly that placement between the two stored maps, from both
+  sides, with inlier ≥ 0.93. No blind searches between stored maps (a same-shaped room
+  has nothing there to contradict it).
+* Confirmation after 15 s (was 25) and 3 good checks.
+* A second restore in the same session must also fit the live map *with the restored
+  rooms in it* (walls and doorways around the room): this closed a 180° flip of a small
+  fragment that had passed the pairwise cross-check (L1b: 1 wrong restore → L1c: 0).
+
+| | L1 | L1c |
+|---|---|---|
+| known-room sessions relocalized | 33/67 (49%) | 39/67 (58%) |
+| wrong restores / wrong stitches | 0 / 1 | 0 / 0 |
+| fragments per home after 20 sessions | 16.0 | 10.5 |
+| biggest fragment's coverage | 41% | 44% |
+| error mean / p90 / max | 1.6 / 2.7 / 4.3 cm | 2.8 / 7.8 / 13.9 cm |
+
+The error tail grew with history: fused sessions carry their own drift. Response: the
+placement is re-refined at every verification and the latest one is used for fusing.

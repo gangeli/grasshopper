@@ -58,6 +58,9 @@ export interface VerifyMetrics {
   bwdLowN: number;
   bwdLowHit: number;
   bwdLowConf: number;
+  /** Agreement of structure only (walls, tall cupboards: what doesn't move), both ways. */
+  wallInlier: number;
+  wallSamples: number;
   /** Live structure samples (columns reaching above 1.1m) on stored obstacles (strict: on the voxel). */
   wallHit: number;
   /**
@@ -282,7 +285,7 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
   const c = Math.cos(T.yaw), s = Math.sin(T.yaw), dj = T.dj ?? 0;
   const F = frag.lookup, Lk = live.lookup;
   const lo = live.features.occ, lf = live.features.free, fo = frag.features.occ;
-  let fwdN = 0, fwdHit = 0, fwdConf = 0, fwdKnown = 0, lowN = 0, lowHit = 0, lowConf = 0;
+  let fwdN = 0, fwdHit = 0, fwdConf = 0, fwdKnown = 0, lowN = 0, lowHit = 0, lowConf = 0, sHit = 0, sConf = 0;
   // Furniture that agrees, by 25cm cell (live frame), to count separate objects.
   const hitCells = new Map<number, number>();
   for (let q = 0; q < lo.n; q++) {
@@ -294,6 +297,10 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
     const hit = k === 1 || k === 2 || k === 3;
     if (hit) fwdHit++;
     else if (k === 4) fwdConf++;
+    if (lo.low[q] === 2) {
+      if (hit) sHit++;
+      else if (k === 4) sConf++;
+    }
     if (lo.low[q] === 1 && k !== 0) {
       lowN++;
       if (hit) {
@@ -323,6 +330,10 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
     const hit = k === 1 || k === 2 || k === 3;
     if (hit) bwdHit++;
     else if (k === 4) bwdConf++;
+    if (fo.low[q] === 2) {
+      if (hit) sHit++;
+      else if (k === 4) sConf++;
+    }
     if (fo.low[q] === 1) {
       bwdLowN++;
       if (hit) bwdLowHit++;
@@ -359,7 +370,7 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
   const inlier = hits + conf > 0 ? hits / (hits + conf) : 0;
   // Free-space agreement counts at half weight (it is what tells a whole-room
   // overlap from two maps touching along one wall).
-  return { fwdN, fwdHit, fwdConf, freeN, freeConf, freeHit, freeSamples: lf.n, bwdFreeHit, fragFreeSamples: ff.n, lowObjects, lowN, lowHit, lowConf, bwdLowN, bwdLowHit, bwdLowConf, wallHit, wallWeak, bwdN, bwdHit, bwdConf, inlier, explained: fwdKnown ? fwdHit / fwdKnown : 0, fwdKnown, score: hits + 0.5 * freeHit - 3 * conf };
+  return { fwdN, fwdHit, fwdConf, freeN, freeConf, freeHit, freeSamples: lf.n, bwdFreeHit, fragFreeSamples: ff.n, lowObjects, wallInlier: sHit + sConf ? sHit / (sHit + sConf) : 0, wallSamples: sHit + sConf, lowN, lowHit, lowConf, bwdLowN, bwdLowHit, bwdLowConf, wallHit, wallWeak, bwdN, bwdHit, bwdConf, inlier, explained: fwdKnown ? fwdHit / fwdKnown : 0, fwdKnown, score: hits + 0.5 * freeHit - 3 * conf };
 }
 
 const cellKey = (x: number, z: number) => (Math.floor(x / 0.25) + 32768) * 65536 + (Math.floor(z / 0.25) + 32768);
@@ -407,7 +418,11 @@ export function judge(best: Candidate | null, ambiguity: number, o: RelocOptions
   // (Relative to the smaller of the two: either may extend far beyond the other.)
   if (m.freeHit < 600 || (m.freeHit < 0.3 * m.freeSamples && m.bwdFreeHit < 0.3 * m.fragFreeSamples))
     return { ok: false, reason: `free overlap ${m.freeHit}/${m.freeSamples}, ${m.bwdFreeHit}/${m.fragFreeSamples}` };
-  if (m.inlier < minInlier) return { ok: false, reason: `inlier ${m.inlier.toFixed(2)} < ${minInlier}` };
+  // Agreement, with contradictions on furniture counted at half weight
+  // (furniture moves between sessions; walls and seen-empty floor don't).
+  const hits = m.fwdHit + m.bwdHit, conf = m.fwdConf + m.bwdConf + m.freeConf - 0.5 * (m.lowConf + m.bwdLowConf);
+  const inlier = hits / Math.max(1, hits + conf);
+  if (inlier < minInlier) return { ok: false, reason: `inlier ${inlier.toFixed(2)} < ${minInlier}` };
   if (m.explained < minExplained) return { ok: false, reason: `explained ${m.explained.toFixed(2)} < ${minExplained}` };
   if (ambiguity > maxAmb) return { ok: false, reason: `ambiguous ${ambiguity.toFixed(2)}` };
   // Same walls, different furniture: another room of the same shape (or

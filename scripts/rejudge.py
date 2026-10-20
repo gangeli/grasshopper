@@ -14,8 +14,15 @@ def judge(m, amb, P):
         return False, 'reverse overlap'
     if m['freeHit'] < 600 or (m['freeHit'] < 0.3 * m['freeSamples'] and m.get('bwdFreeHit', 0) < 0.3 * m.get('fragFreeSamples', 1)):
         return False, 'free overlap'
-    if m['inlier'] < P['minInlier']:
+    hits = m['fwdHit'] + m['bwdHit']
+    conf = m['fwdConf'] + m['bwdConf'] + m['freeConf'] - P['furnDiscount'] * (m['lowConf'] + m['bwdLowConf'])
+    inl = hits / max(1, hits + conf)
+    if inl < P['minInlier']:
         return False, 'inlier'
+    if m.get('wallSamples', 0) >= 100 and m.get('wallInlier', 1) < P['minWallInlier']:
+        return False, 'wall inlier'
+    if m.get('wallSamples', 0) < 100 and m['inlier'] < P['minInlierNoWalls']:
+        return False, 'inlier (no walls)'
     if m['explained'] < P['minExplained']:
         return False, 'explained'
     if amb > P['maxAmb']:
@@ -31,7 +38,7 @@ def judge(m, amb, P):
             return False, 'walls weak'
     return True, 'ok'
 
-P = dict(minOverlap=300, minInlier=0.9, minExplained=0.5, maxAmb=0.4, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12)
+P = dict(minOverlap=300, minInlier=0.9, minExplained=0.5, maxAmb=0.4, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12, minWallInlier=0, minInlierNoWalls=0, furnDiscount=0.5)
 for a in sys.argv[1:]:
     if '=' in a:
         k, v = a.split('=')
