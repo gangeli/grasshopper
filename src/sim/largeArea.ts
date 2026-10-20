@@ -61,6 +61,8 @@ export interface LargeAreaOptions {
   log?: (line: string) => void;
   /** Write a top-down picture of the final map (PNG) here. */
   png?: string;
+  /** Called at every metric interval (diagnostics). */
+  inspect?: (ctx: { t: number; world: WorldModel; sensor: SimSensor; cam: SimCamera; room: SimRoom; house: House }) => void;
 }
 
 export interface LargeAreaSample {
@@ -126,6 +128,10 @@ export interface LargeAreaReport {
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
+  /** All typed-array memory of the process (map, recovery copies, nav, scratch): the honest total. */
+  arrayBuffersMB: number;
+  /** Peak of arrayBuffers over the run (sampled at each metric interval). */
+  arrayBuffersPeakMB: number;
 }
 
 function stat(xs: number[]): Stat {
@@ -188,6 +194,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   const roomFirst = new Map<number, { cov: number; prec: number; t: number }>();
   let lastRoom = -1, lost = false, losses = 0, depthFrames = 0, depthRejected = 0;
   let frameErrMax = 0, walked = 0, spawned = false;
+  let abPeak = 0;
   let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
   const pathRng = new Rng(seed * 13 + 1);
   const dt = 1 / 30;
@@ -279,6 +286,10 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       }
       const last = f === path.length - 1;
       if (Math.floor(step.t / evalEvery) !== Math.floor((step.t - dt) / evalEvery) || last) {
+        o.inspect?.({ t: step.t, world, sensor, cam: step.cam, room, house });
+        // (Before building the scoring copy of the whole map.)
+        (globalThis as { gc?: () => void }).gc?.();
+        abPeak = Math.max(abPeak, process.memoryUsage().arrayBuffers);
         const full = fullMap(world, house);
         const s = sample(world, full.world, full.nav, house, truth, visited, step, sensor, game.health.counts as Record<string, number>);
         s.walked = walked;
@@ -329,6 +340,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, loopsClosed: game.health.drift.loopClosures, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
+    arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,
+    arrayBuffersPeakMB: abPeak / 1e6,
   };
 }
 
@@ -576,7 +589,7 @@ export function fmtReport(r: LargeAreaReport): string {
     `final: coverage ${pc(f.coverage)} (whole home ${pc(f.coverageAll)}), precision ${pc(f.precision)}, ghost ${f.ghostM2.toFixed(2)}m², falseFree ${pc(f.falseFree)}, frameErr ${(f.frameErr * 100).toFixed(0)}cm (max ${(Math.max(...r.samples.map((s) => s.frameErrMax)) * 100).toFixed(0)}cm), paths colliding ${f.pathsColliding}/${f.pathsTested} (max pen ${(f.pathMaxPen * 100).toFixed(0)}cm)`,
     `local (around the player, through the current frame): precision ${pc(r.samples.slice(1).reduce((a, s) => a + s.localPrecision, 0) / Math.max(1, r.samples.length - 1))}, ghost ${(r.samples.slice(1).reduce((a, s) => a + s.localGhostM2, 0) / Math.max(1, r.samples.length - 1)).toFixed(2)}m² (session means)`,
     `retention: mean coverage drop ${pc(r.retention.coverageDrop)} (worst ${pc(r.retention.worstCoverageDrop)}), precision drop ${pc(r.retention.precisionDrop)}`,
-    `memory: map ${f.memMB.toFixed(0)}MB, heap ${r.heapMB.toFixed(0)}MB | cpu mean/p95/max: sense ${ms(r.cpu.sense)} game ${ms(r.cpu.game)} frame ${ms(r.cpu.frame)} (>16ms: ${r.cpu.frameOver16}) nav(worker) ${ms(r.cpu.nav)} x${r.cpu.nav.n}`,
+    `memory: map ${f.memMB.toFixed(0)}MB, typed arrays ${r.arrayBuffersPeakMB.toFixed(0)}MB peak, heap ${r.heapMB.toFixed(0)}MB | cpu mean/p95/max: sense ${ms(r.cpu.sense)} game ${ms(r.cpu.game)} frame ${ms(r.cpu.frame)} (>16ms: ${r.cpu.frameOver16}) nav(worker) ${ms(r.cpu.nav)} x${r.cpu.nav.n}`,
     `events: losses ${r.events.trackingLosses}, tracker loop closures ${r.events.loopClosures}, depth frames ${r.events.depthFrames} (gated ${r.events.depthRejected}: ${JSON.stringify(r.events.gate)}), multi-view kept ${(r.events.mvKept / Math.max(1, r.events.mvKept + r.events.mvDropped) * 100).toFixed(0)}%, window moves ${r.events.recenters}, loops closed ${r.events.loopsClosed}, realigns ${r.events.realigns.map((q) => `${q.t.toFixed(0)}s ${(q.before * 100).toFixed(0)}→${(q.after * 100).toFixed(0)}cm`).join(' ')}, health ${JSON.stringify(r.events.health)}`,
   ];
   return lines.join('\n');
