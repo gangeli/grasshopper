@@ -97,15 +97,40 @@ export function depthImageToPoints(img: DepthImage, depth: Float32Array = img.de
 export class PoseGate {
   private last: { p: Vec3; f: Vec3; t: number } | null = null;
   private vel: Vec3 = { x: 0, y: 0, z: 0 };
+  private angVel = 0;
+  /** The previous check flagged a position jump (its residual). */
+  private prevJump: { x: number; y: number; z: number } | null = null;
+  private jumpBefore: PoseGate['lastJump'] = null;
   private holdUntil = -Infinity;
   rejected = 0;
   accepted = 0;
+  /** Why frames were turned away: emulated pose, held after a jump, turning too fast. */
+  readonly reasons = { emulated: 0, hold: 0, fast: 0, posJumps: 0, rotJumps: 0 };
+  /**
+   * The most recent unexplained jump of the camera position (map frame):
+   * where it is now minus where its motion said it would be. A tracker
+   * relocalising or closing a loop moves the whole frame by about this much.
+   */
+  lastJump: { t: number; dx: number; dy: number; dz: number } | null = null;
+  /**
+   * Smarter rotation test (v2): a jump is a rotation that doesn't fit the
+   * recent angular velocity (hand-held phones turn fast but smoothly), and
+   * frames turning faster than `maxAngVel` are dropped on their own (motion
+   * blur) without holding the following ones. Off: any turn faster than
+   * maxRotResidual + 2.5 rad/s·dt holds for holdSeconds (the original rule).
+   */
+  smartRotation = false;
+  /** A repeated residual is a change of speed, not a second jump (and the first was none either). */
+  speedChanges = true;
+  maxAngVel = 3.2;
   constructor(readonly maxPosResidual = 0.04, readonly maxRotResidual = 0.05, readonly holdSeconds = 0.8) {}
 
   /** Forget motion history (e.g. after the map frame was deliberately corrected). */
   reset(): void {
     this.last = null;
     this.vel = { x: 0, y: 0, z: 0 };
+    this.angVel = 0;
+    this.prevJump = null;
   }
 
   accept(eye: Vec3, forward: Vec3, t: number, emulated = false): boolean {
@@ -113,6 +138,7 @@ export class PoseGate {
     if (emulated) {
       this.holdUntil = t + this.holdSeconds;
       ok = false;
+      this.reasons.emulated++;
     } else if (this.last) {
       const dt = Math.max(1e-3, t - this.last.t);
       // Residual against a constant-velocity prediction.
@@ -120,12 +146,40 @@ export class PoseGate {
       const posRes = Math.hypot(rx, ry, rz);
       const dot = forward.x * this.last.f.x + forward.y * this.last.f.y + forward.z * this.last.f.z;
       const turned = Math.acos(Math.max(-1, Math.min(1, dot)));
+      let posJump = dt < 0.5 && posRes > this.maxPosResidual + 0.3 * dt;
+      // The same residual again: the camera changed speed (the prediction
+      // went stale), it didn't jump. Withdraw the previous "jump" too.
+      const P = this.prevJump;
+      const speedChange = this.speedChanges && posJump && P !== null && Math.hypot(rx - P.x, ry - P.y, rz - P.z) < 0.5 * Math.max(posRes, Math.hypot(P.x, P.y, P.z));
+      if (speedChange) {
+        posJump = false;
+        this.reasons.posJumps--;
+        this.lastJump = this.jumpBefore;
+      }
+      this.prevJump = posJump ? { x: rx, y: ry, z: rz } : null;
       // Hand-held phones turn fast but smoothly; a jump is a big unexplained step.
-      if (dt < 0.5 && (posRes > this.maxPosResidual + 0.3 * dt || turned > this.maxRotResidual + 2.5 * dt)) this.holdUntil = t + this.holdSeconds;
-      this.vel = { x: (eye.x - this.last.p.x) / dt, y: (eye.y - this.last.p.y) / dt, z: (eye.z - this.last.p.z) / dt };
+      const rotJump = dt < 0.5 && (this.smartRotation ? Math.abs(turned - this.angVel * dt) > this.maxRotResidual + 1.5 * dt : turned > this.maxRotResidual + 2.5 * dt);
+      if (posJump || rotJump) {
+        this.holdUntil = t + this.holdSeconds;
+        if (posJump) {
+          this.reasons.posJumps++;
+          this.jumpBefore = this.lastJump;
+          this.lastJump = { t, dx: rx, dy: ry, dz: rz };
+        } else this.reasons.rotJumps++;
+      }
+      this.angVel = dt < 0.5 ? turned / dt : 0;
+      if (this.smartRotation && this.angVel > this.maxAngVel) {
+        ok = false;
+        this.reasons.fast++;
+      }
+      // After a jump, the velocity estimate must not include it.
+      this.vel = posJump ? this.vel : { x: (eye.x - this.last.p.x) / dt, y: (eye.y - this.last.p.y) / dt, z: (eye.z - this.last.p.z) / dt };
     }
     this.last = { p: { ...eye }, f: { ...forward }, t };
-    if (t < this.holdUntil) ok = false;
+    if (t < this.holdUntil && ok) {
+      ok = false;
+      this.reasons.hold++;
+    }
     if (ok) this.accepted++;
     else this.rejected++;
     return ok;

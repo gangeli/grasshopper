@@ -265,12 +265,25 @@ export class HideAndSeek {
     if (this.phase !== 'roam') this.setPhase('roam');
   }
 
+  /** A graph for a replaced grid, being built in the background (see refreshNav). */
+  private pendingNav: NavGrid | null = null;
+
   refreshNav(force = false): NavGrid | null {
     if (!this.world.grid) return null;
     // The world replaces its grid when it rebuilds (floor correction, reset):
     // a nav graph bound to the old grid would freeze on a stale map forever.
-    if (!this.nav || this.nav.g !== this.world.grid) this.nav = new NavGrid(this.world);
-    else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh(!force); // routine refreshes may run in the background (browser)
+    if (!this.nav || this.nav.g !== this.world.grid) {
+      // The map window moved with the player (a new grid of the same map):
+      // build the new graph in the background and keep using the old one
+      // (its positions are still right) until it's ready.
+      if (this.nav && !force && NavGrid.background) {
+        if (!this.pendingNav || this.pendingNav.g !== this.world.grid) this.pendingNav = new NavGrid(this.world, {}, true);
+        if (this.pendingNav.builtVersion < 0) this.pendingNav.refresh(true);
+        if (this.pendingNav.builtVersion < 0) return this.nav;
+        this.nav = this.pendingNav;
+      } else this.nav = new NavGrid(this.world);
+      this.pendingNav = null;
+    } else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh(!force); // routine refreshes may run in the background (browser)
     return this.nav;
   }
 
@@ -436,7 +449,15 @@ export class HideAndSeek {
     // keeps Hopper from walking into it.
     const nav = this.refreshNav();
     const m = this.move;
-    const path = nav?.findPath(this.pet.pos, m.goal);
+    // Bounded: when the way is truly blocked, an unbounded search would
+    // explore the whole graph (jump links included) before giving up —
+    // seconds on a large map. A detour is rarely more than a few times the
+    // direct distance.
+    // Jump links are worked out lazily and are the costly part of a search:
+    // consider them only if the way there needed one (or the goal is up on something).
+    const direct = Math.hypot(m.goal.x - this.pet.pos.x, m.goal.z - this.pet.pos.z);
+    const needJumps = this.pet.path.some((w) => w.jump) || Math.abs(m.goal.y - this.world.floorY) > 0.06;
+    const path = nav?.findPath(this.pet.pos, m.goal, 3 * direct + 4, needJumps ? 3000 : 12000, needJumps);
     if (path && path.length) this.pet.follow(path, m.cruise, m.action, m.yaw);
     else {
       // No way through right now: wait where we are (the obstacle may move away).
@@ -644,6 +665,14 @@ export class HideAndSeek {
     if (!view) return;
     this.clock += dt;
     this.lastView = view;
+    // The map window follows the player; keep Hopper inside it when it can.
+    const pp = this.pet.pos;
+    if (Number.isFinite(pp.x + pp.z)) {
+      const k = (this.world.keepInWindow ??= { x: 0, y: 0, z: 0 });
+      k.x = pp.x;
+      k.y = pp.y;
+      k.z = pp.z;
+    } else this.world.keepInWindow = null;
     this.anim.lookTarget = new THREE.Vector3(view.pos.x, view.pos.y, view.pos.z);
     this.navTimer -= dt;
     // Nav rebuilds cost ~100ms+ on a phone: refresh while roaming (the map is

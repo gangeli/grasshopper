@@ -51,6 +51,8 @@ describe('health: recovering from broken states', () => {
 
   it('a pet left floating in mid-air comes down', () => {
     const { sim, bot } = mapped();
+    // Left floating while standing still (a walking pet follows the floor anyway).
+    run(sim, bot, 30, () => !sim.pet.moving && sim.pet.state === 'idle');
     sim.pet.placeAt(sim.pet.pos.clone().add(new THREE.Vector3(0, 0.6, 0)));
     run(sim, bot, 5);
     expect(sim.game.health.counts.petFloating ?? 0).toBeGreaterThanOrEqual(1);
