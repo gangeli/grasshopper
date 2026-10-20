@@ -579,10 +579,10 @@ export class ArMode {
         if (!f || !space) return null;
         const tracked = (f as unknown as { trackedAnchors?: Set<XRAnchor> }).trackedAnchors;
         // Not tracked right now (it may come back, moved, when the tracker finds its place again).
-        if (tracked && !tracked.has(a)) return null;
-        const p = f.getPose(a.anchorSpace, space);
-        if (!p || p.emulatedPosition || !isFiniteMatrix(p.transform.matrix)) return null;
-        return Array.from(p.transform.matrix);
+        const p = tracked && !tracked.has(a) ? null : f.getPose(a.anchorSpace, space);
+        const m = !p || p.emulatedPosition || !isFiniteMatrix(p.transform.matrix) ? null : Array.from(p.transform.matrix);
+        self.recorder?.addAnchor(f.predictedDisplayTime / 1000, planeId(a), m);
+        return m;
       },
       release(h) {
         try {
