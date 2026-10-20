@@ -57,6 +57,34 @@ describe('hide-spot safety', () => {
     expect(ok(at(0.575))).toBe(true);
     g.stamp = 1;
   });
+  it('space seen empty long ago is old (it sits where an older frame put it); seen again, it is fresh', () => {
+    const cf = g.colFree!, a = nav.nearest({ x: 0.075, y: 0, z: 0 }, 0.03);
+    const ci = nav.ni[a], ck = nav.nk[a];
+    g.stamp = 200;
+    for (let dk = -1; dk <= 1; dk++) for (let di = -1; di <= 1; di++) cf[(ck + dk) * g.nx + ci + di] = 100;
+    expect(spotSafety(g, nav, a).freeAge).toBe(100);
+    expect(spotSafety(g, nav, a).freeAge > S.maxFreeAge).toBe(true);
+    // Seen empty again just now.
+    for (let dk = -1; dk <= 1; dk++) for (let di = -1; di <= 1; di++) cf[(ck + dk) * g.nx + ci + di] = 200;
+    expect(spotSafety(g, nav, a).freeAge).toBe(0);
+    // Never seen empty since the column came into the window: old.
+    cf[ck * g.nx + ci] = 0;
+    expect(spotSafety(g, nav, a).freeAge).toBe(Infinity);
+    cf.fill(0);
+    g.stamp = 1;
+  });
+  it('rays write the low-band free time of the columns they carve', () => {
+    const cf = g.colFree!;
+    cf.fill(0);
+    g.stamp = 7;
+    g.integrateRay({ x: -0.3, y: 0.15, z: -0.6 }, { x: -0.3, y: 0.15, z: 0.6 }, false);
+    expect(cf[g.cellZ(0) * g.nx + g.cellX(-0.3)]).toBe(7);
+    // Above the low band: no.
+    g.integrateRay({ x: -0.2, y: 1.2, z: -0.6 }, { x: -0.2, y: 1.2, z: 0.6 }, false);
+    expect(cf[g.cellZ(0) * g.nx + g.cellX(-0.2)]).toBe(0);
+    cf.fill(0);
+    g.stamp = 1;
+  });
   it('right next to the never-observed foot of a wall seen higher up is not', () => {
     const s = at(-0.475);
     expect(s.knownClearance).toBeLessThan(0.14);
