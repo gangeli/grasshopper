@@ -202,4 +202,41 @@ operation 0–15% of readings contradict the map; after a 30 cm frame shift
 Unit test (`test/hold.test.ts`): a silent 30 cm frame shift in a scanned
 room is held, resolved (frame error < 8 cm) and leaves no second copy.
 
+### Round 5 — hold on conflict across six homes (house-hard, 600 s)
+
+Means over the quick suite at 2× length (6 homes, 600 s, fast pans):
+
+| config | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | resets |
+|---|---|---|---|---|---|---|---|
+| hard (round-3 system) | 66.2 | 58.5 | 73.9 | 8.8 | 17.5 | 42.8 | 2.3 |
+| + hold, loop closure 0.6 m | 71.1 | 71.6 | 72.8 | 5.7 | 10.9 | 19.3 | 1.7 |
+| + tracker-jump warp | 65.3 | 62.1 | 69.8 | 8.8 | 17.4 | 35.5 | 1.7 |
+| + stale erosion 30 s | 65.0 | 42.6 | 70.8 | 12.7 | 24.9 | 34.3 | 2.0 |
+
+Hold on conflict is the clear win; warping on the tracker's own jumps and
+fast erosion of stale structure both hurt and stay off.
+
+### Round 6 — a regression, bisected
+
+A set of "obvious" tweaks (resolve a hold on a single clear-cut estimate,
+hold up to 5 s, a tighter yaw search of ±0.06 rad) took precision from 72%
+to 45%. Bisect (same suite):
+
+| config | cover% | prec% | frameErr cm | resets |
+|---|---|---|---|---|
+| all tweaks | 61.3 | 39.1 | 56.5 | 2.2 |
+| − single-estimate resolution | 60.4 | 50.0 | 35.9 | 2.5 |
+| − that, yaw ±0.12 | 71.2 | 71.4 | 31.9 | 1.5 |
+| − that, 3 s hold, no candidate persistence | **74.3** | **70.7** | **27.5** | **1.2** |
+
+Lessons: real yaw drift after a long walk exceeds 0.06 rad, and a search
+that can't express it finds a wrong translation instead; one estimate is
+not enough even when it looks clear-cut (a doubled wall gives clear-cut
+wrong answers). Kept from the round: hold resolutions that undo a pose
+jump no longer warp the map in between (a jump moves the frame at once —
+what was mapped before it is fine). Diagnostics (`la-local-diag`): around
+the player, structure seen in the last 5 s is 84% within 8 cm of the truth,
+structure last seen over a minute ago only 50% — local error is old
+structure from a drifted past, not the mapper.
+
 (continued below as rounds complete)

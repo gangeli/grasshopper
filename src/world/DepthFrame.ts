@@ -98,6 +98,9 @@ export class PoseGate {
   private last: { p: Vec3; f: Vec3; t: number } | null = null;
   private vel: Vec3 = { x: 0, y: 0, z: 0 };
   private angVel = 0;
+  /** The previous check flagged a position jump (its residual). */
+  private prevJump: { x: number; y: number; z: number } | null = null;
+  private jumpBefore: PoseGate['lastJump'] = null;
   private holdUntil = -Infinity;
   rejected = 0;
   accepted = 0;
@@ -117,6 +120,8 @@ export class PoseGate {
    * maxRotResidual + 2.5 rad/s·dt holds for holdSeconds (the original rule).
    */
   smartRotation = false;
+  /** A repeated residual is a change of speed, not a second jump (and the first was none either). */
+  speedChanges = true;
   maxAngVel = 3.2;
   constructor(readonly maxPosResidual = 0.04, readonly maxRotResidual = 0.05, readonly holdSeconds = 0.8) {}
 
@@ -125,6 +130,7 @@ export class PoseGate {
     this.last = null;
     this.vel = { x: 0, y: 0, z: 0 };
     this.angVel = 0;
+    this.prevJump = null;
   }
 
   accept(eye: Vec3, forward: Vec3, t: number, emulated = false): boolean {
@@ -140,13 +146,24 @@ export class PoseGate {
       const posRes = Math.hypot(rx, ry, rz);
       const dot = forward.x * this.last.f.x + forward.y * this.last.f.y + forward.z * this.last.f.z;
       const turned = Math.acos(Math.max(-1, Math.min(1, dot)));
-      const posJump = dt < 0.5 && posRes > this.maxPosResidual + 0.3 * dt;
+      let posJump = dt < 0.5 && posRes > this.maxPosResidual + 0.3 * dt;
+      // The same residual again: the camera changed speed (the prediction
+      // went stale), it didn't jump. Withdraw the previous "jump" too.
+      const P = this.prevJump;
+      const speedChange = this.speedChanges && posJump && P !== null && Math.hypot(rx - P.x, ry - P.y, rz - P.z) < 0.5 * Math.max(posRes, Math.hypot(P.x, P.y, P.z));
+      if (speedChange) {
+        posJump = false;
+        this.reasons.posJumps--;
+        this.lastJump = this.jumpBefore;
+      }
+      this.prevJump = posJump ? { x: rx, y: ry, z: rz } : null;
       // Hand-held phones turn fast but smoothly; a jump is a big unexplained step.
       const rotJump = dt < 0.5 && (this.smartRotation ? Math.abs(turned - this.angVel * dt) > this.maxRotResidual + 1.5 * dt : turned > this.maxRotResidual + 2.5 * dt);
       if (posJump || rotJump) {
         this.holdUntil = t + this.holdSeconds;
         if (posJump) {
           this.reasons.posJumps++;
+          this.jumpBefore = this.lastJump;
           this.lastJump = { t, dx: rx, dy: ry, dz: rz };
         } else this.reasons.rotJumps++;
       }

@@ -572,11 +572,11 @@ export class WorldModel {
     return true;
   }
 
-  /** See ingestDepthImage: hold back frames that contradict the map (off by default). */
-  holdOnConflict = false;
+  /** See ingestDepthImage: hold back frames that contradict the map (on by default). */
+  holdOnConflict = true;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */
   holdConflictRate = 0.25;
-  holdMaxSeconds = 5;
+  holdMaxSeconds = 3;
   /** Time of the first held frame, while frames are held. */
   heldSince: number | null = null;
   heldFrames = 0;

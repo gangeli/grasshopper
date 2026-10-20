@@ -32,6 +32,10 @@ export interface DriftOptions {
   loopMinAge: number;
   loopMaxShift: number;
   loopMaxYaw: number;
+  /** A first loop-closure estimate waits this long (s) for a second, agreeing one. */
+  loopPendingSeconds: number;
+  /** Resolve a hold on one clear-cut estimate (otherwise two agreeing ones, or one undoing a pose jump). */
+  holdSingle: boolean;
   loopMinPoints: number;
   /** Share of the readings that land on that older structure after the correction. */
   loopMinSupport: number;
@@ -45,7 +49,7 @@ export interface DriftOptions {
   jumpWarp: boolean;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0, loopMaxYaw: 0.06, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 0, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -241,7 +245,13 @@ export class DriftMonitor {
   }
 
   private turn = 0;
-  private pendingLoop: { m: Est; t: number; wt: number } | null = null;
+  /**
+   * A loop-closure estimate waiting for a second, agreeing one. Kept across
+   * checks that see nothing usable (old structure goes in and out of view
+   * while walking), until it is too old, the frame was corrected meanwhile,
+   * or a confident check finds the map aligned.
+   */
+  private pendingLoop: { m: Est; t: number; wt: number; corr: number } | null = null;
   /** Loop closures applied. */
   loopClosures = 0;
 
@@ -289,11 +299,12 @@ export class DriftMonitor {
       return false;
     }
     // One clear-cut estimate is enough (frames are waiting); otherwise two that agree.
-    const clearCut = !m.degenerate && m.n >= O.loopMinPoints && m.best >= 0.5 * m.n && m.best >= 3 * Math.max(m.base, 0.1 * m.n);
+    const clearCut = O.holdSingle && !m.degenerate && m.n >= O.loopMinPoints && m.best >= 0.5 * m.n && m.best >= 3 * Math.max(m.base, 0.1 * m.n);
     if (undoesJump || clearCut || (this.pendingHold && this.pendingHold.since === since && displacement(m, this.pendingHold.m) <= O.agree)) {
       w.realign(m.dx, m.dz, m.dyaw, m.pivot, since - 0.05);
       w.heldResolved();
-      if (O.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) w.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      // (A jump moved the frame at once: what was mapped before it is fine.)
+      if (O.loopWarp && !undoesJump && Number.isFinite(m.oldT) && m.oldT < since - 1) w.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
       this.pendingHold = null;
       this.corrections++;
       this.holdFixes++;
@@ -324,15 +335,17 @@ export class DriftMonitor {
         this.note(`tracker jump ${(Math.hypot(J.dx, J.dz) * 100).toFixed(0)}cm lines up with the map of ${m.oldT.toFixed(0)}s: warped ${moved} voxels mapped since`);
       }
     }
+    const P = this.pendingLoop;
+    if (P && (this.world.now - P.wt > O.loopPendingSeconds || P.corr !== this.corrections)) this.pendingLoop = null;
     if (!m) {
-      this.pendingLoop = null;
       this.note('loop: no old structure in view');
       return false;
     }
     const mag = displacement(m, null);
     const ok = !m.degenerate && m.n >= O.loopMinPoints && m.best >= O.loopMinSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n) && mag >= O.minCorrection;
     if (!ok) {
-      this.pendingLoop = null;
+      // The map clearly fits as it is: whatever was pending was wrong.
+      if (!m.degenerate && m.n >= O.loopMinPoints && m.base >= O.loopMinSupport * m.n && mag < O.minCorrection) this.pendingLoop = null;
       this.note(`loop: none (${m.degenerate ? 'degenerate ' : ''}n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm)`);
       return false;
     }
@@ -350,7 +363,7 @@ export class DriftMonitor {
       this.note(`LOOP CLOSED (map since ${m.oldT.toFixed(0)}s) ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n}`);
       return true;
     }
-    this.pendingLoop = { m, t, wt: this.world.now };
+    this.pendingLoop = { m, t, wt: this.world.now, corr: this.corrections };
     this.note(`loop candidate ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} base ${m.base}`);
     return false;
   }
