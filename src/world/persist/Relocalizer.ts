@@ -105,6 +105,8 @@ export interface RelocOptions {
    * to confirm an answer as the live map grows, at a fraction of the cost.
    */
   hint?: Pose2[];
+  /** Only the coarse search: rank stored maps by their best correlation peak (cheap at coarse cells). */
+  coarseOnly?: boolean;
   /** Distinct coarse candidates to refine. */
   candidates?: number;
   /** Acceptance thresholds (see accept()). */
@@ -452,6 +454,7 @@ export function* relocalize(
   else cands = yield* coarseSearch();
   work.coarseMs = performance.now() - tCoarse;
   if (!cands.length) return fail('no coarse peak');
+  if (opts.coarseOnly) return { ...fail('coarse only'), best: cands[0], candidates: cands.map((c) => c.pose) };
   return yield* refineAndJudge();
 
   // --- 1. coarse search ---------------------------------------------------------

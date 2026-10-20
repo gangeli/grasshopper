@@ -27,6 +27,12 @@ export interface FragmentMeta {
   prevGen: number;
   /** Observed floor area (m²), for UI and pruning. */
   area: number;
+  /**
+   * Placements in other fragments that the session which saved this one had
+   * found and verified but not yet confirmed (this fragment → other). Checked
+   * again later to stitch the two (MapMemory consolidation).
+   */
+  hints?: { fragment: string; pose: { yaw: number; tx: number; tz: number; dj?: number } }[];
 }
 
 export interface StoreIndex {
@@ -206,7 +212,7 @@ export class MapStore {
    * Save (create or replace) a fragment. Returns the new metadata, or null if
    * it couldn't be stored (the previous version, if any, is untouched).
    */
-  async save(id: string, map: ChunkedMap, info: { area: number; sessions?: number; created?: number }, encoded?: Uint8Array): Promise<FragmentMeta | null> {
+  async save(id: string, map: ChunkedMap, info: { area: number; sessions?: number; created?: number; hints?: FragmentMeta['hints'] }, encoded?: Uint8Array): Promise<FragmentMeta | null> {
     try {
       const data = encoded ?? (await encodeAsync(map));
       const old = this.index.fragments.find((f) => f.id === id);
@@ -233,6 +239,7 @@ export class MapStore {
         prevGen: old ? old.gen : -1,
         area: info.area,
       };
+      if (info.hints?.length) meta.hints = info.hints;
       const prevPrev = old?.prevGen ?? -1;
       this.index.fragments = [...this.index.fragments.filter((f) => f.id !== id), meta];
       try {

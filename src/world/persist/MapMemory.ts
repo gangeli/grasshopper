@@ -74,7 +74,7 @@ export const DEFAULT_MEMORY: MemoryOptions = {
   verifyEvery: 5,
   saveEvery: 30,
   agree: 2,
-  confirmAfter: 25,
+  confirmAfter: 15,
   confirmChecks: 3,
   undoAfter: 2,
   minSaveArea: 4,
@@ -105,6 +105,8 @@ export interface Link {
   bad: number;
   confirmed: boolean;
   last: VerifyMetrics | null;
+  /** Placement re-refined during verification (used for fusing into storage). */
+  fusePose?: Pose2;
 }
 
 interface Hypothesis {
@@ -137,6 +139,7 @@ interface Write {
   area: number;
   sessions: number;
   created?: number;
+  hints?: FragmentMeta['hints'];
   /** Serialized body (uncompressed). */
   body?: Uint8Array;
 }
@@ -291,7 +294,7 @@ export class MapMemory {
       const pair = this.nextPair();
       if (pair) {
         this.jobName = 'consolidate';
-        return this.consolidateJob(pair[0], pair[1]);
+        return this.consolidateJob(pair[0], pair[1], pair[2]);
       }
     }
     return null;
@@ -301,33 +304,46 @@ export class MapMemory {
   private nextConsolidate = 0;
   private compared = new Set<string>();
 
-  /** Two stored fragments (neither in use this session) not compared yet in their current versions. */
-  private nextPair(): [Frag, Frag] | null {
-    const idle = [...this.fragments.values()].filter((f) => f.meta.id !== this.sessionId && !this.absorbed.has(f.meta.id) && !this.links.some((l) => l.fragment === f.meta.id));
-    for (let a = 0; a < idle.length; a++)
-      for (let b = a + 1; b < idle.length; b++) {
-        const key = `${idle[a].meta.id}:${idle[a].meta.gen}|${idle[b].meta.id}:${idle[b].meta.gen}`;
+  /**
+   * A stored fragment with a hint (a placement in another stored fragment that
+   * the saving session had found and verified but not confirmed), both idle.
+   */
+  private nextPair(): [Frag, Frag, Pose2] | null {
+    const idle = (f: Frag | undefined) => !!f && f.meta.id !== this.sessionId && !this.absorbed.has(f.meta.id) && !this.links.some((l) => l.fragment === f.meta.id);
+    for (const X of this.fragments.values()) {
+      if (!idle(X)) continue;
+      for (const h of X.meta.hints ?? []) {
+        const Y = this.fragments.get(h.fragment);
+        if (!idle(Y) || Y === X) continue;
+        const key = `${X.meta.id}:${X.meta.gen}|${Y!.meta.id}:${Y!.meta.gen}`;
         if (this.compared.has(key)) continue;
         this.compared.add(key);
-        return [idle[a], idle[b]];
+        return [X, Y!, { dj: 0, ...h.pose }];
       }
+    }
     return null;
   }
 
   /**
-   * Two stored fragments of the same place (sessions that never recognised
-   * it) become one. Stricter than a live restore — no live check follows:
-   * the search must agree from both sides, with a clear margin, and the
-   * walls (or several pieces of furniture) must pin the placement.
+   * Two stored fragments of the same place become one: a session found X's
+   * place in Y live (agreeing looks, verified) but ended before confirming.
+   * The hinted placement is re-checked between the two stored maps from both
+   * sides, and must hold up with stricter margins than a live restore (no
+   * live check follows). Never a blind search between stored maps: a
+   * same-shaped room elsewhere has nothing to contradict it there.
    */
-  private *consolidateJob(X: Frag, Y: Frag): Job {
+  private *consolidateJob(X: Frag, Y: Frag, hint: Pose2): Job {
     const ix = yield* this.fragIndex(X), iy = yield* this.fragIndex(Y);
-    const r1: RelocResult = yield* relocalize({ features: ix.features, lookup: ix.lookup }, iy, this.opts.reloc);
+    const r1: RelocResult = yield* relocalize({ features: ix.features, lookup: ix.lookup }, iy, { ...this.opts.reloc, hint: [hint] });
     const m = r1.best?.metrics;
-    if (!r1.accepted || !r1.best || !m || r1.ambiguity > 0.5 || (m.wallWeak < 80 && m.lowObjects < 3)) return;
+    if (!r1.accepted || !r1.best || !m || m.inlier < 0.93 || (m.wallWeak < 80 && m.lowObjects < 3)) {
+      this.log(`not stitching ${X.meta.id} into ${Y.meta.id}: ${r1.reason}${m ? ` (inlier ${m.inlier.toFixed(2)})` : ''}`);
+      return;
+    }
+    if (poseDelta(r1.best.pose, hint).dist > 0.15) return;
     const back = invertPose(r1.best.pose);
-    const r2: RelocResult = yield* relocalize({ features: iy.features, lookup: iy.lookup }, ix, { ...this.opts.reloc, hint: [back, ...r1.candidates.slice(1).map(invertPose)] });
-    if (!r2.accepted || !r2.best) return;
+    const r2: RelocResult = yield* relocalize({ features: iy.features, lookup: iy.lookup }, ix, { ...this.opts.reloc, hint: [back] });
+    if (!r2.accepted || !r2.best || (r2.best.metrics?.inlier ?? 0) < 0.93) return;
     const d = poseDelta(r2.best.pose, back);
     if (d.dist > 0.1 || d.dyaw > 0.035) return;
     // Keep the bigger fragment's frame; fold the other one in.
@@ -424,8 +440,11 @@ export class MapMemory {
     // The bookkeeping may have been re-based meanwhile (then this is stale).
     if (tr !== this.tracker) return null;
     this.evidence = { t: this.now, map: e };
+    this.lastGrid = g;
     return e;
   }
+  /** The live grid (with restored maps) as of the last evidence computation. */
+  private lastGrid: ChunkedMap | null = null;
 
   private computeEvidence(): ChunkedMap | null {
     return runToEnd(this.evidenceGen());
@@ -471,7 +490,11 @@ export class MapMemory {
     const live = yield* this.liveSearchData(e);
     const at = live.features.bbox ? { x: (live.features.bbox.x0 + live.features.bbox.x1) / 2, z: (live.features.bbox.z0 + live.features.bbox.z1) / 2 } : { x: 0, z: 0 };
     const size = this.source!.observedColumns();
-    const picks = unlinked.filter((f) => this.isDue(f, size)).sort((a, b) => a.lastTried - b.lastTried).slice(0, this.opts.perAttempt);
+    // Placements being confirmed first, then the least recently tried (bigger maps first).
+    const due = unlinked
+      .filter((f) => this.isDue(f, size))
+      .sort((a, b) => Number(this.hyps.has(b.meta.id)) - Number(this.hyps.has(a.meta.id)) || a.lastTried - b.lastTried || b.meta.area - a.meta.area);
+    const picks = due.slice(0, this.opts.perAttempt);
     for (const f of picks) {
       f.lastTried = this.now;
       if (!this.hyps.has(f.meta.id)) {
@@ -554,6 +577,16 @@ export class MapMemory {
       const furnN = m.lowN + m.bwdLowN, furnBad = (m.lowConf + m.bwdLowConf) / Math.max(1, furnN);
       if (m.inlier < 0.75 || (furnN >= 100 && furnBad > 0.35)) return `contradicts restored ${l.fragment} (inlier ${m.inlier.toFixed(2)})`;
     }
+    // And against the live map as it is now, restored rooms included: what
+    // was restored (and verified) extends the evidence a new placement has to
+    // fit — the walls and doorways around the room, not just the room itself.
+    if (this.links.length && this.lastGrid) {
+      const g = this.lastGrid;
+      const gIndex = new FragmentIndex(yield* extractFeaturesGen(g), yield* FragmentLookup.create(g));
+      const m = verifyPose({ features: index.features, lookup: index.lookup }, gIndex, invertPose(pose));
+      const furnN = m.lowN + m.bwdLowN, furnBad = (m.lowConf + m.bwdLowConf) / Math.max(1, furnN);
+      if (m.fwdKnown >= 300 && (m.inlier < 0.85 || (furnN >= 100 && furnBad > 0.35))) return `contradicts the live map with restored rooms (inlier ${m.inlier.toFixed(2)})`;
+    }
     return null;
   }
 
@@ -590,6 +623,13 @@ export class MapMemory {
       const index = yield* this.fragIndex(f);
       const m = verifyPose(live, index, link.pose);
       link.last = m;
+      // Track slow drift between the session and the stored map: the
+      // placement used when this session's observations are folded in.
+      const r = yield* relocalize(live, index, { ...this.opts.reloc, hint: [link.fusePose ?? link.pose] });
+      if (r.best) {
+        const d = poseDelta(r.best.pose, link.pose);
+        if (d.dist < 0.1 && d.dyaw < 0.035) link.fusePose = r.best.pose;
+      }
       const conf = m.fwdConf + m.bwdConf + m.freeConf;
       const ok = m.inlier >= 0.75 && conf < Math.max(80, 0.2 * (m.fwdHit + m.bwdHit));
       if (ok) {
@@ -670,19 +710,24 @@ export class MapMemory {
       for (const Q of confirmed.slice(1)) {
         const qf = this.fragments.get(Q.fragment);
         if (!qf) continue;
-        const T = composePose(P.pose, invertPose(Q.pose)); // Q → live → P
+        const T = composePose(P.fusePose ?? P.pose, invertPose(Q.fusePose ?? Q.pose)); // Q → live → P
         map = yield* fuseEvidenceGen(map, yield* transformMapGen(qf.map, T, map));
         deletes.push(Q.fragment);
         this.absorbed.add(Q.fragment);
       }
-      map = yield* fuseEvidenceGen(map, yield* transformMapGen(e, P.pose, map));
+      map = yield* fuseEvidenceGen(map, yield* transformMapGen(e, P.fusePose ?? P.pose, map));
       const first = !this.sessionCounted.has(P.fragment);
       this.sessionCounted.add(P.fragment);
       writes.push({ id: P.fragment, map, area: observedColumns(map) * map.res * map.res, sessions: pf.meta.sessions + (first ? 1 : 0), created: pf.meta.created });
       if (this.ownSaved) deletes.push(this.sessionId);
     } else {
       const area = observedColumns(e) * e.res * e.res;
-      if (area >= this.opts.minSaveArea) writes.push({ id: this.sessionId, map: e, area, sessions: 1 });
+      if (area >= this.opts.minSaveArea) {
+        // Placements found and verified but not confirmed yet: kept as hints
+        // for stitching this fragment into those later.
+        const hints = this.links.filter((l) => !l.confirmed && l.good >= 1 && l.bad === 0).map((l) => ({ fragment: l.fragment, pose: l.pose }));
+        writes.push({ id: this.sessionId, map: e, area, sessions: 1, hints });
+      }
     }
     if (!writes.length && !deletes.length) return;
     // Serialize here, in slices; compression and storage are asynchronous.
@@ -695,7 +740,7 @@ export class MapMemory {
     for (const wr of writes) {
       const t0 = performance.now();
       const encoded = wr.body ? await packBody(wr.body) : undefined;
-      const meta = await store.save(wr.id, wr.map, { area: wr.area, sessions: wr.sessions, created: wr.created }, encoded);
+      const meta = await store.save(wr.id, wr.map, { area: wr.area, sessions: wr.sessions, created: wr.created, hints: wr.hints }, encoded);
       if (!meta) {
         this.status.lastError = store.lastError;
         this.log(`save failed: ${store.lastError}`);
