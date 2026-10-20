@@ -52,6 +52,14 @@ export interface HideOptions {
   /** Minimum distance (m) to structure not observed for `staleSeconds` (s): it sits where an older, possibly drifted frame put it. */
   minStaleClearance?: number;
   staleSeconds?: number;
+  /**
+   * Maximum age (s) of the "seen empty" evidence where the pet's body goes
+   * (VoxelGrid.colFree: when the low band of the spot's columns was last
+   * carved). Old free space sits where an older, possibly drifted frame put
+   * it: the inside of a sofa can be "seen empty" from a minute ago.
+   * Infinity = off.
+   */
+  maxFreeAge?: number;
 }
 
 /**
@@ -72,9 +80,9 @@ export interface HideOptions {
  * structure keeps the plain 15cm: a margin from everything pushes spots out
  * into the open (Hopper visibly less hidden in the single-room game tests).
  */
-export const DEFAULT_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.8, minKnownClearance: 0.14, minStaleClearance: 0.2, staleSeconds: 30 };
+export const DEFAULT_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.8, minKnownClearance: 0.14, minStaleClearance: 0.2, staleSeconds: 30, maxFreeAge: Infinity };
 /** Fallback when no spot passes DEFAULT_SPOT_SAFETY (better a slightly riskier spot than no game). */
-export const RELAXED_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.6, minKnownClearance: 0.1, minStaleClearance: 0.15, staleSeconds: 30 };
+export const RELAXED_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.6, minKnownClearance: 0.1, minStaleClearance: 0.15, staleSeconds: 30, maxFreeAge: Infinity };
 
 /**
  * Distances (m, capped at 0.3) from nav node `a` to the nearest solid voxel
@@ -82,7 +90,7 @@ export const RELAXED_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.6, minKn
  * something seen higher up (unknown: neither seen empty nor solid — e.g. the
  * base of a blank wall), and the share of its body voxels seen empty.
  */
-export function spotSafety(g: VoxelGrid, nav: NavGrid, a: number, staleSeconds = 30): { clearance: number; staleClearance: number; knownClearance: number; seenFree: number } {
+export function spotSafety(g: VoxelGrid, nav: NavGrid, a: number, staleSeconds = 30): { clearance: number; staleClearance: number; knownClearance: number; seenFree: number; freeAge: number } {
   const p = nav.pos(a);
   const ci = nav.ni[a], ck = nav.nk[a], j0 = g.cellY(p.y + 0.001);
   const sh = g.updateShadow();
@@ -90,13 +98,18 @@ export function spotSafety(g: VoxelGrid, nav: NavGrid, a: number, staleSeconds =
   // Occupied voxels whose occupancy evidence is older than this time code are
   // "stale" (see VoxelGrid.hitTime; grids without hit times have none).
   const ht = g.hitTime, staleBefore = g.stamp - staleSeconds;
-  let best = R * R + 1, bestS = R * R + 1, bestU = R * R + 1, seen = 0, total = 0;
+  let best = R * R + 1, bestS = R * R + 1, bestU = R * R + 1, seen = 0, total = 0, freeAge = 0;
+  const cf = g.colFree;
   for (let dk = -R; dk <= R; dk++)
     for (let di = -R; di <= R; di++) {
       const d2 = di * di + dk * dk;
       const body = d2 <= 1;
       if (d2 >= best && d2 >= bestS && d2 >= bestU && !body) continue;
       const i = ci + di, k = ck + dk;
+      if (body && cf && i >= 0 && k >= 0 && i < g.nx && k < g.nz) {
+        const c = cf[k * g.nx + i];
+        freeAge = Math.max(freeAge, c ? g.stamp - c : Infinity);
+      }
       // Unknown space counts only at the foot of something seen higher up
       // (the base of a wall or sofa the depth never measured): the space
       // behind furniture is often never observed either, and that is where
@@ -126,7 +139,7 @@ export function spotSafety(g: VoxelGrid, nav: NavGrid, a: number, staleSeconds =
       }
     }
   const m = (d2: number) => Math.min(Math.sqrt(d2), R) * g.res;
-  return { clearance: m(best), staleClearance: m(bestS), knownClearance: m(bestU), seenFree: total ? seen / total : 0 };
+  return { clearance: m(best), staleClearance: m(bestS), knownClearance: m(bestU), seenFree: total ? seen / total : 0, freeAge };
 }
 
 /** Body sample points of a crouched pet standing at `p` (relative offsets). */
@@ -294,7 +307,7 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     // are open from above.
     if (cls.kind === 'inside' && cls.covered) continue;
     const safe = spotSafety(g, nav, a, S.staleSeconds);
-    if (safe.clearance < S.minClearance - 1e-6 || safe.staleClearance < S.minStaleClearance - 1e-6 || safe.knownClearance < S.minKnownClearance - 1e-6 || safe.seenFree < S.minSeenFree) continue;
+    if (safe.clearance < S.minClearance - 1e-6 || safe.staleClearance < S.minStaleClearance - 1e-6 || safe.knownClearance < S.minKnownClearance - 1e-6 || safe.seenFree < S.minSeenFree || safe.freeAge > S.maxFreeAge) continue;
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
     const pts = samplesAt(p, offs, cls.openYaw);

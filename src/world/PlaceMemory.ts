@@ -220,11 +220,13 @@ export class PlaceMemory {
   }
 
   /** Move submaps whose frames fall in [t0, t1] by their share of a correction (see WorldModel.warpSince). */
-  warp(t0: number, t1: number, corrAt: (t: number) => [number, number, number, number], pivot: { x: number; z: number }): void {
+  warp(t0: number, t1: number, corrAt: (t: number) => [number, number, number, number] | null, pivot: { x: number; z: number }): void {
     for (const s of this.submaps) {
       const tm = (s.t0 + s.t1) / 2;
       if (tm < t0 || tm > t1) continue;
-      const [cs, sn, tx, tz] = corrAt(tm);
+      const e = corrAt(tm);
+      if (!e) continue;
+      const [cs, sn, tx, tz] = e;
       this.transform(s, cs, sn, tx, tz, pivot);
     }
   }

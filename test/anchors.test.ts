@@ -125,6 +125,47 @@ describe('submaps glued to anchors', () => {
   });
 });
 
+describe('anchors bring a dormant map back', () => {
+  it('re-attaches the map put aside after a jump when two anchors agree where it went', () => {
+    const src = new StubAnchors();
+    const w = world(src);
+    for (let t = 0; t < 15; t++) frame(w, t, 0, 0, t === 5 ? { x: 1.025, z: 0.025 } : undefined);
+    for (let t = 15; t < 30; t++) frame(w, t, 1, 0);
+    w.detachMap();
+    expect(w.dormant).not.toBeNull();
+    // The tracker came back in a frame moved by +0.4 m in x and later merged its old map: anchors moved with it.
+    src.shift(1, 0.4, 0);
+    frame(w, 31, 1.4, 0);
+    expect(w.reattaches).toBe(0); // one anchor is not enough
+    src.shift(2, 0.4, 0);
+    frame(w, 32, 1.4, 0);
+    expect(w.reattaches).toBe(1);
+    expect(w.anchorReattaches).toBe(1);
+    const p = w.toMapPoint({ x: 1.425, y: 0.5, z: 0.025 });
+    expect(p.x).toBeCloseTo(1.025, 3);
+    expect(p.z).toBeCloseTo(0.025, 3);
+    w.loadPending();
+    expect(occ(w, 1.025, 0.025)).toBe(80);
+    // Afterwards the anchors read as unmoved: nothing more happens.
+    for (let t = 33; t < 36; t++) frame(w, t, 1.4, 0);
+    expect(w.submapWarps).toBe(0);
+  });
+
+  it('does not re-attach when the anchors disagree', () => {
+    const src = new StubAnchors();
+    const w = world(src);
+    for (let t = 0; t < 15; t++) frame(w, t, 0, 0);
+    for (let t = 15; t < 30; t++) frame(w, t, 1, 0);
+    for (let t = 30; t < 45; t++) frame(w, t, 2, 0);
+    w.detachMap();
+    src.shift(1, 0.4, 0);
+    src.shift(2, -0.5, 0.3);
+    src.shift(3, 0, 0.6);
+    frame(w, 46, 2, 0);
+    expect(w.reattaches).toBe(0);
+  });
+});
+
 describe('simulated anchors', () => {
   it('follow the tracker: unchanged while it drifts, moved by a loop closure, back after a merged jump', () => {
     const house = generateHouse(1, 10, 12);

@@ -118,6 +118,8 @@ export interface LargeAreaSample {
    * that follows the tracker's corrections can be consistent and off the truth.)
    */
   windowPrecision?: number;
+  /** Walkable area the live nav graph has within 3 m of the player (m², every 6 s): what the pet can use near the player. */
+  localNavM2?: number;
   localOldShare: number;
   /**
    * Hopper's paths near the player, walked in reality through the current
@@ -252,7 +254,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   let frameErrMax = 0, walked = 0, spawned = false;
   let abPeak = 0;
   let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
-  let nodeTested = 0, nodeHit = 0, nodeDeep = 0, ffShell = 0, ffBad = 0, hideTested = 0, hideBad = 0, winOcc = 0, winGood = 0;
+  let nodeTested = 0, nodeHit = 0, nodeDeep = 0, ffShell = 0, ffBad = 0, hideTested = 0, hideBad = 0, winOcc = 0, winGood = 0, nearSum = 0, nearN = 0;
   const hideRng = new Rng(seed * 7 + 5);
   const pathRng = new Rng(seed * 13 + 1);
   const churnRng = new Rng(seed * 31 + 7);
@@ -422,6 +424,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       if (f % 30 === 0) frameErrMax = Math.max(frameErrMax, frameError(world, sensor, step.cam));
       if (f % 180 === 90 && world.grid && game.nav && game.nav.g === world.grid && game.nav.count > 50) {
         const lc = localPathCollisions(world, game.nav, sensor, room, step.cam, 12, pathRng);
+        nearSum += lastNearNodes * 3 * world.res * world.res;
+        nearN++;
         pathTested += lc.tested;
         pathHit += lc.colliding;
         nodeTested += lc.nodesTested;
@@ -474,10 +478,11 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         s.localNodeDeep = nodeTested ? nodeDeep / nodeTested : 0;
         s.localFalseFree = ffShell ? ffBad / ffShell : 0;
         s.windowPrecision = winOcc ? winGood / winOcc : 1;
+        s.localNavM2 = nearN ? nearSum / nearN : 0;
         s.hideTested = hideTested;
         s.hideBad = hideBad;
         localSum = ghostSum = localN = oldGood = oldOcc = recGood = recOcc = pathTested = pathHit = 0;
-        nodeTested = nodeHit = nodeDeep = ffShell = ffBad = hideTested = hideBad = winOcc = winGood = 0;
+        nodeTested = nodeHit = nodeDeep = ffShell = ffBad = hideTested = hideBad = winOcc = winGood = nearSum = nearN = 0;
         samples.push(s);
         log(fmtSample(s));
       }
@@ -629,6 +634,8 @@ export function localPrecision(world: WorldModel, sensor: SimSensor, room: SimRo
   return { precision: occ ? good / occ : 1, ghostM2: ghostCols * (g.res * 2) ** 2, occ, good, oldOcc, oldGood };
 }
 
+/** Nav nodes (every 3rd) within 3m of the player at the last localPathCollisions call. */
+let lastNearNodes = 0;
 /** Random nav paths between nodes within 3m of the player, checked against reality through the current frame. */
 function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor, room: SimRoom, cam: SimCamera, n: number, rng: Rng): { tested: number; colliding: number; nodesTested: number; nodesColliding: number; nodesDeep: number } {
   const M = mapToTruth(world, sensor);
@@ -638,6 +645,7 @@ function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor,
     const q = nav.pos(a);
     if (Math.hypot(q.x - cm.x, q.z - cm.z) < 3) near.push(a);
   }
+  lastNearNodes = near.length;
   if (near.length < 20) return { tested: 0, colliding: 0, nodesTested: 0, nodesColliding: 0, nodesDeep: 0 };
   let nodesTested = 0, nodesColliding = 0, nodesDeep = 0;
   for (let q = 0; q < 40; q++) {

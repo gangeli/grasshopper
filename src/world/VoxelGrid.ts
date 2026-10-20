@@ -79,6 +79,14 @@ export class VoxelGrid {
    * was mapped during a drift (`last`). Null on grid copies that don't need it.
    */
   hitTime: Uint32Array | null = null;
+  /**
+   * Per column (k·nx + i): time code (as `stamp`) when a ray last carved
+   * free space in the low band (layers below `freeBandTop`), where the pet
+   * walks and hides: how recently that space was seen empty from the
+   * current frame. 0 = not since the column entered the window. Null: off.
+   */
+  colFree: Uint16Array | null = null;
+  freeBandTop = 0;
   /** Time code written by hits (whole seconds since the session started, from 1). */
   stamp = 1;
   /**
@@ -268,6 +276,7 @@ export class VoxelGrid {
     const r = this.res, o = this.origin;
     const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
     const hits = this.staleAfter > 0 ? this.hitTime : null;
+    const colFree = this.colFree, band = this.freeBandTop, stampNow = this.stamp;
     const shielded = this.shieldedCarving;
     const staleStamp = this.stamp - this.staleAfter, staleMiss = Math.min(-1, missDelta) * this.staleMissGain;
     let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
@@ -295,6 +304,7 @@ export class VoxelGrid {
         data[q] = nv;
         this.touch(q);
         if (cls(v) !== cls(nv)) this.version++;
+        if (colFree !== null && j < band && nv < 0) colFree[k * nx + i] = stampNow;
         if (shield) break;
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {

@@ -217,6 +217,8 @@ export class HealthMonitor {
   private checkDrift() {
     const w = this.world;
     this.checkSelfDetach();
+    // The map came back by itself (its anchors found it again, see WorldModel.reattachByAnchors).
+    if (w.reattaches !== this.seenReattaches && !this.drift.busy) this.onRealigned();
     const wasInEvent = this.drift.inEvent;
     const fixed = this.drift.update(this.t);
     const verdict = wasInEvent && !this.drift.inEvent && !fixed ? this.drift.eventVerdict() : null;

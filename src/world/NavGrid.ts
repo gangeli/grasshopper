@@ -49,6 +49,13 @@ export interface NavParams {
    */
   staleMargin: number;
   staleSeconds: number;
+  /**
+   * Floor whose low band was last seen empty more than this many seconds ago
+   * (VoxelGrid.colFree) isn't walkable: old free space sits where an older,
+   * possibly drifted frame put it (the inside of a sofa "seen empty" from a
+   * minute ago). Columns back from the archive count as old. 0 = off.
+   */
+  freeMaxAge: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
@@ -67,6 +74,7 @@ export const DEFAULT_NAV: NavParams = {
   footSolid: false,
   staleMargin: 0,
   staleSeconds: 30,
+  freeMaxAge: 0,
 };
 
 export interface Waypoint {
@@ -692,7 +700,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     const n0 = candI.length;
     const keep = new Uint8Array(n0);
     // (A grid copy in the worker has no hit times: the client sends the columns.)
-    const stale = p.staleMargin > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleSeconds) : null) : null;
+    const stale = p.staleMargin > 0 || p.freeMaxAge > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleSeconds, p.freeMaxAge) : null) : null;
     const rs = stale ? Math.round(p.staleMargin / r) : 0;
     const wd = new Float32Array(n0);
     for (let q = 0; q < n0; q++) {
@@ -736,13 +744,15 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
             if (!support) ok = false;
           }
         }
+      // Old free space (see NavParams.freeMaxAge): not walkable.
+      if (ok && stale && p.freeMaxAge > 0 && j === floorTopJ && stale[k * nx + i] & 2) ok = false;
       // Stale structure (see NavParams.staleMargin) keeps the pet further away.
-      if (ok && stale && j === floorTopJ)
+      if (ok && stale && p.staleMargin > 0 && j === floorTopJ)
         for (let dk = -rs; dk <= rs && ok; dk++)
           for (let di = -rs; di <= rs; di++) {
             const ii = i + di, kk = k + dk;
             if (di * di + dk * dk > rs * rs || ii < 0 || kk < 0 || ii >= nx || kk >= nz) continue;
-            if (stale[kk * nx + ii]) {
+            if (stale[kk * nx + ii] & 1) {
               ok = false;
               break;
             }
@@ -850,9 +860,18 @@ function inferLowFree(g: VoxelGrid, T: Uint8Array, floorLayer: number, maxCells:
   }
 }
 
-/** Columns with occupied voxels at body height (up to 25cm) whose evidence is older than `seconds` (VoxelGrid.hitTime). */
-export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number): Uint8Array {
+/**
+ * Per column: bit 1 = occupied voxels at body height (up to 25cm) whose
+ * evidence is older than `seconds` (VoxelGrid.hitTime); bit 2 (with
+ * freeMaxAge > 0) = its low band was last seen empty longer ago than that
+ * (VoxelGrid.colFree; 0 = never, not old).
+ */
+export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number, freeMaxAge = 0): Uint8Array {
   const layer = g.nx * g.nz, out = new Uint8Array(layer), ht = g.hitTime!, before = g.stamp - seconds;
+  if (freeMaxAge > 0 && g.colFree) {
+    const cf = g.colFree, fb = g.stamp - freeMaxAge;
+    for (let c = 0; c < layer; c++) if (cf[c] !== 0 && cf[c] < fb) out[c] = 2;
+  }
   const top = Math.min(g.ny - 1, floorLayer + Math.round(0.25 / g.res));
   for (let j = floorLayer; j <= top; j++) {
     const base = j * layer;

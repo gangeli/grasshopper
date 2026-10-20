@@ -190,6 +190,7 @@ export class WorldModel {
       nz: n,
     });
     this.grid.hitTime = new Uint32Array(this.grid.data.length);
+    this.grid.colFree = new Uint16Array(n * n);
     this.grid.stamp = this.timeCode(this.now);
     // The below-floor layers are solid everywhere; whether you may *walk* there
     // is governed by the observed mask.
@@ -611,6 +612,12 @@ export class WorldModel {
       // of then (sm.reg) goes where the current registration puts it now.
       const reg = this.anchorRegNow ? this.t2m : sm.reg;
       const C = mul4(mul4(this.t2m, M), invertRigid4(reg));
+      if (sm.dormant) {
+        // Its content was put aside (a jump nobody could undo). The tracker
+        // found its old map again: the anchor says where that map is now.
+        this.dormantVotes.set(sm, { C, at: { x: reg[0] * R[12] + reg[4] * R[13] + reg[8] * R[14] + reg[12], z: reg[2] * R[12] + reg[6] * R[13] + reg[10] * R[14] + reg[14] } });
+        continue;
+      }
       const yaw = Math.atan2(C[8], C[0]), cs = Math.cos(yaw), sy = Math.sin(yaw);
       // Voxels move by whole cells: apply the anchor's shift rounded to the
       // grid and keep the rest for later (small moves must add up, not be lost).
@@ -631,7 +638,71 @@ export class WorldModel {
       this.anchorQueue.push({ s: sm, c: [cs, sy, C[12] - rx, C[14] - rz], codeMax: code - 1 });
     }
     this.anchorPoll = n ? (this.anchorPoll + polls) % n : 0;
+    if (this.dormantVotes.size && this.dormant) this.reattachByAnchors();
     if (this.anchorQueue.length && !this.warpTask) this.startAnchorWarp();
+  }
+
+  /** Moves reported by anchors of dormant submaps (map-frame correction, anchor position in the old map). */
+  private dormantVotes = new Map<SubmapAnchor, { C: number[]; at: { x: number; z: number } }>();
+  /** Re-attachments from anchors (diagnostics). */
+  anchorReattaches = 0;
+  /** Anchors needed to agree before the dormant map comes back on their word. */
+  anchorReattachVotes = 2;
+  /**
+   * The dormant map comes back where its anchors say it is now, when enough
+   * of them agree (each moves the others' anchor points to within 10 cm) and
+   * at least two thirds of those that reported do.
+   */
+  private reattachByAnchors(): void {
+    const votes = [...this.dormantVotes.values()];
+    if (votes.length < this.anchorReattachVotes) return;
+    const apply = (C: number[], p: { x: number; z: number }) => ({ x: C[0] * p.x + C[8] * p.z + C[12], z: C[2] * p.x + C[10] * p.z + C[14] });
+    let best: (typeof votes)[number] | null = null, bestN = 0;
+    for (const v of votes) {
+      let n = 0;
+      for (const u of votes) {
+        let ok = true;
+        for (const p of [v.at, u.at]) {
+          const a = apply(v.C, p), b = apply(u.C, p);
+          if (Math.hypot(a.x - b.x, a.z - b.z) > 0.1) ok = false;
+        }
+        if (ok) n++;
+      }
+      if (n > bestN) (bestN = n), (best = v);
+    }
+    if (!best || bestN < this.anchorReattachVotes || bestN * 3 < votes.length * 2) return;
+    // reattach takes the map from current coordinates to the dormant map's: the inverse of C.
+    const C = best.C, yaw = Math.atan2(C[8], C[0]), cs = Math.cos(yaw), sn = Math.sin(yaw);
+    this.anchorReattaches++;
+    this.reattach({ dx: -cs * C[12] + sn * C[14], dz: -sn * C[12] - cs * C[14], dyaw: -yaw, pivot: { x: 0, y: 0, z: 0 } });
+  }
+
+  /**
+   * When a submap moves, the free space it carved stays behind (free voxels
+   * carry no time): low-band free space in window columns last seen empty
+   * during a moving submap goes back to unknown, to be seen again from the
+   * current frame before the pet walks or hides there.
+   */
+  anchorForgetFree = false;
+  private forgetFreeOf(corrOf: (code: number) => Affine2 | null): void {
+    const g = this.grid;
+    if (!g || !g.colFree) return;
+    const cf = g.colFree, layer = g.nx * g.nz, j0 = this.floorLayer, j1 = Math.min(g.ny, g.freeBandTop || j0 + 9);
+    let n = 0;
+    for (let c = 0; c < layer; c++) {
+      const code = cf[c];
+      if (code <= 1 || !corrOf(code)) continue;
+      cf[c] = 0;
+      for (let j = j0; j < j1; j++) {
+        const q = j * layer + c;
+        if (g.data[q] < 0) g.data[q] = 0;
+      }
+      n++;
+    }
+    if (n) {
+      g.touchAll();
+      g.version++;
+    }
   }
 
   /** Move the submaps whose anchors moved (one pass; a submap queued twice waits for the next). */
@@ -645,7 +716,10 @@ export class WorldModel {
     this.anchorQueue = rest;
     let code0 = 65535, code1 = 0;
     for (const [sm, b] of batch) (code0 = Math.min(code0, sm.code0)), (code1 = Math.max(code1, b.codeMax));
-    if (code1 < code0) return;
+    if (code1 < code0) {
+      for (const sm of batch.keys()) sm.moving = false;
+      return;
+    }
     const subs = this.submaps;
     const corrOf = (code: number): Affine2 | null => {
       // The submap holding this code (submaps are in time order).
@@ -661,6 +735,7 @@ export class WorldModel {
       return b && code <= b.codeMax ? b.c : null;
     };
     this.submapWarps++;
+    if (this.anchorForgetFree) this.forgetFreeOf(corrOf);
     const it = this.warpPass(code0, code1, corrOf, this.timeOf(code0), this.timeOf(code1 + 1));
     const self = this;
     this.warpTask = (function* () {
@@ -759,6 +834,7 @@ export class WorldModel {
       this.grid.stamp = this.timeCode(t);
       this.grid.staleAfter = this.forgetStaleAfter;
       this.grid.shieldedCarving = this.shieldedCarving;
+      this.grid.freeBandTop = this.floorLayer + Math.round(0.45 / this.res);
       this.grid.fadeBelowNew = this.fadeBelowNew;
       this.grid.fadeFloorJ = this.floorLayer;
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
@@ -871,6 +947,9 @@ export class WorldModel {
       for (let a = 0; a < W; a++) for (let b = 0; b < W; b++) this.archive.defer(g, this.wi, this.wk, this.wi / C + a, this.wk / C + b, this.floorLayer, this.now);
       this.placeMemory?.close();
       this.dormant = { archive: this.archive, places: this.placeMemory ?? new PlaceMemory(), t: this.now };
+      // What the submaps laid down is in the dormant map now: their anchors can bring it back (see stepAnchors).
+      for (const sm of this.submaps) sm.dormant = true;
+      this.dormantVotes.clear();
       this.archive = new ChunkStore();
       if (this.placeMemory) this.placeMemory = new PlaceMemory();
     } else {
@@ -934,6 +1013,12 @@ export class WorldModel {
     T[14] = o[1];
     this.applyRegistration(T);
     this.recoveries.realign--; // (applyRegistration counts one; this is a reattach)
+    // Submaps: the dormant ones are back as they were; what the fresh ones laid down is replayed through T.
+    for (const sm of this.submaps) {
+      if (sm.dormant) sm.dormant = false;
+      else sm.reg = mul4(T, sm.reg);
+    }
+    this.dormantVotes.clear();
     this.rebuildAtFloor(this.floorY);
     this.floorRefinements--;
     this.requeueArchived();
@@ -1448,6 +1533,7 @@ export class WorldModel {
       unders.push(under);
       return true;
     };
+    this.warpPhase = 'start';
     // Right away (before the passes below are spread over frames): recovery
     // copies predate the warp (restoring one would undo it); buffered frames
     // from the interval move with what they mapped (replays then land where
@@ -1463,14 +1549,16 @@ export class WorldModel {
       [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
       for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
     }
-    this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)) ?? [1, 0, 0, 0], { x: 0, z: 0 });
+    this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)), { x: 0, z: 0 });
     // Chunks still coming back into the window, or still being archived from
     // an earlier window, must be where the passes below look (a few per step).
+    this.warpPhase = 'loads';
     while (this.pendingLoads.length) {
       this.loadPending(2);
       yield;
     }
     while (this.archive.step(2)) yield;
+    this.warpPhase = 'window';
     // Pass 1a: the window.
     const gh = g.hitTime;
     for (let j = fl; j < ny; j++, yield)
@@ -1484,6 +1572,7 @@ export class WorldModel {
             g.underside[q] = 0;
           }
         }
+    this.warpPhase = 'archive';
     // Pass 1b: archived chunks with hits in the interval (dense hit times while being edited).
     const dense = new Map<number, { cx: number; cz: number; ch: StoredChunk; hit: Uint32Array }>();
     const denseOf = (cx: number, cz: number, ch: StoredChunk) => {
@@ -1537,6 +1626,7 @@ export class WorldModel {
       const li = (J * C + (K - cz * C)) * C + (I - cx * C);
       if (ch.data[li] < 0) ch.data[li] = 0;
     };
+    this.warpPhase = 'write';
     // Pass 2: write the movers where they belong (the stronger evidence wins).
     const m = vals.length;
     for (let q = 0; q < m; q++) {
@@ -1572,6 +1662,7 @@ export class WorldModel {
       if (tops[q] !== 255) (ch.topFrac ??= new Uint8Array(n).fill(255))[li] = tops[q];
       if (unders[q]) (ch.underside ??= new Uint8Array(n))[li] |= unders[q];
     }
+    this.warpPhase = 'sparse';
     // Back to sparse hit times.
     for (const { ch, hit } of dense.values()) {
       yield;
@@ -1585,6 +1676,8 @@ export class WorldModel {
     g.version++;
     return m;
   }
+  /** The part of a warp in progress (diagnostics). */
+  warpPhase = '';
   /** Warp by when structure was laid down (birth) rather than when it was last seen. */
   warpByBirth = true;
   /** Moving structure forgets the free space between where it was and where it goes (see warpPass). */
@@ -1629,7 +1722,7 @@ export class WorldModel {
     // copyWithin each, no per-row views.)
     const di = newWi - oldWi, dk = newWk - oldWk, fl = FLOOR_LAYERS_BELOW;
     const n = old.data.length;
-    const shifted = <A extends Int8Array | Uint8Array | Uint32Array>(a: A, dst: A, layers: number, fill: (j: number) => number): A => {
+    const shifted = <A extends Int8Array | Uint8Array | Uint16Array | Uint32Array>(a: A, dst: A, layers: number, fill: (j: number) => number): A => {
       shiftCopy(a, dst, old.nx, old.nz, layers, di, dk, fill);
       return dst;
     };
@@ -1643,6 +1736,8 @@ export class WorldModel {
       },
     );
     g.hitTime = shifted(old.hitTime ?? new Uint32Array(n), this.takeSpare('hitTime', n, () => new Uint32Array(n)), old.ny, () => 0);
+    // (Columns entering from the archive: seen empty long ago, if ever.)
+    g.colFree = old.colFree ? shifted(old.colFree, new Uint16Array(old.nx * old.nz), 1, () => 1) : null;
     g.stamp = old.stamp;
     const entering: [number, number][] = [];
     for (let a = 0; a < W; a++)
@@ -1956,6 +2051,7 @@ export class WorldModel {
       if (old.hitTime && g.hitTime) g.hitTime.set(old.hitTime.subarray(jo * layer, (jo + 1) * layer), j * layer);
     }
     g.observed.set(old.observed);
+    if (old.colFree && g.colFree) g.colFree.set(old.colFree);
     g.touchAll();
     g.version++;
     this.floorWatch.fill(0);
@@ -2799,4 +2895,6 @@ export interface SubmapAnchor {
   state: 'pending' | 'live' | 'paused' | 'lost' | 'failed';
   /** A correction for it is queued or being applied. */
   moving?: boolean;
+  /** What it laid down is in the dormant map (WorldModel.detachMap). */
+  dormant?: boolean;
 }
