@@ -79,8 +79,13 @@ export interface HideOptions {
  * all 5.4% → 6.9% (the game then relaxes to RELAXED_SPOT_SAFETY). Fresh
  * structure keeps the plain 15cm: a margin from everything pushes spots out
  * into the open (Hopper visibly less hidden in the single-room game tests).
+ * And the body's space must have been seen empty in the last minute
+ * (maxFreeAge, VoxelGrid.colFree): free space seen longer ago sits where an
+ * older, possibly drifted frame put it — the inside of a sofa "seen empty"
+ * from across the room minutes ago. Same ten homes: spots inside furniture
+ * 2.2% → 0.4% (paired −1.9 ± 0.4 points), rounds with no spot 6.0 → 6.3%.
  */
-export const DEFAULT_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.8, minKnownClearance: 0.14, minStaleClearance: 0.2, staleSeconds: 30, maxFreeAge: Infinity };
+export const DEFAULT_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.8, minKnownClearance: 0.14, minStaleClearance: 0.2, staleSeconds: 30, maxFreeAge: 60 };
 /** Fallback when no spot passes DEFAULT_SPOT_SAFETY (better a slightly riskier spot than no game). */
 export const RELAXED_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.6, minKnownClearance: 0.1, minStaleClearance: 0.15, staleSeconds: 30, maxFreeAge: Infinity };
 

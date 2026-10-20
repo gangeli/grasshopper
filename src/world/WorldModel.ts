@@ -191,6 +191,7 @@ export class WorldModel {
     });
     this.grid.hitTime = new Uint32Array(this.grid.data.length);
     this.grid.colFree = new Uint16Array(n * n);
+    this.grid.freeBandTop = FLOOR_LAYERS_BELOW + Math.round(0.45 / r);
     this.grid.stamp = this.timeCode(this.now);
     // The below-floor layers are solid everywhere; whether you may *walk* there
     // is governed by the observed mask.
@@ -1582,9 +1583,15 @@ export class WorldModel {
       const e = corrFor(this.timeCode(f.t));
       if (!e) continue;
       const [cs, sn, ax, az] = e;
-      const fix = (x: number, z: number): [number, number] => [cs * x + sn * z + ax, -sn * x + cs * z + az];
-      [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
-      for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
+      const ex = f.eye.x, ez = f.eye.z;
+      f.eye.x = cs * ex + sn * ez + ax;
+      f.eye.z = -sn * ex + cs * ez + az;
+      const P = f.pts;
+      for (let q = 0; q < P.length; q += 3) {
+        const x = P[q], z = P[q + 2];
+        P[q] = cs * x + sn * z + ax;
+        P[q + 2] = -sn * x + cs * z + az;
+      }
     }
     this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)), { x: 0, z: 0 });
     // Chunks still coming back into the window, or still being archived from
@@ -1777,6 +1784,7 @@ export class WorldModel {
     g.hitTime = shifted(old.hitTime ?? new Uint32Array(n), this.takeSpare('hitTime', n, () => new Uint32Array(n)), old.ny, () => 0);
     // (Columns entering from the archive: seen empty long ago, if ever.)
     g.colFree = old.colFree ? shifted(old.colFree, new Uint16Array(old.nx * old.nz), 1, () => 1) : null;
+    g.freeBandTop = old.freeBandTop;
     g.subX = old.subX ? shifted(old.subX, new Int8Array(n), old.ny, () => 0) : null;
     g.subZ = old.subZ ? shifted(old.subZ, new Int8Array(n), old.ny, () => 0) : null;
     g.stamp = old.stamp;
