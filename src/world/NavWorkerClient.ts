@@ -1,4 +1,4 @@
-import { NavGrid, type NavArrays, type NavParams, type NavWorldInfo } from './NavGrid';
+import { NavGrid, staleColumns, type NavArrays, type NavParams, type NavWorldInfo } from './NavGrid';
 import type { VoxelGrid } from './VoxelGrid';
 
 /**
@@ -31,6 +31,8 @@ export interface NavBuildRequest {
   shadow: Uint8Array | null;
   /** Dynamic obstacles as [cell, expiry, cell, expiry, ...]. */
   transient: Float64Array;
+  /** Columns with stale structure at body height (NavParams.staleMargin), or null. */
+  stale: Uint8Array | null;
   world: NavWorldInfo;
   params: NavParams;
 }
@@ -170,11 +172,13 @@ export class NavWorkerClient {
       topFrac: take(g.topFrac, 'topFrac'),
       shadow,
       transient: Float64Array.from(tr),
+      stale: nav.p.staleMargin > 0 && g.hitTime ? staleColumns(g, nav.world.floorLayer, nav.p.staleSeconds) : null,
       world: { floorLayer: nav.world.floorLayer, floorY: nav.world.floorY, depthPoints: nav.world.depthPoints },
       params: { ...nav.p },
     };
     const transfer: Transferable[] = [req.data.buffer, req.observed.buffer, req.underside.buffer, req.topFrac.buffer, req.transient.buffer] as ArrayBuffer[];
     if (shadow) transfer.push(shadow.buffer as ArrayBuffer);
+    if (req.stale) transfer.push(req.stale.buffer as ArrayBuffer);
     try {
       this.worker.postMessage(req, transfer);
     } catch {

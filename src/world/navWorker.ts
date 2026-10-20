@@ -24,7 +24,7 @@ ctx.onmessage = (e) => {
     g.loadTransient(q.transient);
     if (q.shadow) g.adoptShadow(q.shadow, -1);
     const colStart = new Int32Array(q.nx * q.nz), colCount = new Uint8Array(q.nx * q.nz);
-    const res = computeNav(g, q.world, q.params, colStart, colCount, scratch);
+    const res = computeNav(g, q.world, q.params, colStart, colCount, scratch, q.stale);
     const shadow = g.shadow!;
     const out: NavBuildResponse = { kind: 'nav', id: q.id, ok: true, res, shadow, data: q.data, observed: q.observed, underside: q.underside, topFrac: q.topFrac };
     const transfer = [res.ni, res.nk, res.ny, res.headroom, res.wallDist, res.edgeFlag, res.colStart, res.colCount, shadow, q.data, q.observed, q.underside, q.topFrac].map((a) => a.buffer as ArrayBuffer);

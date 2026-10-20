@@ -30,6 +30,7 @@ let nodes = 0, bad = 0, spotsN = 0, spotsBad = 0, openN = 0;
 const ageBins = new Map<string, { n: number; bad: number }>();
 const distBins = new Map<string, { n: number; bad: number }>();
 const openLabels = new Map<string, number>();
+const objStats = new Map<string, number>();
 const spotWhy = new Map<string, number>();
 const rng = new Rng(3);
 const mul = (A: ArrayLike<number>, B: ArrayLike<number>) => {
@@ -102,6 +103,13 @@ runLargeArea({
       openN++;
       const o = objectNear(objs, q);
       if (o) openLabels.set(o.label, (openLabels.get(o.label) ?? 0) + 1);
+      if (o && process.env.OBJ) {
+        // What is it in reality? Real furniture within 10cm of its footprint centre?
+        const c = xf(M, { x: (o.min.x + o.max.x) / 2, y: world.floorY + 0.05, z: (o.min.z + o.max.z) / 2 });
+        const real = room.solidAt({ x: c.x, y: Math.min(0.3, (o.max.y - o.min.y) / 2), z: c.z }, 0.1);
+        const key = `${o.label} h${((o.max.y - o.min.y) * 100).toFixed(0)}cm cols ${o.columns} ${real ? 'REAL' : 'phantom'}`;
+        objStats.set(key, (objStats.get(key) ?? 0) + 1);
+      }
     }
     // Hide spots the game would pick from here.
     const eye = world.toMapPoint({ x: T[0] * p.x + T[4] * p.y + T[8] * p.z + T[12], y: T[1] * p.x + T[5] * p.y + T[9] * p.z + T[13], z: T[2] * p.x + T[6] * p.y + T[10] * p.z + T[14] });
@@ -180,3 +188,4 @@ console.log('hide spots by walk since their cover was last seen:');
 for (const [k, v] of [...ageBins.entries()].sort()) console.log(`  ${k.padEnd(16)} ${v.n} spots, ${v.bad} inside furniture (${((v.bad / Math.max(1, v.n)) * 100).toFixed(1)}%)`);
 console.log('hide spots by distance to the nearest mapped obstacle at body height:');
 for (const [k, v] of [...distBins.entries()].sort()) console.log(`  ${k.padEnd(16)} ${v.n} spots, ${v.bad} inside furniture (${((v.bad / Math.max(1, v.n)) * 100).toFixed(1)}%)`);
+if (process.env.OBJ) for (const [k, v] of [...objStats.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25)) console.log(`  obj ${k.padEnd(40)} ${v}`);

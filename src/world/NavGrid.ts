@@ -35,6 +35,20 @@ export interface NavParams {
    * carves the bottom layers. 0 = off.
    */
   inferLowFree: number;
+  /**
+   * Never-observed space at body height (up to 25cm) under a tall solid face
+   * seen higher up in the same column (see footSolid()) blocks, even when
+   * some seen-empty space lies between (the shadow rule needs none): the
+   * unmeasured base of a blank wall, of a sofa. Off = shadow rule only.
+   */
+  footSolid: boolean;
+  /**
+   * Extra clearance (m) from structure at body height not observed for
+   * `staleSeconds`: it sits where an older, possibly drifted frame put it.
+   * Needs the grid's hit times (VoxelGrid.hitTime); 0 = off.
+   */
+  staleMargin: number;
+  staleSeconds: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
@@ -50,6 +64,9 @@ export const DEFAULT_NAV: NavParams = {
   minPlatform: 0.12,
   seenFreeMin: 2,
   inferLowFree: 0,
+  footSolid: false,
+  staleMargin: 0,
+  staleSeconds: 30,
 };
 
 export interface Waypoint {
@@ -595,7 +612,7 @@ export interface NavWorldInfo {
  * floor, so it can also run on a copy of the grid in a worker. Writes
  * colStart/colCount in place.
  */
-export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colStart: Int32Array, colCount: Uint8Array, scratch: NavScratch): NavArrays {
+export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colStart: Int32Array, colCount: Uint8Array, scratch: NavScratch, staleCols: Uint8Array | null = null): NavArrays {
     const r = g.res;
     const floorTopJ = world.floorLayer - 1;
     const rad = Math.ceil(p.radius / r);
@@ -617,6 +634,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     // queried (bumping the grid version), so the first query still goes there.
     const nx = g.nx, ny = g.ny, nz = g.nz;
     const T = columnMask(g, sh, scratch);
+    if (p.footSolid && world.depthPoints > 0) footSolid(g, T, world.floorLayer);
     if (p.inferLowFree > 0 && world.depthPoints > 0) inferLowFree(g, T, world.floorLayer, Math.round(p.inferLowFree / g.res));
     const inb = (i: number, j: number, k: number) => i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz;
     const solid = (i: number, j: number, k: number) => {
@@ -673,6 +691,9 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     // Pass 2: clearance and support filtering.
     const n0 = candI.length;
     const keep = new Uint8Array(n0);
+    // (A grid copy in the worker has no hit times: the client sends the columns.)
+    const stale = p.staleMargin > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleSeconds) : null) : null;
+    const rs = stale ? Math.round(p.staleMargin / r) : 0;
     const wd = new Float32Array(n0);
     for (let q = 0; q < n0; q++) {
       const i = candI[q], k = candK[q], j = candJ[q];
@@ -715,6 +736,17 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
             if (!support) ok = false;
           }
         }
+      // Stale structure (see NavParams.staleMargin) keeps the pet further away.
+      if (ok && stale && j === floorTopJ)
+        for (let dk = -rs; dk <= rs && ok; dk++)
+          for (let di = -rs; di <= rs; di++) {
+            const ii = i + di, kk = k + dk;
+            if (di * di + dk * dk > rs * rs || ii < 0 || kk < 0 || ii >= nx || kk >= nz) continue;
+            if (stale[kk * nx + ii]) {
+              ok = false;
+              break;
+            }
+          }
       // With depth sensing, most of the body's footprint must have been seen
       // empty: unseen space (e.g. a pot hidden under foliage) isn't trusted.
       if (ok && requireSeen && total > 0 && seen < total * p.knownFreeMin) ok = false;
@@ -815,6 +847,44 @@ function inferLowFree(g: VoxelGrid, T: Uint8Array, floorLayer: number, maxCells:
       }
     }
     for (let j = floorLayer; j < top; j++) T[o + j] |= 2 | 8;
+  }
+}
+
+/** Columns with occupied voxels at body height (up to 25cm) whose evidence is older than `seconds` (VoxelGrid.hitTime). */
+export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number): Uint8Array {
+  const layer = g.nx * g.nz, out = new Uint8Array(layer), ht = g.hitTime!, before = g.stamp - seconds;
+  const top = Math.min(g.ny - 1, floorLayer + Math.round(0.25 / g.res));
+  for (let j = floorLayer; j <= top; j++) {
+    const base = j * layer;
+    for (let c = 0; c < layer; c++) if (g.data[base + c] > OCC_THRESHOLD && (ht[base + c] & 0xffff) < before) out[c] = 1;
+  }
+  return out;
+}
+
+/**
+ * NavParams.footSolid on the column mask: a solid face whose lowest
+ * measured voxel is at most 1m up and that is at least 15cm tall — a wall
+ * seen only higher up, a sofa, a bookshelf — not a table top or a seat
+ * (thin, with room under it).
+ */
+function footSolid(g: VoxelGrid, T: Uint8Array, floorLayer: number): void {
+  const ny = g.ny, layer = g.nx * g.nz, band = floorLayer + Math.round(0.25 / g.res);
+  const low = Math.min(ny - 1, floorLayer + Math.round(1.0 / g.res)), tall = 3;
+  for (let c = 0; c < layer; c++) {
+    const o = c * ny;
+    let above = false;
+    for (let j = band + 1; j <= low; j++)
+      if (T[o + j] & 4) {
+        let run = 0;
+        while (j + run < ny && T[o + j + run] & 4) run++;
+        above = run >= tall;
+        break;
+      }
+    if (!above) continue;
+    for (let j = floorLayer; j <= band; j++) {
+      const b = T[o + j];
+      if (!(b & (1 | 2 | 4))) T[o + j] = b | 1; // never observed: solid
+    }
   }
 }
 

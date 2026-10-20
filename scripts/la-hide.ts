@@ -3,8 +3,8 @@
 // near the player) under each policy in POLICIES, scored in reality through
 // the current frame: spots whose crouched pet is inside real furniture, and
 // how often a policy finds no spot at all.
-// Usage: npx tsx scripts/la-hide.ts [WxD] [seed] [seconds] [profile]   (env EVERY, WALK, WORLD, NOISE, POLICIES=json, JSON=out)
-import { generateHouse } from '../src/sim/House';
+// Usage: npx tsx scripts/la-hide.ts [WxD] [seed] [seconds] [profile]   (env EVERY, WALK, WORLD, NOISE, MOVE, DARK, POLICIES=json, JSON=out)
+import { darkenFurniture, generateHouse } from '../src/sim/House';
 import { hideCorePenetration, runLargeArea } from '../src/sim/largeArea';
 import { NavGrid } from '../src/world/NavGrid';
 import { findHideSpots, type HideOptions } from '../src/game/HideSpots';
@@ -16,6 +16,7 @@ const seed = Number(process.argv[3] ?? 1);
 const seconds = Number(process.argv[4] ?? 600);
 const prof = (process.argv[5] ?? 'house-hard') as NoiseName;
 const house = generateHouse(seed, w, d);
+if (process.env.DARK) darkenFurniture(house.room, Number(process.env.DARK), seed);
 const POLICIES: Record<string, Partial<HideOptions>> = JSON.parse(process.env.POLICIES ?? '{"none":{"minClearance":0,"minSeenFree":0},"default":{}}');
 const res: Record<string, { rounds: number; none: number; spots: number; bad: number; kinds: Record<string, number> }> = {};
 for (const k of Object.keys(POLICIES)) res[k] = { rounds: 0, none: 0, spots: 0, bad: 0, kinds: {} };
@@ -40,6 +41,7 @@ runLargeArea({
   evalEvery: Number(process.env.EVERY ?? 10),
   walk: JSON.parse(process.env.WALK ?? '{"panSpeed":[2,5],"glanceRate":0.15}'),
   setup: (world) => Object.assign(world, JSON.parse(process.env.WORLD ?? '{}')),
+  moveFurniture: process.env.MOVE ? JSON.parse(process.env.MOVE) : undefined,
   inspect: ({ world, sensor, cam, room }) => {
     if (!world.grid) return;
     const nav = new NavGrid(world);

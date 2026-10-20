@@ -456,3 +456,19 @@ class MinHeap {
     return top;
   }
 }
+
+/**
+ * Harder homes: furniture in dark fabric or finish (60% depth dropout, more
+ * noise; densified depth fills it from what's around it). Each piece of the
+ * listed kinds goes dark with probability `share`.
+ */
+export function darkenFurniture(room: SimRoom, share: number, seed: number, kinds = ['couch', 'bed', 'bookshelf', 'crate', 'chair', 'table', 'plant', 'basket']): number {
+  const rng = new Rng(seed * 6007 + 17);
+  let n = 0;
+  for (const pc of room.pieces)
+    if (kinds.includes(pc.label) && rng.chance(share)) {
+      for (const b of pc.boxes) if (b.material !== 'glass') b.material = 'dark';
+      n++;
+    }
+  return n;
+}

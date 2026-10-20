@@ -1,4 +1,4 @@
-import { generateHouse } from '../src/sim/House';
+import { darkenFurniture, generateHouse } from '../src/sim/House';
 import { MethodProfiler } from '../src/sim/profile';
 import { HideAndSeek } from '../src/game/HideAndSeek';
 import { Companion } from '../src/game/Companion';
@@ -13,13 +13,15 @@ import { NOISE_PROFILES, type NoiseName } from '../src/sim/SimSensor';
 // Large-area mapping benchmark: one walk through a multi-room home.
 // Usage: npx tsx scripts/large-area.ts [WxD=10x12] [seed=1] [seconds=300] [profile=house]
 // Env: JSON=path (write the report), EVERY (metric interval s), DEPTH_EVERY, WALK (JSON walk options),
-//      NOISE (JSON overrides of the profile), WORLD (JSON world-model fields), NOGAME=1, CAMERA=1, QUIET=1
+//      NOISE (JSON overrides of the profile), WORLD (JSON world-model fields), NOGAME=1, CAMERA=1, QUIET=1, DARK=share
 const [w, d] = (process.argv[2] ?? '10x12').split('x').map(Number);
 const seed = Number(process.argv[3] ?? 1);
 const seconds = Number(process.argv[4] ?? 300);
 const prof = (process.argv[5] ?? 'house') as NoiseName;
 const noise = { ...NOISE_PROFILES[prof], ...JSON.parse(process.env.NOISE ?? '{}') };
 const house = generateHouse(seed, w, d);
+// DARK=share: that share of the furniture in dark fabric/finish (harder depth).
+if (process.env.DARK) darkenFurniture(house.room, Number(process.env.DARK), seed);
 const t0 = performance.now();
 // PROF=1: per-method timings (inclusive) of the main-thread work.
 const profiler = process.env.PROF ? new MethodProfiler() : null;

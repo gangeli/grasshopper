@@ -92,6 +92,97 @@ baseline over the ten homes:
 It costs coverage and precision and buys nothing measurable for the pet.
 Off (`staleFreeDecay = 0`).
 
+### 4. Fading free space below a newborn surface: mixed, off
+
+A surface that just became solid (a new one, or an old one seen again from
+a drifted frame) makes the free space below it in its column suspect: it
+was seen before this surface was known. `VoxelGrid.fadeBelowNew` scales
+that free belief (0: back to unknown, so it must be seen empty again;
+under an observed top unknown counts as solid). Paired, ten homes:
+
+| arm | cover | prec | local | localFF | pathColl (whole map) | locPath | hideBad |
+|---|---|---|---|---|---|---|---|
+| to unknown | −1.3 ± 0.5 | −4.5 ± 1.8 | −1.4 ± 0.6 | −0.7 ± 1.0 | **−8.1 ± 2.3** | −0.5 ± 0.7 | −0.1 ± 1.0 |
+| halve | −1.1 ± 0.4 | −4.7 ± 2.0 | −1.4 ± 0.6 | −0.9 ± 0.8 | **−7.5 ± 2.4** | −0.7 ± 0.4 | −0.9 ± 0.5 |
+
+Whole-map pet paths through furniture drop from 28% to 20% (the stale
+free space under old copies of tables and sofas goes), but obstacle
+precision drops 4.5 points (unknown voxels turn occupied on a noisy hit or
+two where old free evidence used to absorb them) and nothing changes
+around the player, where the pet actually walks. Off; worth revisiting
+with a cleaner trigger.
+
+### 5. Hide spots that keep clear of uncertain structure (commit fe9de04, on)
+
+What makes a hide spot put the pet inside furniture (`la-petcoll`, two
+homes, a spot every 10 s): mostly walls and bookshelves, 2–5 cm deep, with
+the map either *unknown* at the penetrating point (the foot of a blank wall
+never measured) or confidently free (an old, shifted copy). By the distance
+from the spot to the nearest mapped obstacle at body height: < 12.5 cm 31%
+bad, 12.5–17.5 cm 10%, 17.5–25 cm 4%; by the walk since the cover was last
+seen: < 5 m 6%, 20–60 m 17%.
+
+`scripts/la-hide-batch.ts` runs the game's hide-spot search under several
+policies on the same walks (every 15 s, seeker at the camera, as the game
+relaxes cover when nothing qualifies), scored in reality through the
+current frame. Ten homes, house-hard, 600 s:
+
+| policy | no spot at all % | spots with the pet inside furniture % | homes with any |
+|---|---|---|---|
+| none (round 2) | 5.4 | 4.4 | 10/10 |
+| 15 cm from solid, 14 cm from the unmeasured foot of structure, body 80% seen empty | 6.9 | 3.0 | 10/10 |
+| + 20 cm from structure not seen for 30 s (**default**) | 6.9 | 2.1 | 10/10 |
+| + 25 cm from structure not seen for 30 s | 6.9 | 1.2 | 5/10 |
+| (15 s instead of 30 s: same) | | | |
+| 20 cm from all solid, 14 cm from any never-observed space (earlier variant) | 7.7 | 0.9 | 8/10 |
+
+The stricter variants fail single-room game tests: a margin from
+everything (or 25 cm from structure a single-room game already counts as
+stale) pushes spots into the open, and Hopper is visibly less hidden
+(`room r31`: core body 33% visible at seek start; the hard-mode sneak
+scenario finds no nearby standing spot Hopper is hidden from). The default
+keeps every game test unchanged and passing. When no spot passes at any
+level of cover, the game falls back to `RELAXED_SPOT_SAFETY` before giving
+up.
+
+Harder: the same walks with 70% of the furniture in dark fabric/finish
+(`DARK=0.7`: 60% depth dropout, filled by densification) and two pieces
+moved every minute in rooms the walker isn't in (`MOVE={"every":60,"n":2}`):
+
+| policy | no spot at all % | spots with the pet inside furniture % | homes with any |
+|---|---|---|---|
+| none | 3.5 | 3.8 | 10/10 |
+| default | 5.0 | 2.4 | 6/10 |
+
+### 6. Nav: the never-measured foot of walls and sofas blocks (on)
+
+Where a nav node puts the pet inside furniture (`la-petcoll`), the map at
+the penetrating point is mostly *unknown*: the bottom 25 cm of a blank wall,
+a bookshelf or a sofa front that depth never measured, often with a little
+seen-empty space between it and the part seen higher up, so the shadow rule
+(unknown under an observed top is solid) doesn't apply. The nav graph
+allows nodes with up to half the body unseen, so the pet walks right up to
+(and a few cm into) such bases. `NavParams.footSolid`: never-observed space
+at body height under a solid face that starts low (its lowest measured
+voxel ≤ 50 cm up) and is at least 15 cm tall counts as solid. (A first
+version that took anything seen higher up, table tops included, removed the
+walkable space under tables in the single-room tests.)
+
+| ten homes, house-hard, paired vs round-2 nav | cover | pathColl (whole map) | locPath | locNode | hideBad |
+|---|---|---|---|---|---|
+| foot rule, any structure above (first version) | −1.4 ± 0.3 | −7.0 ± 2.0 | −1.5 ± 0.6 | −0.2 ± 0.1 | +0.1 ± 0.4 |
+| foot rule, low tall faces only (**default**) | REFINED | | | | |
+| 70% of the body seen empty instead of 50% | −2.6 ± 0.5 | −3.9 ± 2.0 | −1.4 ± 0.6 | −0.3 ± 0.1 | +0.9 ± 0.4 |
+
+Mapping is unchanged (nav-only rules): precision, falseFree and frame
+error are identical.
+
+### 7. Warping on the tracker's own loop closures: still worse
+
+`DRIFT={"jumpWarp":true}` (round 5's "tracker-jump warp") with this
+round's metrics, paired: coverage −0.9 ± 0.2, precision −2.1 ± 1.0, local
+precision −1.3 ± 0.5, pet safety unchanged. Off.
+
 ## Persistent tracking jumps (house-jumps)
 
 ### What the post-loss checks see, labelled with the truth

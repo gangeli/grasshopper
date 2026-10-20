@@ -142,12 +142,16 @@ function classify(o: WorldObject, world: WorldModel): string {
 /**
  * The object whose footprint is nearest to p (within `pad`). Footprint cells,
  * not bounding boxes: an L-shaped run of walls has a box covering half the
- * room, which made open floor "near the shelf".
+ * room, which made open floor "near the shelf". Objects lower than
+ * `minHeight` aren't named: in a long walk with a drifting tracker most of
+ * them are phantoms — the leftover base of an old, shifted copy of a sofa,
+ * a floor bump — and open floor got called "beside the box" (16% of the open
+ * floor near the player in a 14×16 home; every one a phantom).
  */
-export function objectNear(objects: WorldObject[], p: Vec3, pad = 0.25): WorldObject | null {
+export function objectNear(objects: WorldObject[], p: Vec3, pad = 0.25, minHeight = 0.2): WorldObject | null {
   let best: WorldObject | null = null, bd = Infinity;
   for (const o of objects) {
-    if (o.label === 'wall') continue;
+    if (o.label === 'wall' || o.max.y - o.min.y < minHeight) continue;
     const dx = Math.max(o.min.x - p.x, 0, p.x - o.max.x);
     const dz = Math.max(o.min.z - p.z, 0, p.z - o.max.z);
     if (Math.hypot(dx, dz) >= pad) continue; // cheap reject on the box

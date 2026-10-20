@@ -43,7 +43,8 @@ await new Promise<void>((done) => {
       });
     }
   };
-  launch();
+  if (!runs.length) done();
+  else launch();
 });
 const order = new Map(runs.map((r, i) => [r.name, i]));
 results.sort((a, b) => order.get(a.name)! - order.get(b.name)!);

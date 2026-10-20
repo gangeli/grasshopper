@@ -27,6 +27,8 @@ describe('hide-spot safety', () => {
       const wall = x > -0.65 && x < -0.55, open = x < -0.85;
       for (let j = fl; j < fl + 24; j++) g.set(i, j, k, x > 0.7 ? (j < fl + 8 ? 100 : -10) : (wall || open) && j < fl + 6 ? 0 : wall && j >= fl + 8 ? 100 : -10);
     }
+  // (Nav without its own rule for the foot of structure, to put nodes right next to it.)
+  world.navParams = { footSolid: false };
   const nav = new NavGrid(world);
   const at = (x: number): ReturnType<typeof spotSafety> => {
     const a = nav.nearest({ x, y: 0, z: 0 }, 0.03);

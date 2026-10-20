@@ -50,3 +50,37 @@ describe('inferring the empty space just above observed floor', () => {
     expect(nodeAt(w, 0.3, 0.3)).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe('the never-measured foot of structure seen higher up (NavParams.footSolid)', () => {
+  const setup = () => {
+    const world = new WorldModel({ halfExtent: 2 });
+    world.followCamera = false;
+    world.setFloor(0, { x: 0, y: 0, z: 0 });
+    world.depthPoints = 1;
+    const g = world.grid!, fl = world.floorLayer;
+    for (let k = g.cellZ(-0.6); k <= g.cellZ(0.6); k++)
+      for (let i = g.cellX(-0.6); i <= g.cellX(0.6); i++) {
+        g.markObserved(g.centerX(i), g.centerZ(k));
+        const wall = g.centerX(i) > 0.2 && g.centerX(i) < 0.3;
+        // Open floor seen empty; a "wall" seen from 40cm up with some
+        // seen-empty space below that (so no shadow) and its foot never measured.
+        for (let j = fl; j < fl + 24; j++) g.set(i, j, k, !wall ? -10 : j < fl + 6 ? 0 : j < fl + 8 ? -10 : 100);
+      }
+    return world;
+  };
+  const nodeAt = (world: WorldModel, x: number) => {
+    const nav = new NavGrid(world), g = world.grid!;
+    return nav.colCount[g.cellZ(0) * g.nx + g.cellX(x)] - 1;
+  };
+  it('off: the pet may stand right against it', () => {
+    const w = setup();
+    w.navParams = { footSolid: false };
+    expect(nodeAt(w, 0.125)).toBeGreaterThanOrEqual(0);
+  });
+  it('on: it keeps its clearance from it, and open floor is unaffected', () => {
+    const w = setup();
+    w.navParams = { footSolid: true };
+    expect(nodeAt(w, 0.125)).toBeLessThan(0);
+    expect(nodeAt(w, -0.2)).toBeGreaterThanOrEqual(0);
+  });
+});
