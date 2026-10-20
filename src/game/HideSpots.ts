@@ -2,7 +2,7 @@ import type { Vec3 } from '../core/math';
 import { Rng } from '../core/rng';
 import { NavGrid, NAV_NONE } from '../world/NavGrid';
 import { objectNear, type WorldObject } from '../world/Segmentation';
-import type { VoxelGrid } from '../world/VoxelGrid';
+import { OCC_THRESHOLD, type VoxelGrid } from '../world/VoxelGrid';
 
 /**
  * Hiding-spot search. A candidate spot is any reachable nav node. It is scored
@@ -40,6 +40,93 @@ export interface HideOptions {
   minHiddenNow?: number;
   /** Body sample offsets of the actual hiding poses (pet facing +Z), see measurePoseSamples. */
   poseSamples?: { hide: Vec3[]; hideLow: Vec3[] };
+  /**
+   * Spot safety (see spotSafety): minimum distance (m) from the spot to
+   * anything solid at body height, and the share of the crouched body's
+   * voxels that must have been seen empty. Defaults: DEFAULT_SPOT_SAFETY.
+   */
+  minClearance?: number;
+  minSeenFree?: number;
+  /** Minimum distance (m) to space never observed at body height under structure seen higher up (a blank wall's unmeasured base). */
+  minKnownClearance?: number;
+  /** Minimum distance (m) to structure not observed for `staleSeconds` (s): it sits where an older, possibly drifted frame put it. */
+  minStaleClearance?: number;
+  staleSeconds?: number;
+}
+
+/**
+ * Hiding spots hug cover, and cover is where the map is least sure of
+ * itself: a wall or sofa remembered from minutes ago sits wherever the
+ * camera's frame put it then, often 10–20cm from where it is now, and the
+ * base of a blank wall or a dark sofa is often never measured at all. In the
+ * large-area benchmark (drifting tracker) the spots that put the pet inside
+ * furniture were within ~15cm of mapped structure, or right next to space
+ * never observed at body height at the foot of something seen higher up.
+ * So: keep 15cm to anything solid, 20cm to structure not seen for 30s, 14cm
+ * to the never-observed foot of structure, and require the body's own space
+ * to have been seen empty. (The nav graph only needs 10cm of clearance and
+ * half the body seen empty: fine for walking past, not for parking the pet
+ * there for a whole round.) Ten homes, house-hard, the same walks: hide
+ * spots with the pet inside furniture 4.4% → 2.1%, rounds with no spot at
+ * all 5.4% → 6.9% (the game then relaxes to RELAXED_SPOT_SAFETY). Fresh
+ * structure keeps the plain 15cm: a margin from everything pushes spots out
+ * into the open (Hopper visibly less hidden in the single-room game tests).
+ */
+export const DEFAULT_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.8, minKnownClearance: 0.14, minStaleClearance: 0.2, staleSeconds: 30 };
+/** Fallback when no spot passes DEFAULT_SPOT_SAFETY (better a slightly riskier spot than no game). */
+export const RELAXED_SPOT_SAFETY = { minClearance: 0.15, minSeenFree: 0.6, minKnownClearance: 0.1, minStaleClearance: 0.15, staleSeconds: 30 };
+
+/**
+ * Distances (m, capped at 0.3) from nav node `a` to the nearest solid voxel
+ * at body height and to the nearest voxel never observed there under
+ * something seen higher up (unknown: neither seen empty nor solid — e.g. the
+ * base of a blank wall), and the share of its body voxels seen empty.
+ */
+export function spotSafety(g: VoxelGrid, nav: NavGrid, a: number, staleSeconds = 30): { clearance: number; staleClearance: number; knownClearance: number; seenFree: number } {
+  const p = nav.pos(a);
+  const ci = nav.ni[a], ck = nav.nk[a], j0 = g.cellY(p.y + 0.001);
+  const sh = g.updateShadow();
+  const R = Math.ceil(0.3 / g.res);
+  // Occupied voxels whose occupancy evidence is older than this time code are
+  // "stale" (see VoxelGrid.hitTime; grids without hit times have none).
+  const ht = g.hitTime, staleBefore = g.stamp - staleSeconds;
+  let best = R * R + 1, bestS = R * R + 1, bestU = R * R + 1, seen = 0, total = 0;
+  for (let dk = -R; dk <= R; dk++)
+    for (let di = -R; di <= R; di++) {
+      const d2 = di * di + dk * dk;
+      const body = d2 <= 1;
+      if (d2 >= best && d2 >= bestS && d2 >= bestU && !body) continue;
+      const i = ci + di, k = ck + dk;
+      // Unknown space counts only at the foot of something seen higher up
+      // (the base of a wall or sofa the depth never measured): the space
+      // behind furniture is often never observed either, and that is where
+      // hiding spots are.
+      let under = -1;
+      for (let j = j0 + 1; j <= j0 + 3; j++) {
+        if (!g.inBounds(i, j, k)) continue;
+        const n = g.idx(i, j, k), v = g.data[n];
+        if (body) {
+          total++;
+          if (v <= -2) seen++;
+        }
+        if (v >= 10 || sh[n] === 1 || g.isTransient(n)) {
+          best = Math.min(best, d2);
+          if (ht && v > OCC_THRESHOLD && (ht[n] & 0xffff) < staleBefore) bestS = Math.min(bestS, d2);
+        } else if (v > -2 && d2 < bestU) {
+          if (under < 0) {
+            under = 0;
+            for (let jj = j0 + 4; jj <= j0 + 30 && jj < g.ny; jj++)
+              if (g.data[g.idx(i, jj, k)] > OCC_THRESHOLD) {
+                under = 1;
+                break;
+              }
+          }
+          if (under) bestU = d2;
+        }
+      }
+    }
+  const m = (d2: number) => Math.min(Math.sqrt(d2), R) * g.res;
+  return { clearance: m(best), staleClearance: m(bestS), knownClearance: m(bestU), seenFree: total ? seen / total : 0 };
 }
 
 /** Body sample points of a crouched pet standing at `p` (relative offsets). */
@@ -177,6 +264,8 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
   if (start === NAV_NONE) return [];
   const { cost } = nav.search(start, NAV_NONE, opts.maxPathCost);
   const rng = opts.rng;
+  const S = { ...DEFAULT_SPOT_SAFETY };
+  for (const k of Object.keys(S) as (keyof typeof S)[]) if (opts[k] !== undefined) S[k] = opts[k]!;
 
   // Stage 1: cheap filter — reachable, hidden from the seeker right now.
   type Cand = { a: number; p: Vec3; hiddenNow: number; pre: number; cls: ReturnType<typeof classifySpot>; pts: Vec3[] };
@@ -204,6 +293,8 @@ export function findHideSpots(nav: NavGrid, petPos: Vec3, seekerEye: Vec3, opts:
     // fabric that depth couldn't see). Real "inside" spots — baskets, boxes —
     // are open from above.
     if (cls.kind === 'inside' && cls.covered) continue;
+    const safe = spotSafety(g, nav, a, S.staleSeconds);
+    if (safe.clearance < S.minClearance - 1e-6 || safe.staleClearance < S.minStaleClearance - 1e-6 || safe.knownClearance < S.minKnownClearance - 1e-6 || safe.seenFree < S.minSeenFree) continue;
     const low = cls.kind === 'under' || cls.kind === 'inside';
     const offs = opts.poseSamples ? (low ? opts.poseSamples.hideLow : opts.poseSamples.hide) : HIDE_SAMPLES;
     const pts = samplesAt(p, offs, cls.openYaw);

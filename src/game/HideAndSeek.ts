@@ -9,7 +9,7 @@ import type { ActionName } from '../pet/Animator';
 import type { Vec3 } from '../core/math';
 import { segmentObjects, type WorldObject } from '../world/Segmentation';
 import type { WorldModel } from '../world/WorldModel';
-import { describeSpot, findHideSpots, type HideSpot } from './HideSpots';
+import { DEFAULT_SPOT_SAFETY, describeSpot, findHideSpots, RELAXED_SPOT_SAFETY, type HideSpot } from './HideSpots';
 import { petSamplePoints, petVisibility, type ViewPose } from './Visibility';
 import { measurePoseSamples } from '../pet/poseSamples';
 import { HealthMonitor, type HealthOptions } from './Health';
@@ -317,28 +317,32 @@ export class HideAndSeek {
     if (!nav) return false;
     const t0 = performance.now();
     this.objects = segmentObjects(this.world);
-    // Prefer properly hidden spots; in a bare room, settle for the best cover there is.
+    // Prefer properly hidden spots; in a bare room, settle for the best cover
+    // there is. Safe spots first (see DEFAULT_SPOT_SAFETY): only if none is
+    // safe at any level of cover, a spot closer to uncertain structure.
     let spots: HideSpot[] = [];
-    for (const minHiddenNow of [0.85, 0.5, 0]) {
-      spots = findHideSpots(
-        nav,
-        this.pet.pos,
-        view.pos,
-        {
-          difficulty: this.opts.difficulty,
-          maxPathCost: 9,
-          previous: this.previous,
-          rng: this.rng,
-          objects: this.objects,
-          eyeHeight: this.opts.eyeHeight,
-          minHiddenNow,
-          poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
-        },
-        this.world.floorY,
-      );
-      this.stats.relaxed = minHiddenNow < 0.85;
-      if (spots.length) break;
-    }
+    search: for (const safety of [DEFAULT_SPOT_SAFETY, RELAXED_SPOT_SAFETY])
+      for (const minHiddenNow of [0.85, 0.5, 0]) {
+        spots = findHideSpots(
+          nav,
+          this.pet.pos,
+          view.pos,
+          {
+            difficulty: this.opts.difficulty,
+            maxPathCost: 9,
+            previous: this.previous,
+            rng: this.rng,
+            objects: this.objects,
+            eyeHeight: this.opts.eyeHeight,
+            minHiddenNow,
+            poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
+            ...safety,
+          },
+          this.world.floorY,
+        );
+        this.stats.relaxed = minHiddenNow < 0.85 || safety !== DEFAULT_SPOT_SAFETY;
+        if (spots.length) break search;
+      }
     this.stats.planMs = performance.now() - t0;
     this.stats.spotsConsidered = spots.length;
     this.round++;
