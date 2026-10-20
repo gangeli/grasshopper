@@ -425,6 +425,9 @@ export function judge(best: Candidate | null, ambiguity: number, o: RelocOptions
   if (inlier < minInlier) return { ok: false, reason: `inlier ${inlier.toFixed(2)} < ${minInlier}` };
   if (m.explained < minExplained) return { ok: false, reason: `explained ${m.explained.toFixed(2)} < ${minExplained}` };
   if (ambiguity > maxAmb) return { ok: false, reason: `ambiguous ${ambiguity.toFixed(2)}` };
+  // Walls alone never decide: homes have rooms of the same shape (and
+  // symmetric ones). At least one piece of furniture must agree.
+  if (m.lowObjects < 1) return { ok: false, reason: 'no furniture agrees (walls alone are not unique)' };
   // Same walls, different furniture: another room of the same shape (or
   // everything moved, when the stored map is of little use anyway).
   const furnN = m.lowN + m.bwdLowN, furnBad = (m.lowConf + m.bwdLowConf) / Math.max(1, furnN);

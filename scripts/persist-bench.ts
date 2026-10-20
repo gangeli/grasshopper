@@ -24,6 +24,7 @@ for (let seed = s0; seed <= (s1 ?? s0); seed++) {
     cols: layout[0],
     rows: layout[1],
     symmetric: !!opt('symmetric'),
+    furnish: opt('furnish') ? Number(opt('furnish')) : undefined,
     moveChance: Number(opt('move', '0.3')),
     moveShare: Number(opt('moveShare', '0.25')),
     noise: (opt('noise', 'real') as NoiseName),

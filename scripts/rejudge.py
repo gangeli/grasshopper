@@ -27,6 +27,8 @@ def judge(m, amb, P):
         return False, 'explained'
     if amb > P['maxAmb']:
         return False, 'ambiguous'
+    if m.get('lowObjects', 0) < P['minObjectsAlways']:
+        return False, 'no furniture agrees'
     lowN = m['lowN'] + m['bwdLowN']
     furn = (m['lowConf'] + m['bwdLowConf']) / max(1, lowN)
     if lowN >= P['furnMinN'] and furn > P['maxFurn']:
@@ -38,7 +40,7 @@ def judge(m, amb, P):
             return False, 'walls weak'
     return True, 'ok'
 
-P = dict(minOverlap=300, minInlier=0.9, minExplained=0.5, maxAmb=0.4, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12, minWallInlier=0, minInlierNoWalls=0, furnDiscount=0.5)
+P = dict(minOverlap=300, minInlier=0.9, minExplained=0.5, maxAmb=0.4, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12, minWallInlier=0, minInlierNoWalls=0, furnDiscount=0.5, minObjectsAlways=1)
 for a in sys.argv[1:]:
     if '=' in a:
         k, v = a.split('=')
