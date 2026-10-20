@@ -5,6 +5,7 @@ import type { ActivityId } from '../game/Activities';
 import type { Hud } from './Hud';
 import type { Voice } from './Voice';
 import { TapMarker } from './TapMarker';
+import { Hearts } from '../pet/Hearts';
 
 /**
  * Glue between the game's events and the HUD/voice, shared by the AR and
@@ -15,6 +16,9 @@ export class GameUI {
   private lastTick = -1;
   private petWorld = new THREE.Vector3();
   readonly marker = new TapMarker();
+  /** Little hearts that float up when Hopper is petted. */
+  readonly hearts = new Hearts();
+  private heartAt = new THREE.Vector3();
   private lastT = 0;
   private tipShown = false;
   constructor(readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
@@ -39,6 +43,7 @@ export class GameUI {
       hud.showCover(p === 'countdown', Math.ceil(game.countdownLeft));
       if (p !== 'found') hud.showCard(null);
       if (p !== 'roam') this.marker.hide();
+      if (p === 'countdown') this.hearts.clear();
       if (p === 'roam' && game.round === 0) {
         voice.greet();
         // After the hello: how to play with Hopper on a walk.
@@ -87,11 +92,8 @@ export class GameUI {
     const v = this.voice;
     switch (r.kind) {
       case 'pet':
-        if (r.reaction === 'wave') v.greet();
-        else if (r.reaction === 'surprised') {
-          v.surprised();
-          setTimeout(() => v.giggle(false), 600);
-        } else v.giggle(false);
+        v.petReaction(r);
+        this.showHearts(r.hearts);
         break;
       case 'goto':
         this.showMarker(r.target, true);
@@ -101,6 +103,20 @@ export class GameUI {
         if (r.at) this.showMarker(r.at, false);
         break;
     }
+  }
+
+  /** Hearts rise from just above Hopper's head (in the map frame, next to the rig). */
+  private showHearts(n: number) {
+    const rig = this.stack.rig;
+    const parent = rig.group.parent;
+    if (!parent || n <= 0) return;
+    if (this.hearts.group.parent !== parent) parent.add(this.hearts.group);
+    parent.updateWorldMatrix(true, false);
+    rig.bones.head.getWorldPosition(this.heartAt);
+    parent.worldToLocal(this.heartAt);
+    const s = rig.group.scale.y || 1;
+    this.heartAt.y += 0.15 * s;
+    this.hearts.spawn(this.heartAt, n, s);
   }
 
   private showMarker(p: { x: number; y: number; z: number }, ok: boolean) {
@@ -123,6 +139,7 @@ export class GameUI {
       if (!pet.moving && Math.hypot(pet.pos.x - g.x, pet.pos.z - g.z) < 0.25) this.marker.arrived();
       this.marker.update(dt);
     }
+    this.hearts.update(dt);
     // The camera is in the tracking frame; the pet in its parent's (map) frame.
     const parent = this.stack.rig.group.parent;
     const petPos = parent ? this.petWorld.copy(pet.pos).applyMatrix4(parent.matrixWorld) : pet.pos;

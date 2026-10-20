@@ -87,11 +87,11 @@ export class PetController {
   }
 
   /** Play a non-locomotion action in place. */
-  perform(action: ActionName, fade = 0.2): void {
+  perform(action: ActionName, fade = 0.2, restart = true): void {
     this.path = [];
     this.state = 'perform';
     this.speed = 0;
-    this.anim.play(action, fade, true);
+    this.anim.play(action, fade, restart);
   }
 
   private dist2D(w: { x: number; z: number }) {
