@@ -100,6 +100,13 @@ export class ChunkStore {
     return this.chunks.has(key) || this.pending.some((p) => chunkKey(p.cx, p.cz) === key);
   }
 
+  /** Forget one chunk (and any pending save of it). */
+  delete(cx: number, cz: number): void {
+    const key = chunkKey(cx, cz);
+    this.pending = this.pending.filter((p) => chunkKey(p.cx, p.cz) !== key);
+    this.chunks.delete(key);
+  }
+
   clear(): void {
     this.pending = [];
     this.chunks.clear();

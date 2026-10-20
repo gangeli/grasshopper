@@ -724,6 +724,16 @@ export class WorldModel {
     }
   }
 
+  /** Queue every archived chunk inside the window for merging back (merging only fills unknown voxels). */
+  private requeueArchived(): void {
+    const C = CHUNK, W = this.windowChunks;
+    for (let a = 0; a < W; a++)
+      for (let b = 0; b < W; b++) {
+        const cx = this.wi / C + a, cz = this.wk / C + b;
+        if (this.archive.has(cx, cz) && !this.pendingLoads.some(([x, z]) => x === cx && z === cz)) this.pendingLoads.push([cx, cz]);
+      }
+  }
+
   /** Archived chunks that entered the window and aren't loaded into it yet (lattice chunk coords). */
   private pendingLoads: [number, number][] = [];
   /** Merge up to n pending chunks into the window (all of them: Infinity). */
@@ -969,11 +979,20 @@ export class WorldModel {
     const newWi = oldWi + si * C, newWk = oldWk + sk * C;
     const inWin = (cx: number, cz: number, wi: number, wk: number) => cx >= wi / C && cx < wi / C + W && cz >= wk / C && cz < wk / C + W;
     // 1. Chunks leaving the window go to the archive (over the next frames:
-    // the old grid isn't written to any more).
+    // the old grid isn't written to any more). One that entered on an earlier
+    // move and wasn't merged back yet holds only what was seen since: merge
+    // its archived copy in first, or the save would replace the archived
+    // data with that (or, if nothing was seen, delete it).
     for (let a = 0; a < W; a++)
       for (let b = 0; b < W; b++) {
         const cx = oldWi / C + a, cz = oldWk / C + b;
-        if (!inWin(cx, cz, newWi, newWk)) this.archive.defer(old, oldWi, oldWk, cx, cz, this.floorLayer, t);
+        if (inWin(cx, cz, newWi, newWk)) continue;
+        const p = this.pendingLoads.findIndex(([x, z]) => x === cx && z === cz);
+        if (p >= 0) {
+          this.pendingLoads.splice(p, 1);
+          mergeChunkInto(this.archive, old, oldWi, oldWk, cx, cz, this.floorLayer);
+        }
+        this.archive.defer(old, oldWi, oldWk, cx, cz, this.floorLayer, t);
       }
     // 2. The new window: the overlap copied, the rest from the archive.
     // (Copy whole arrays, then shift in place: one memcpy and a row-wise
@@ -1640,6 +1659,9 @@ export class WorldModel {
       g.topFrac.set(snap.topFrac);
       g.version++;
       this.snapshots = this.snapshots.filter((sn) => sn.t <= snap.t);
+      // Chunks that came back from the archive after the snapshot are blank
+      // in it: merge them back again (or they'd be archived blank on leaving).
+      this.requeueArchived();
       this.replayFrames((f) => f.t > snap.t);
     } else {
       // No snapshot from before the jump: keep the map (everything outside
@@ -1699,7 +1721,10 @@ export class WorldModel {
       return;
     }
     this.recoveries.hard++;
-    // Forget the window, including what was about to come back into it.
+    // Forget the window, including what was about to come back into it
+    // (explicitly: left in the archive, it would be deleted by accident when
+    // the blank window chunk is archived, or come back if it isn't).
+    for (const [cx, cz] of this.pendingLoads) this.archive.delete(cx, cz);
     this.pendingLoads = [];
     this.snapshots = [];
     this.replay = [];

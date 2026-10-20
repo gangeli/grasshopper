@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { WorldModel } from '../src/world/WorldModel';
 import { copyOverlap, shiftInPlace } from '../src/world/ChunkStore';
+import { scanRoom } from '../src/sim/scan';
+import { livingRoom } from '../src/sim/SimRoom';
 
 /** The dense map window follows the camera; what it leaves behind is archived and comes back. */
 describe('map window', () => {
@@ -112,5 +114,52 @@ describe('map window', () => {
     expect(g.data[near]).toBe(0);
     expect(g.data[far]).toBeGreaterThan(20);
     expect(g.data[far]).toBeLessThan(100);
+  });
+});
+
+describe('map window: archive races', () => {
+  const occupiedIn = (w: WorldModel, cx: number, cz: number) => {
+    const c = w.archive.get(cx, cz);
+    return c ? c.data.reduce((n, v) => n + (v > 20 && v !== 127 ? 1 : 0), 0) : 0;
+  };
+  const archivedTotals = (w: WorldModel) => {
+    const out = new Map<number, number>();
+    for (const [key, c] of w.archive.map) out.set(key, c.data.reduce((n, v) => n + (v > 20 && v !== 127 ? 1 : 0), 0));
+    return out;
+  };
+
+  it('keeps an archived chunk that re-enters and leaves again before it is merged back', () => {
+    const world = new WorldModel({ halfExtent: 1.5 });
+    scanRoom(livingRoom(), undefined, { seed: 3, world });
+    world.moveWindow(-1, 0); // (2,3) etc. leave: archived
+    world.archive.flush();
+    const before = archivedTotals(world);
+    expect([...before.values()].some((n) => n > 0)).toBe(true);
+    world.moveWindow(1, 0); // they come back: pending a merge
+    world.moveWindow(0, -1); // ...and some leave again, unmerged
+    world.moveWindow(1, 0);
+    world.loadPending();
+    world.moveWindow(-3, 3); // everything to the archive
+    world.archive.flush();
+    for (const [key, n] of before) if (n > 0) expect(archivedTotals(world).get(key) ?? 0).toBeGreaterThanOrEqual(n);
+  });
+
+  it('the reported repro: two moves without a merge in between keep store chunk (2,3)', () => {
+    const world = new WorldModel({ halfExtent: 1.5 });
+    scanRoom(livingRoom(), undefined, { seed: 3, world });
+    // Rapid moves back and forth, with and without merges in between.
+    const n0 = occupiedIn(world, 2, 3);
+    world.moveWindow(1, 0);
+    world.moveWindow(0, -1);
+    expect(occupiedIn(world, 2, 3)).toBeGreaterThanOrEqual(n0);
+    const totals = archivedTotals(world);
+    for (const [si, sk, merge] of [[1, 0, false], [-1, 0, false], [0, 1, true], [0, -1, false], [1, 1, false], [-1, -1, true]] as const) {
+      world.moveWindow(si, sk);
+      if (merge) world.loadPending(1);
+    }
+    world.moveWindow(5, 5);
+    world.archive.flush();
+    const after = archivedTotals(world);
+    for (const [key, n] of totals) if (n > 0) expect(after.get(key) ?? 0).toBeGreaterThan(0);
   });
 });
