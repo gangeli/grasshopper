@@ -38,6 +38,9 @@ export interface BenchOptions {
   cameraDepth?: boolean;
   /** Live grid half extent (m). */
   halfExtent?: number;
+  /** Storage quota (bytes) and per-session chance of damaging a stored map. */
+  quota?: number;
+  corrupt?: number;
   log?: (s: string) => void;
 }
 
@@ -95,6 +98,9 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
   let home: Home = makeHome(o.seed, { cols: o.cols ?? 2, rows: o.rows ?? 2, symmetric: o.symmetric, furnish: o.furnish });
   dressRoom(home.room, o.seed);
   const kv = new MemoryKV();
+  if (o.quota) kv.quota = o.quota;
+  const faultRng = new Rng(o.seed * 31 + 17);
+  let corruptions = 0;
   /** room → fragment frame, per fragment id. */
   const fragTruth = new Map<string, Pose2>();
   const visited = new Set<number>();
@@ -102,6 +108,18 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
   const reports: SessionReport[] = [];
   const log = o.log ?? (() => undefined);
   for (let s = 0; s < o.sessions; s++) {
+    // Storage faults between sessions: a flipped byte in a stored map, or a truncated one.
+    if (s > 0 && o.corrupt && faultRng.chance(o.corrupt)) {
+      const keys = [...kv.data.keys()].filter((k) => k.startsWith('frag:'));
+      if (keys.length) {
+        const k = faultRng.pick(keys);
+        const v = kv.data.get(k) as Uint8Array;
+        if (faultRng.chance(0.5)) v[faultRng.int(0, v.length - 1)] ^= 0x5a;
+        else kv.data.set(k, v.slice(0, Math.floor(v.length / 2)));
+        corruptions++;
+        log(`  (storage fault before session ${s}: ${k} damaged)`);
+      }
+    }
     if (s > 0 && rng.chance(o.moveChance ?? 0.3)) home = rearrange(home, o.seed * 100 + s, o.moveShare ?? 0.25);
     // Which rooms: usually somewhere known, sometimes new, sometimes two.
     const all = home.rooms.map((r) => r.id);

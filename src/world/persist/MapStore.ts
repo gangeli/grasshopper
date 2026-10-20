@@ -227,7 +227,16 @@ export class MapStore {
         total -= v.bytes;
       }
       const gen = old ? old.gen + 1 : 0;
-      await this.kv.put(`frag:${id}:${gen}`, data);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.kv.put(`frag:${id}:${gen}`, data);
+          break;
+        } catch (e) {
+          // Device storage full: drop backups, then the smallest other fragment, and retry.
+          if ((e as Error)?.name !== 'QuotaExceededError' || attempt >= 4) throw e;
+          if (!(await this.makeRoom(id))) throw e;
+        }
+      }
       const now = Date.now();
       const meta: FragmentMeta = {
         id,
@@ -257,6 +266,21 @@ export class MapStore {
       this.lastError = `save ${id}: ${(e as Error)?.name === 'QuotaExceededError' ? 'storage full' : ((e as Error)?.message ?? e)}`;
       return null;
     }
+  }
+
+  /** Free space for `keep`: backups first, then the smallest other fragment. False if nothing is left to drop. */
+  private async makeRoom(keep: string): Promise<boolean> {
+    const withBackup = this.index.fragments.find((f) => f.prevGen >= 0);
+    if (withBackup) {
+      await this.kv.del(`frag:${withBackup.id}:${withBackup.prevGen}`).catch(() => undefined);
+      withBackup.prevGen = -1;
+      await this.writeIndex().catch(() => undefined);
+      return true;
+    }
+    const victim = this.index.fragments.filter((f) => f.id !== keep).sort((a, b) => a.area - b.area)[0];
+    if (!victim) return false;
+    await this.remove(victim.id);
+    return true;
   }
 
   async remove(id: string): Promise<void> {

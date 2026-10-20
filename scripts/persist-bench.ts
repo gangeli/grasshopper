@@ -5,7 +5,10 @@
  * Prints per-session events and a summary line per home, then totals.
  */
 import { runBench, type BenchOptions } from '../src/sim/PersistBench';
-import type { NoiseName } from '../src/sim/SimSensor';
+import { NOISE_PROFILES, type NoiseName, type NoiseProfile } from '../src/sim/SimSensor';
+
+/** 'real' with 3× more relocalization jumps, 2.5× bigger, and more tracking loss: big drift. */
+const JUMPY: NoiseProfile = { ...NOISE_PROFILES.real, name: 'jumpy', relocRate: 0.03, relocPos: 0.2, relocRot: 0.08, lossRate: 0.01, driftPos: 0.025, driftRot: 0.01 };
 
 const args = process.argv.slice(2);
 const opt = (name: string, def?: string) => {
@@ -27,13 +30,15 @@ for (let seed = s0; seed <= (s1 ?? s0); seed++) {
     furnish: opt('furnish') ? Number(opt('furnish')) : undefined,
     moveChance: Number(opt('move', '0.3')),
     moveShare: Number(opt('moveShare', '0.25')),
-    noise: (opt('noise', 'real') as NoiseName),
+    noise: opt('noise') === 'jumpy' ? JUMPY : (opt('noise', 'real') as NoiseName),
     cameraDepth: !!opt('camera'),
     newRoomChance: Number(opt('newRoom', '0.35')),
     twoRoomChance: Number(opt('twoRoom', '0.4')),
     budgetMs: Number(opt('budget', '8')),
     stepBudget: opt('steps') ? Number(opt('steps')) : undefined,
     halfExtent: opt('extent') ? Number(opt('extent')) : undefined,
+    quota: opt('quota') ? Number(opt('quota')) : undefined,
+    corrupt: opt('corrupt') ? Number(opt('corrupt')) : undefined,
     log: quiet ? undefined : (s) => console.log(s),
   };
   const r = await runBench(o);

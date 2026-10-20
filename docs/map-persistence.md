@@ -300,3 +300,19 @@ each saved a duplicate), coverage of the biggest fragment 41%.
 
 The error tail grew with history: fused sessions carry their own drift. Response: the
 placement is re-refined at every verification and the latest one is used for fusing.
+
+### Round 10 — symmetric homes (identical 4×4 m rooms, centred doorways)
+
+* Furnished (S1): **2 wrong restores** with inlier 0.97–0.98 and no rival at all — a room
+  placed onto the next identical room one room-width away (the session had seen almost no
+  furniture). The "third look for walls-only matches" rule can't help: the world itself
+  is ambiguous. → **Walls alone never decide**: at least one piece of furniture must agree.
+  S1b: 0 wrong, 53% relocalized.
+* Bare (S0: no furniture, only clutter): still **3 wrong restores** — the "furniture" that
+  agreed was (a) the bottom of walls the camera never saw above 1.1 m and (b) floor noise in
+  the 10–15 cm layer (a floor estimate a few cm off puts the floor there). → furniture
+  samples must be low in *both* maps (the stored map usually saw the wall higher up),
+  clusters must be compact (≤ 2.6 m: a long run is a wall), samples start at 15 cm.
+  S0c: 1 restore of 30 sessions (correct), **0 wrong** — refusing is the right answer in a
+  home of identical bare rooms.
+* Standard bench after these (B4): 64% relocalized (B3: 66%), 0 wrong, error 1.6 / 3.2 cm.
