@@ -12,10 +12,21 @@ const cpu = process.env.WALL ? () => performance.now() : () => {
 const [w, d] = (process.argv[2] ?? '12x15').split('x').map(Number);
 const seed = Number(process.argv[3] ?? 2);
 const seconds = Number(process.argv[4] ?? 300);
-const times: Record<string, number[]> = { stepAnchors: [], stepWarp: [], ingestDepthImage: [] };
+import { PlaceMemory } from '../src/world/PlaceMemory';
+const times: Record<string, number[]> = { stepAnchors: [], stepWarp: [], ingestDepthImage: [], placeWarp: [], forgetFreeOf: [], startAnchorWarp: [] };
+{
+  const PM = PlaceMemory.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const orig = PM.warp;
+  PM.warp = function (this: unknown, ...a: unknown[]) {
+    const t0 = cpu();
+    const r = orig.apply(this, a);
+    times.placeWarp.push(cpu() - t0);
+    return r;
+  };
+}
 const byPhase: Record<string, number> = {};
 const P = WorldModel.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
-for (const k of Object.keys(times)) {
+for (const k of Object.keys(times).filter((k) => k !== 'placeWarp')) {
   const orig = P[k];
   P[k] = function (this: unknown, ...a: unknown[]) {
     const ph = (this as WorldModel).warpPhase;
@@ -27,7 +38,7 @@ for (const k of Object.keys(times)) {
     return r;
   };
 }
-const rep = runLargeArea({ house: generateHouse(seed, w, d), seed, seconds, noise: 'house-hard', walk: { panSpeed: [2, 5], glanceRate: 0.15 }, anchors: process.env.ANCHORS ? JSON.parse(process.env.ANCHORS) : undefined });
+const rep = runLargeArea({ house: generateHouse(seed, w, d), seed, seconds, noise: (process.env.PROFILE ?? 'house-hard') as 'house-hard', walk: { panSpeed: [2, 5], glanceRate: 0.15 }, anchors: process.env.ANCHORS ? JSON.parse(process.env.ANCHORS) : undefined });
 for (const [k, xs] of Object.entries(times)) {
   const s = xs.slice().sort((a, b) => a - b);
   const q = (f: number) => (s.length ? s[Math.min(s.length - 1, Math.floor(s.length * f))] : 0);
