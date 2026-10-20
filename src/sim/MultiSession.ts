@@ -7,7 +7,7 @@ import { OCC_THRESHOLD } from '../world/VoxelGrid';
 import { applyPose, composePose, invertPose, poseFromMatrix, poseToMatrix, type Pose2 } from '../world/persist/pose';
 import { CS, CS2, type ChunkedMap } from '../world/persist/ChunkedMap';
 import type { SimRoom } from './SimRoom';
-import { SimSensor, type NoiseName, type NoiseProfile, type SensorCaps, type SimCamera } from './SimSensor';
+import { inFrustum, SimSensor, type NoiseName, type NoiseProfile, type SensorCaps, type SimCamera } from './SimSensor';
 import { homeScanPath, type Home } from './Home';
 import { CameraDepthSource, senseFrame } from './scan';
 
@@ -31,8 +31,53 @@ export class FramedSensor extends SimSensor {
    */
   home: Home | null = null;
   private visited = new Set<number>();
+  /**
+   * Interior walls of a home (SimSensor only builds planes for a room's outer
+   * walls): both faces of each wall segment, detected like any plane once
+   * enough of it has been seen (more for blank walls).
+   */
+  private interior: { plane: PlaneInput; samples: Vec3[]; need: number }[] | null = null;
+  private interiorFound = new Map<string, PlaneInput>();
+  private interiorPlanes(cam: SimCamera): PlaneInput[] {
+    const room = this.room, W = room.halfW, D = room.halfD;
+    if (!this.interior) {
+      this.interior = [];
+      room.boxes.forEach((b, idx) => {
+        if (room.pieces[b.piece].label !== 'wall') return;
+        if (b.max.x <= -W + 1e-3 || b.min.x >= W - 1e-3 || b.max.z <= -D + 1e-3 || b.min.z >= D - 1e-3) return; // outer
+        const alongZ = b.max.z - b.min.z > b.max.x - b.min.x;
+        const y0 = 0, y1 = b.max.y;
+        const faces: [Vec3, Vec3[]][] = alongZ
+          ? [
+              [{ x: -1, y: 0, z: 0 }, [{ x: b.min.x, y: y0, z: b.min.z }, { x: b.min.x, y: y0, z: b.max.z }, { x: b.min.x, y: y1, z: b.max.z }, { x: b.min.x, y: y1, z: b.min.z }]],
+              [{ x: 1, y: 0, z: 0 }, [{ x: b.max.x, y: y0, z: b.min.z }, { x: b.max.x, y: y0, z: b.max.z }, { x: b.max.x, y: y1, z: b.max.z }, { x: b.max.x, y: y1, z: b.min.z }]],
+            ]
+          : [
+              [{ x: 0, y: 0, z: -1 }, [{ x: b.min.x, y: y0, z: b.min.z }, { x: b.max.x, y: y0, z: b.min.z }, { x: b.max.x, y: y1, z: b.min.z }, { x: b.min.x, y: y1, z: b.min.z }]],
+              [{ x: 0, y: 0, z: 1 }, [{ x: b.min.x, y: y0, z: b.max.z }, { x: b.max.x, y: y0, z: b.max.z }, { x: b.max.x, y: y1, z: b.max.z }, { x: b.min.x, y: y1, z: b.max.z }]],
+            ];
+        faces.forEach(([normal, polygon], f) => {
+          const samples: Vec3[] = [];
+          for (let a = 0.1; a < 1; a += 0.27)
+            for (let c = 0.1; c < 1; c += 0.27) {
+              const p0 = polygon[0], p1 = polygon[1], p3 = polygon[3];
+              samples.push({ x: p0.x + (p1.x - p0.x) * a + normal.x * 0.02, y: p0.y + (p3.y - p0.y) * c, z: p0.z + (p1.z - p0.z) * a + normal.z * 0.02 });
+            }
+          this.interior!.push({ plane: { id: `iwall${idx}_${f}`, polygon, normal, label: 'wall' }, samples, need: b.material === 'textureless' && this.noise.materials ? 8 : 2 });
+        });
+      });
+    }
+    for (const w of this.interior) {
+      if (this.interiorFound.has(w.plane.id)) continue;
+      let seen = 0;
+      for (const p of w.samples) if (inFrustum(cam, p, 0.95) && room.visible(cam.pos, p)) seen++;
+      if (seen >= w.need) this.interiorFound.set(w.plane.id, w.plane);
+    }
+    return [...this.interiorFound.values()];
+  }
+
   planes(cam: SimCamera): PlaneInput[] {
-    const all = super.planes(cam);
+    const all = this.home ? [...super.planes(cam), ...this.interiorPlanes(cam)] : super.planes(cam);
     let src = all;
     if (this.home) {
       const r = this.home.rooms.find((q) => cam.pos.x >= q.x0 && cam.pos.x <= q.x1 && cam.pos.z >= q.z0 && cam.pos.z <= q.z1);

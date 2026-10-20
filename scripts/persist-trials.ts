@@ -35,7 +35,7 @@ for (let seed = first; seed <= last; seed++) {
   const A = new SimSession({ home, rooms: aRooms, seconds: rng.range(50, 110), seed: seed * 10 + 1 });
   while (A.step());
   const mA = exportLive(A.world)!;
-  const frag = new FragmentIndex(extractFeatures(mA), new FragmentLookup(mA));
+  const frag = new FragmentIndex(extractFeatures(mA), new FragmentLookup(mA), process.env.SIGCELL ? Number(process.env.SIGCELL) : undefined);
   const bHome = moved ? rearrange(home, seed, 0.35) : home;
   const B = new SimSession({ home: bHome, room: bHome.room, rooms: [bRoom], seconds: 50, seed: seed * 10 + 2 });
   let next = 10;
@@ -44,6 +44,17 @@ for (let seed = first; seed <= last; seed++) {
     next += 10;
     const mB = exportLive(B.world)!;
     const fB = extractFeatures(mB);
+    if (process.env.DEBUGN) {
+      const h = new Array(18).fill(0);
+      let n = 0;
+      for (let q = 0; q < fB.occ.n; q++) {
+        if (fB.occ.low[q] !== 2) continue;
+        n++;
+        if (Math.hypot(fB.occ.nx[q], fB.occ.nz[q]) < 0.2) continue;
+        h[Math.floor((((Math.atan2(fB.occ.nz[q], fB.occ.nx[q]) * 180) / Math.PI + 360) % 180) / 10)]++;
+      }
+      console.error(`t=${B.t.toFixed(0)} structure ${n} normals ${h.join(' ')}`);
+    }
     const t0 = performance.now();
     const liveLookup = new FragmentLookup(mB);
     const r = runToEnd(relocalize({ features: fB, lookup: liveLookup }, frag));

@@ -1,4 +1,5 @@
 import { CS, CS2, chunkKey, type ChunkedMap } from './ChunkedMap';
+import { every, runToEnd, type Work } from './gen';
 
 /**
  * What the relocalizer looks at in a map, extracted once per map:
@@ -51,6 +52,13 @@ export interface VoxelSamples {
    * 1.1m (walls, tall cupboards: what stays put).
    */
   low: Uint8Array;
+  /**
+   * Structure samples: horizontal normal of the wall they're on (from the
+   * shape of the tall columns around them), scaled by how wall-like that
+   * neighbourhood is (0 for a pillar or a lone column). 0 for other samples.
+   */
+  nx: Float32Array;
+  nz: Float32Array;
 }
 
 export interface MapFeatures {
@@ -76,11 +84,18 @@ function lcg(seed: number) {
  * subsampled, deterministic).
  */
 export function extractFeatures(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): MapFeatures {
+  return runToEnd(extractFeaturesGen(m, maxOcc, maxFree));
+}
+
+export function* extractFeaturesGen(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): Work<MapFeatures> {
+  const y = every(8);
   const res = m.res, ny = m.ny;
   const cols: number[][] = [[], [], [], [], [], []];
   const occAll: number[] = [], freeAll: number[] = [];
+  const tallCols: number[] = [];
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
   for (const c of m.chunks.values()) {
+    if (y()) yield;
     const occ = c.occ;
     for (let lz = 0; lz < CS; lz++)
       for (let lx = 0; lx < CS; lx++) {
@@ -115,6 +130,7 @@ export function extractFeatures(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): 
         // furniture in front of it rather than 10× more.
         let tall = false;
         for (let j = TALL_LAYER; j < Math.min(ny, 48) && !tall; j++) if (occ[j * CS2 + col] > OCC_CONF) tall = true;
+        if (tall) tallCols.push(I, K);
         for (const [lo, hi] of SAMPLE_BANDS) {
           let o0 = -1, o1 = -1, f0 = -1, f1 = -1;
           for (let j = lo; j < Math.min(ny, hi); j++) {
@@ -135,7 +151,7 @@ export function extractFeatures(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): 
   const pick = (all: number[], max: number, seed: number): VoxelSamples => {
     const total = all.length / 4;
     const keep = Math.min(total, max);
-    const out = { n: keep, x: new Float32Array(keep), z: new Float32Array(keep), j: new Int16Array(keep), low: new Uint8Array(keep) };
+    const out = { n: keep, x: new Float32Array(keep), z: new Float32Array(keep), j: new Int16Array(keep), low: new Uint8Array(keep), nx: new Float32Array(keep), nz: new Float32Array(keep) };
     if (!keep) return out;
     // Systematic sampling with a random phase: uniform, deterministic.
     const rnd = lcg(seed);
@@ -151,6 +167,8 @@ export function extractFeatures(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): 
     return out;
   };
   const n = cols[0].length;
+  const occS = pick(occAll, maxOcc, 17);
+  wallNormals(occS, tallCols, m);
   return {
     cols: {
       n,
@@ -161,12 +179,56 @@ export function extractFeatures(m: ChunkedMap, maxOcc = 12000, maxFree = 6000): 
       b2: Uint8Array.from(cols[4], (v) => Math.min(255, v)),
       free: Uint8Array.from(cols[5], (v) => Math.min(255, v)),
     },
-    occ: pick(occAll, maxOcc, 17),
+    occ: occS,
     free: pick(freeAll, maxFree, 23),
     occTotal: occAll.length / 4,
     freeTotal: freeAll.length / 4,
     bbox: n ? { x0, z0, x1, z1 } : null,
   };
+}
+
+/** Fill in the wall normals of structure samples (see VoxelSamples.nx). */
+function wallNormals(S: VoxelSamples, tallCols: number[], m: ChunkedMap) {
+  if (!tallCols.length) return;
+  let i0 = Infinity, k0 = Infinity, i1 = -Infinity, k1 = -Infinity;
+  for (let q = 0; q < tallCols.length; q += 2) {
+    i0 = Math.min(i0, tallCols[q]);
+    i1 = Math.max(i1, tallCols[q]);
+    k0 = Math.min(k0, tallCols[q + 1]);
+    k1 = Math.max(k1, tallCols[q + 1]);
+  }
+  const w = i1 - i0 + 1, h = k1 - k0 + 1;
+  if (w * h > 4e6) return;
+  const grid = new Uint8Array(w * h);
+  for (let q = 0; q < tallCols.length; q += 2) grid[(tallCols[q + 1] - k0) * w + (tallCols[q] - i0)] = 1;
+  const R = 4;
+  for (let q = 0; q < S.n; q++) {
+    if (S.low[q] !== 2) continue;
+    const I = Math.floor((S.x[q] - m.origin.x) / m.res) - i0, K = Math.floor((S.z[q] - m.origin.z) / m.res) - k0;
+    let n = 0, sx = 0, sz = 0, sxx = 0, szz = 0, sxz = 0;
+    for (let dk = -R; dk <= R; dk++)
+      for (let di = -R; di <= R; di++) {
+        if (di * di + dk * dk > R * R) continue;
+        const u = I + di, v = K + dk;
+        if (u < 0 || v < 0 || u >= w || v >= h || !grid[v * w + u]) continue;
+        n++;
+        sx += di;
+        sz += dk;
+        sxx += di * di;
+        szz += dk * dk;
+        sxz += di * dk;
+      }
+    if (n < 4) continue;
+    const cxx = sxx / n - (sx / n) ** 2, czz = szz / n - (sz / n) ** 2, cxz = sxz / n - (sx / n) * (sz / n);
+    // Eigen-decomposition of the 2x2 covariance: the wall runs along the big axis.
+    const tr = (cxx + czz) / 2, d = Math.sqrt(((cxx - czz) / 2) ** 2 + cxz * cxz);
+    const l1 = tr + d, l2 = tr - d;
+    if (l1 <= 1e-9) continue;
+    const ang = 0.5 * Math.atan2(2 * cxz, cxx - czz); // direction of the big axis
+    const aniso = (l1 - l2) / (l1 + l2);
+    S.nx[q] = -Math.sin(ang) * aniso;
+    S.nz[q] = Math.cos(ang) * aniso;
+  }
 }
 
 /**
@@ -189,12 +251,25 @@ export class FragmentLookup {
   /** Known (non-zero) voxels per column, for "is this column known" tests. */
   private colKnown: Uint8Array = new Uint8Array(0);
 
-  constructor(m: ChunkedMap) {
+  /** Build synchronously (tests, tools); see create() for the sliced version. */
+  constructor(m: ChunkedMap, build = true) {
     this.res = m.res;
     this.ny = m.ny;
     this.ox = m.origin.x;
     this.oz = m.origin.z;
+    if (build) runToEnd(this.init(m));
+  }
+
+  /** Build in slices (yields every few chunks). */
+  static *create(m: ChunkedMap): Work<FragmentLookup> {
+    const L = new FragmentLookup(m, false);
+    yield* L.init(m);
+    return L;
+  }
+
+  private *init(m: ChunkedMap): Work<void> {
     if (!m.chunks.size) return;
+    const y = every(6);
     let cx0 = Infinity, cz0 = Infinity, cx1 = -Infinity, cz1 = -Infinity;
     for (const c of m.chunks.values()) {
       cx0 = Math.min(cx0, c.cx);
@@ -208,8 +283,8 @@ export class FragmentLookup {
     this.ch = cz1 - cz0 + 1;
     this.slots = new Int32Array(this.cw * this.ch).fill(-1);
     const ny = m.ny, per = CS2 * ny;
-    this.cls = new Int8Array(per * m.chunks.size);
-    this.colKnown = new Uint8Array(CS2 * m.chunks.size);
+    const cls = (this.cls = new Int8Array(per * m.chunks.size));
+    const known = (this.colKnown = new Uint8Array(CS2 * m.chunks.size));
     let slot = 0;
     for (const c of m.chunks.values()) {
       this.slots[(c.cz - cz0) * this.cw + (c.cx - cx0)] = slot;
@@ -218,26 +293,36 @@ export class FragmentLookup {
       for (let j = 0; j < ny; j++)
         for (let q = 0; q < CS2; q++) {
           const v = occ[j * CS2 + q];
-          if (v !== 0 && this.colKnown[slot * CS2 + q] < 255) this.colKnown[slot * CS2 + q]++;
-          this.cls[base + j * CS2 + q] = v > 45 ? 1 : v > 20 ? 2 : v < FREE_CONF ? 4 : 0;
+          if (v !== 0 && known[slot * CS2 + q] < 255) known[slot * CS2 + q]++;
+          cls[base + j * CS2 + q] = v > 45 ? 1 : v > 20 ? 2 : v < FREE_CONF ? 4 : 0;
         }
       slot++;
+      if (y()) yield;
     }
-    // Neighbours of confident voxels (x/z, across chunk borders via voxelClass).
+    // Neighbours of confident voxels (x/z). Inside a chunk directly; across
+    // chunk borders through rawClass. (Reads only classes 1 and 2, which this
+    // pass never writes, so the order doesn't matter.)
     slot = 0;
     for (const c of m.chunks.values()) {
       const base = slot * per;
-      for (let j = 0; j < ny; j++)
+      for (let j = 0; j < ny; j++) {
+        const lb = base + j * CS2;
         for (let lz = 0; lz < CS; lz++)
           for (let lx = 0; lx < CS; lx++) {
-            const n = base + j * CS2 + lz * CS + lx;
-            const v = this.cls[n];
+            const n = lb + lz * CS + lx;
+            const v = cls[n];
             if (v === 1 || v === 2) continue;
-            const I = c.cx * CS + lx, K = c.cz * CS + lz;
-            if (this.rawClass(I - 1, K, j) === 1 || this.rawClass(I + 1, K, j) === 1 || this.rawClass(I, K - 1, j) === 1 || this.rawClass(I, K + 1, j) === 1)
-              this.cls[n] = v === 4 ? 5 : 3; // 5: free but next to an obstacle (edge)
+            let near: boolean;
+            if (lx > 0 && lx < CS - 1 && lz > 0 && lz < CS - 1) near = cls[n - 1] === 1 || cls[n + 1] === 1 || cls[n - CS] === 1 || cls[n + CS] === 1;
+            else {
+              const I = c.cx * CS + lx, K = c.cz * CS + lz;
+              near = this.rawClass(I - 1, K, j) === 1 || this.rawClass(I + 1, K, j) === 1 || this.rawClass(I, K - 1, j) === 1 || this.rawClass(I, K + 1, j) === 1;
+            }
+            if (near) cls[n] = v === 4 ? 5 : 3; // 5: free but next to an obstacle (edge)
           }
+      }
       slot++;
+      if (y()) yield;
     }
   }
 

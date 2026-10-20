@@ -10,7 +10,7 @@ import { FragmentIndex, relocalize, runToEnd } from '../src/world/persist/Reloca
 import { MapMemory } from '../src/world/persist/MapMemory';
 import { WorldModel } from '../src/world/WorldModel';
 import { makeHome } from '../src/sim/Home';
-import { SimSession } from '../src/sim/MultiSession';
+import { SimSession, storedMapQuality } from '../src/sim/MultiSession';
 import { Rng } from '../src/core/rng';
 import { scanRoom } from '../src/sim/scan';
 import { livingRoom } from '../src/sim/SimRoom';
@@ -238,6 +238,36 @@ describe('map persistence: restore, verify, undo', () => {
     const after = exportLive(B.world)!;
     expect(knownVoxels(after)).toBe(knownVoxels(own));
     expect(memB.links.length).toBe(0);
+  });
+
+  it('stitches two rooms mapped in separate sessions when a third session visits both', async () => {
+    const home = makeHome(3);
+    const kv = new MemoryKV();
+    const truths = new Map<string, ReturnType<typeof composePose>>();
+    const run = async (rooms: number[], seed: number, seconds: number) => {
+      const s = new SimSession({ home, rooms, seconds, seed, noise: 'arcore' });
+      const mem = new MapMemory(await MapStore.open(kv), {}, { confirmAfter: 15 });
+      await mem.load();
+      mem.attach(s.world);
+      while (s.step()) mem.tick(s.t, Infinity);
+      await mem.flush();
+      truths.set(mem.sessionId, s.truth);
+      return { s, mem };
+    };
+    await run([0], 300, 50);
+    await run([2], 301, 50);
+    expect((await MapStore.open(kv)).list().length).toBe(2);
+    // Starts in room 0, walks into room 2: finds both, confirms both, stitches.
+    const { mem } = await run([0, 2], 302, 120);
+    expect(mem.links.filter((l) => l.confirmed).length).toBe(2);
+    const store = await MapStore.open(kv);
+    expect(store.list().length).toBe(1);
+    const id = store.list()[0].id;
+    const m = (await store.load(id))!;
+    const q = storedMapQuality(m, home.room, truths.get(id)!);
+    // Both rooms, in one consistent frame: obstacles where the walls and furniture are.
+    expect(q.precision).toBeGreaterThan(0.9);
+    expect(q.coveredArea).toBeGreaterThan(20);
   });
 
   it('keeps playing when storage is broken', async () => {

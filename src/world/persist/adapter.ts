@@ -115,6 +115,22 @@ export function exportLive(world: WorldModel, into?: ChunkedMap, rows?: [number,
   return out;
 }
 
+/** exportLive in slices (a couple of chunk rows per step). */
+export function* exportLiveGen(world: WorldModel, rowsPerStep = 2): Generator<void, ChunkedMap | null, void> {
+  const g = world.grid;
+  if (!g) return null;
+  const lat = liveLattice(world)!;
+  const out = emptyMap(lat.res, lat.ny, lat.origin);
+  const ncz = Math.ceil(g.nz / CS);
+  for (let r = 0; r < ncz; r += rowsPerStep) {
+    // The world may have replaced its grid meanwhile: give up (the caller retries).
+    if (world.grid !== g) return null;
+    exportLive(world, out, [r, r + rowsPerStep]);
+    yield;
+  }
+  return world.grid === g ? out : null;
+}
+
 /**
  * Replace the live grid's above-floor contents with `m` (on the live lattice:
  * chunk (cx, cz) covers grid columns [cx·CS, cx·CS+CS)). The below-floor

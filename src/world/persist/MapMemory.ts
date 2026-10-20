@@ -1,11 +1,13 @@
 import type { WorldModel } from '../WorldModel';
-import { exportLive, importLive, liveLattice } from './adapter';
+import { exportLive, exportLiveGen, importLive, liveLattice } from './adapter';
 import { observedColumns, type ChunkedMap } from './ChunkedMap';
-import { extractFeatures, FragmentLookup, type MapFeatures } from './features';
+import { encodeBody, packBody } from './codec';
+import { extractFeaturesGen, FragmentLookup, type MapFeatures } from './features';
+import { runToEnd, type Work } from './gen';
 import { MapStore, type FragmentMeta } from './MapStore';
 import { composePose, invertPose, isFinitePose, poseDelta, type Pose2 } from './pose';
 import { FragmentIndex, relocalize, verifyPose, type RelocOptions, type RelocResult, type VerifyMetrics } from './Relocalizer';
-import { combinePrior, fuseEvidence, liveEvidence, transformMap } from './Stitcher';
+import { combinePriorGen, fuseEvidenceGen, liveEvidenceGen, transformMapGen } from './Stitcher';
 
 /**
  * Remembering rooms across sessions.
@@ -70,7 +72,7 @@ export const DEFAULT_MEMORY: MemoryOptions = {
   confirmAfter: 25,
   confirmChecks: 3,
   undoAfter: 2,
-  minSaveArea: 1.5,
+  minSaveArea: 4,
   minSearchArea: 1.0,
   perAttempt: 3,
   reloc: {},
@@ -97,6 +99,8 @@ export interface Link {
 
 interface Hypothesis {
   pose: Pose2;
+  /** The other placements the search considered (re-checked along with it). */
+  rivals: Pose2[];
   count: number;
   t: number;
   occ: number;
@@ -116,6 +120,16 @@ export interface MemoryStatus {
 }
 
 type Job = Generator<void, void, void>;
+
+interface Write {
+  id: string;
+  map: ChunkedMap;
+  area: number;
+  sessions: number;
+  created?: number;
+  /** Serialized body (uncompressed). */
+  body?: Uint8Array;
+}
 
 export class MapMemory {
   readonly opts: MemoryOptions;
@@ -287,47 +301,70 @@ export class MapMemory {
     }
   }
 
-  /** The session's own observations right now (stored maps excluded). */
-  private computeEvidence(): ChunkedMap | null {
-    const g = exportLive(this.world!);
+  /** The session's own observations right now (stored maps excluded). Sliced. */
+  private *evidenceGen(): Work<ChunkedMap | null> {
+    const g = yield* exportLiveGen(this.world!);
     if (!g) return null;
-    const e = this.tracker ? liveEvidence(g, this.tracker.base, this.tracker.liveOnly) : g;
+    const tr = this.tracker;
+    const e = tr ? yield* liveEvidenceGen(g, tr.base, tr.liveOnly) : g;
+    // The bookkeeping may have been re-based meanwhile (then this is stale).
+    if (tr !== this.tracker) return null;
     this.evidence = { t: this.now, map: e };
     return e;
   }
 
-  private liveSearchData(e: ChunkedMap): { features: MapFeatures; lookup: FragmentLookup } {
-    return { features: extractFeatures(e), lookup: new FragmentLookup(e) };
+  private computeEvidence(): ChunkedMap | null {
+    return runToEnd(this.evidenceGen());
+  }
+
+  private *liveSearchData(e: ChunkedMap): Work<{ features: MapFeatures; lookup: FragmentLookup }> {
+    const features = yield* extractFeaturesGen(e);
+    const lookup = yield* FragmentLookup.create(e);
+    return { features, lookup };
+  }
+
+  private *fragIndex(f: Frag): Work<FragmentIndex> {
+    if (!f.index) {
+      const features = yield* extractFeaturesGen(f.map);
+      const lookup = yield* FragmentLookup.create(f.map);
+      f.index = new FragmentIndex(features, lookup);
+    }
+    return f.index;
+  }
+
+  /** A fragment transformed into the live grid's frame and lattice (clipped to the grid). */
+  private *priorGen(f: Frag, pose: Pose2): Work<ChunkedMap | null> {
+    const lat = liveLattice(this.world!);
+    if (!lat) return null;
+    return yield* transformMapGen(f.map, invertPose(pose), lat, { i0: 0, k0: 0, i1: lat.nx, k1: lat.nz });
   }
 
   // --- Jobs ----------------------------------------------------------------------------
 
   private *relocJob(unlinked: Frag[]): Job {
-    const e = this.computeEvidence();
+    const e = yield* this.evidenceGen();
     if (!e) return;
     const area = observedColumns(e) * e.res * e.res;
     if (area < this.opts.minSearchArea) return;
-    yield;
-    const live = this.liveSearchData(e);
-    yield;
+    const live = yield* this.liveSearchData(e);
     const at = live.features.bbox ? { x: (live.features.bbox.x0 + live.features.bbox.x1) / 2, z: (live.features.bbox.z0 + live.features.bbox.z1) / 2 } : { x: 0, z: 0 };
     const picks = unlinked.sort((a, b) => a.lastTried - b.lastTried).slice(0, this.opts.perAttempt);
     for (const f of picks) {
       f.lastTried = this.now;
-      if (!f.index) {
-        f.index = new FragmentIndex(extractFeatures(f.map), new FragmentLookup(f.map));
-        yield;
-      }
+      const index = yield* this.fragIndex(f);
       this.status.attempts++;
-      const r: RelocResult = yield* relocalize(live, f.index, this.opts.reloc);
+      // With a candidate already, re-check it (and its rivals) instead of searching again.
+      const prev = this.hyps.get(f.meta.id);
+      const r: RelocResult = yield* relocalize(live, index, prev ? { ...this.opts.reloc, hint: [prev.pose, ...prev.rivals] } : this.opts.reloc);
       this.lastResult.set(f.meta.id, r);
       const id = f.meta.id;
       const best = r.best;
       this.status.lastReason = `${id}: ${r.reason}`;
       if (!r.accepted || !best || !isFinitePose(best.pose)) {
+        this.log(`${id}: no (${r.reason})`);
         // A clear "no" (not just "not enough data yet") resets the hypothesis.
         const h = this.hyps.get(id);
-        if (h && best && poseDelta(best.pose, h.pose, at).dist > 0.15) this.hyps.delete(id);
+        if (h && (!best || poseDelta(best.pose, h.pose, at).dist > 0.15)) this.hyps.delete(id);
         continue;
       }
       if ((this.blocked.get(id) ?? []).some((p) => { const d = poseDelta(p, best.pose, at); return d.dist < 0.5 && d.dyaw < 0.17; })) {
@@ -335,41 +372,44 @@ export class MapMemory {
         continue;
       }
       const h = this.hyps.get(id);
-      const occ = live.features.occTotal;
+      const occ = live.features.occTotal + live.features.freeTotal;
+      const rivals = r.candidates.filter((p) => poseDelta(p, best.pose, at).dist > 0.3 || poseDelta(p, best.pose, at).dyaw > 0.09).slice(0, 4);
+      const fresh = (): Hypothesis => ({ pose: best.pose, rivals, count: 1, t: this.now, occ });
       if (h) {
         const d = poseDelta(h.pose, best.pose, at);
         if (d.dist < 0.1 && d.dyaw < 0.035) {
-          // Count it only with new evidence (the live map grew since).
-          if (occ >= h.occ * 1.05 + 20 && this.now - h.t >= 2) {
+          // Count it only with new evidence: a few seconds later, the live map changed.
+          if (occ !== h.occ && this.now - h.t >= 3) {
             h.count++;
             h.pose = best.pose;
             h.t = this.now;
             h.occ = occ;
           }
-        } else this.hyps.set(id, { pose: best.pose, count: 1, t: this.now, occ });
-      } else this.hyps.set(id, { pose: best.pose, count: 1, t: this.now, occ });
+        } else this.hyps.set(id, fresh());
+      } else this.hyps.set(id, fresh());
       const hh = this.hyps.get(id)!;
       this.log(`${id}: candidate ${fmtPose(best.pose)} (${hh.count}/${this.opts.agree}) inlier ${best.metrics?.inlier.toFixed(2)} amb ${r.ambiguity.toFixed(2)}`);
       if (hh.count >= this.opts.agree) {
         this.hyps.delete(id);
-        this.restore(f, hh.pose, best.metrics ?? null);
+        yield* this.restore(f, hh.pose, best.metrics ?? null, e);
         return; // the live grid changed: start the next job afresh
       }
       yield;
     }
   }
 
-  /** Restore fragment f into the live grid at `pose` (live → fragment). */
-  private restore(f: Frag, pose: Pose2, metrics: VerifyMetrics | null): void {
+  /** Restore fragment f into the live grid at `pose` (live → fragment); `e` = the session's own evidence. */
+  private *restore(f: Frag, pose: Pose2, metrics: VerifyMetrics | null, e: ChunkedMap): Work<void> {
     const w = this.world!;
-    const lat = liveLattice(w);
-    const g = exportLive(w);
-    if (!lat || !g) return;
-    const e = this.computeEvidence()!;
-    const prior = transformMap(f.map, invertPose(pose), lat, { i0: 0, k0: 0, i1: lat.nx, k1: lat.nz });
-    const merged = combinePrior(g, prior);
-    if (!importLive(w, merged)) return;
-    this.tracker = { liveOnly: e, base: exportLive(w)! };
+    const grid = w.grid;
+    const prior = yield* this.priorGen(f, pose);
+    const g = yield* exportLiveGen(w);
+    if (!prior || !g) return;
+    const merged = yield* combinePriorGen(g, prior);
+    // Only if nothing rewrote the grid meanwhile (a later attempt will retry).
+    if (w.grid !== grid || !importLive(w, merged)) return;
+    // Right after the import the grid is exactly `merged`.
+    this.tracker = { liveOnly: e, base: merged };
     this.watch = { grid: w.grid, epoch: w.epoch, hard: w.recoveries.hard, other: w.recoveries.relevel + w.recoveries.soft + w.recoveries.realign };
     this.links.push({ fragment: f.meta.id, pose, since: this.now, good: 0, bad: 0, confirmed: false, last: metrics });
     this.nextVerify = this.now + this.opts.verifyEvery;
@@ -382,19 +422,14 @@ export class MapMemory {
   }
 
   private *verifyJob(): Job {
-    const e = this.computeEvidence();
+    const e = yield* this.evidenceGen();
     if (!e) return;
-    yield;
-    const live = this.liveSearchData(e);
-    yield;
+    const live = yield* this.liveSearchData(e);
     for (const link of [...this.links]) {
       const f = this.fragments.get(link.fragment);
       if (!f) continue;
-      if (!f.index) {
-        f.index = new FragmentIndex(extractFeatures(f.map), new FragmentLookup(f.map));
-        yield;
-      }
-      const m = verifyPose(live, f.index, link.pose);
+      const index = yield* this.fragIndex(f);
+      const m = verifyPose(live, index, link.pose);
       link.last = m;
       const conf = m.fwdConf + m.bwdConf + m.freeConf;
       const ok = m.inlier >= 0.75 && conf < Math.max(80, 0.2 * (m.fwdHit + m.bwdHit));
@@ -409,7 +444,10 @@ export class MapMemory {
       } else {
         link.bad++;
         this.log(`${link.fragment}: check failed (inlier ${m.inlier.toFixed(2)}, ${conf} conflicts) ${link.bad}/${this.opts.undoAfter}`);
-        if (link.bad >= this.opts.undoAfter) this.undo(link, `inlier ${m.inlier.toFixed(2)}`);
+        if (link.bad >= this.opts.undoAfter) {
+          yield* this.undoGen(link, `inlier ${m.inlier.toFixed(2)}`, e);
+          return;
+        }
       }
       yield;
     }
@@ -417,6 +455,10 @@ export class MapMemory {
 
   /** Take a restore back: the live grid returns to the session's own observations (+ other restores). */
   undo(link: Link, reason: string): void {
+    runToEnd(this.undoGen(link, reason, null));
+  }
+
+  private *undoGen(link: Link, reason: string, evidence: ChunkedMap | null): Work<void> {
     const w = this.world;
     this.links = this.links.filter((l) => l !== link);
     this.absorbed.delete(link.fragment);
@@ -424,23 +466,25 @@ export class MapMemory {
     bl.push(link.pose);
     this.blocked.set(link.fragment, bl);
     this.status.undos++;
+    // If it had been written into storage, put the stored version back on the next save.
+    if (link.confirmed) this.restoreStored.add(link.fragment);
     if (w && w.grid) {
-      const e = this.computeEvidence();
-      const lat = liveLattice(w);
-      if (e && lat) {
+      const grid = w.grid;
+      const e = evidence ?? (yield* this.evidenceGen());
+      if (e) {
         let g = e;
         for (const l of this.links) {
           const f = this.fragments.get(l.fragment);
-          if (f) g = combinePrior(g, transformMap(f.map, invertPose(l.pose), lat, { i0: 0, k0: 0, i1: lat.nx, k1: lat.nz }));
+          const prior = f ? yield* this.priorGen(f, l.pose) : null;
+          if (prior) g = yield* combinePriorGen(g, prior);
         }
-        importLive(w, g);
-        this.tracker = this.links.length ? { liveOnly: e, base: exportLive(w)! } : null;
-        this.watch = { grid: w.grid, epoch: w.epoch, hard: w.recoveries.hard, other: w.recoveries.relevel + w.recoveries.soft + w.recoveries.realign };
-        this.hooks.onMapChanged?.();
+        if (w.grid === grid && importLive(w, g)) {
+          this.tracker = this.links.length ? { liveOnly: e, base: g } : null;
+          this.watch = { grid: w.grid, epoch: w.epoch, hard: w.recoveries.hard, other: w.recoveries.relevel + w.recoveries.soft + w.recoveries.realign };
+          this.hooks.onMapChanged?.();
+        }
       }
     }
-    // If it had been written into storage, put the stored version back on the next save.
-    if (link.confirmed) this.restoreStored.add(link.fragment);
     this.log(`undid ${link.fragment}: ${reason}`);
     this.hooks.onUndone?.({ fragment: link.fragment, reason });
   }
@@ -448,10 +492,9 @@ export class MapMemory {
 
   private *saveJob(): Job {
     if (!this.store) return;
-    const e = this.computeEvidence();
+    const e = yield* this.evidenceGen();
     if (!e) return;
-    yield;
-    const writes: { id: string; map: ChunkedMap; area: number; sessions: number; created?: number }[] = [];
+    const writes: Write[] = [];
     const deletes: string[] = [];
     // Fragments to put back as they were (a confirmed restore was undone).
     for (const id of this.restoreStored) {
@@ -469,32 +512,31 @@ export class MapMemory {
         const qf = this.fragments.get(Q.fragment);
         if (!qf) continue;
         const T = composePose(P.pose, invertPose(Q.pose)); // Q → live → P
-        map = fuseEvidence(map, transformMap(qf.map, T, map));
-        yield;
+        map = yield* fuseEvidenceGen(map, yield* transformMapGen(qf.map, T, map));
         deletes.push(Q.fragment);
         this.absorbed.add(Q.fragment);
       }
-      map = fuseEvidence(map, transformMap(e, P.pose, map));
-      yield;
+      map = yield* fuseEvidenceGen(map, yield* transformMapGen(e, P.pose, map));
       const first = !this.sessionCounted.has(P.fragment);
       this.sessionCounted.add(P.fragment);
       writes.push({ id: P.fragment, map, area: observedColumns(map) * map.res * map.res, sessions: pf.meta.sessions + (first ? 1 : 0), created: pf.meta.created });
       if (this.ownSaved) deletes.push(this.sessionId);
     } else {
       const area = observedColumns(e) * e.res * e.res;
-      if (area >= this.opts.minSaveArea) {
-        writes.push({ id: this.sessionId, map: e, area, sessions: 1 });
-      }
+      if (area >= this.opts.minSaveArea) writes.push({ id: this.sessionId, map: e, area, sessions: 1 });
     }
     if (!writes.length && !deletes.length) return;
+    // Serialize here, in slices; compression and storage are asynchronous.
+    for (const wr of writes) wr.body = yield* encodeBody(wr.map);
     this.writing = this.write(writes, deletes).finally(() => (this.writing = null));
   }
 
-  private async write(writes: { id: string; map: ChunkedMap; area: number; sessions: number; created?: number }[], deletes: string[]) {
+  private async write(writes: Write[], deletes: string[]) {
     const store = this.store!;
     for (const wr of writes) {
       const t0 = performance.now();
-      const meta = await store.save(wr.id, wr.map, { area: wr.area, sessions: wr.sessions, created: wr.created });
+      const encoded = wr.body ? await packBody(wr.body) : undefined;
+      const meta = await store.save(wr.id, wr.map, { area: wr.area, sessions: wr.sessions, created: wr.created }, encoded);
       if (!meta) {
         this.status.lastError = store.lastError;
         this.log(`save failed: ${store.lastError}`);

@@ -1,0 +1,133 @@
+# Remembering rooms across sessions
+
+Hopper maps the room into a 5 cm voxel occupancy grid. This document describes how
+that map is saved on the device, found again in a later session (whose WebXR frame is
+arbitrary), checked, merged, and grown over many sessions — and the adversarial
+simulation loop used to harden it.
+
+## Design
+
+```
+src/world/persist/
+  ChunkedMap   sparse, unbounded 16×16-column chunks of plain typed arrays (floor-relative layers)
+  adapter      the only bridge to the live WorldModel grid (export / import)
+  codec        binary format: header + CRC-32, run-length voxels, gzip (CompressionStream)
+  MapStore     IndexedDB key/value store, crash-safe generations + backup, budget, failure-tolerant
+  features     what the relocalizer looks at: height-band column counts, voxel samples, wall normals,
+               per-voxel score classes of a stored map
+  fft          radix-2 FFT (1D/2D, resumable)
+  Relocalizer  global search (FFT correlation over yaw × translation), 3D refinement, verification, judging
+  Stitcher     resampling between frames, restore rule, evidence fusion, live-evidence bookkeeping
+  MapMemory    the session state machine: search → agree → restore → verify → confirm → save; undo
+  gen          generator helpers (all heavy work is resumable and runs a few ms per frame)
+src/app/Memory.ts   app glue: "I remember this room!", save on hide/exit, forget control
+src/sim/Home.ts, MultiSession.ts, PersistBench.ts   multi-room homes, sessions in random frames, benchmark
+```
+
+### Frames
+
+Every WebXR session starts with an arbitrary tracking frame. The floor height is known
+from hit tests / floor planes, so two sessions' maps differ by a rigid transform about the
+vertical axis: yaw + x/z translation (`Pose2`), plus at most a layer of floor error. Maps
+are stored floor-relative (layer 0 = first layer above the floor), so heights line up.
+
+Each stored map ("fragment") keeps the frame of the session that created it, forever.
+Later sessions never re-anchor it: their *own* observations are resampled into the
+fragment's frame and fused there. (Re-saving the merged live map in each new session's
+frame would resample all the old data every session and blur it a little more each time.)
+
+### Session flow (MapMemory)
+
+1. **Load** every stored fragment (corrupt ones are skipped; the previous generation is
+   tried as a backup).
+2. **Search** every ~4 s once the live map has ≥ 1 m² of observed floor: the session's own
+   observations (stored maps excluded, see below) are relocalized against up to 3
+   fragments per attempt.
+3. **Agree**: a placement must be accepted by two attempts with the live map grown in
+   between. The second attempt is a cheap re-check of the placement and its rivals (no
+   global search).
+4. **Restore**: the fragment is resampled into the live grid's frame and lattice and
+   combined with the live grid: voxels the session observed confidently (|log-odds| ≥ 12)
+   keep the live value; elsewhere the stored value is used with its confidence capped
+   (obstacles at 44 < STRONG_OCC so restored obstacles never count as "contradictions"
+   for the drift/health checks, and ~12 rays clear them; free space at −30). Hopper says
+   "I remember this room!", and navigation/occluders rebuild: the mapped area (and hide
+   & seek) is available at once.
+5. **Verify** every ~5 s against the session's *own* observations only. Two failed checks
+   in a row **undo** the restore: the live grid returns to the session's own observations
+   (plus other restores), and that placement is blocked for the session.
+6. **Confirm** after ≥ 25 s and 3 good checks. Only then is anything written into the
+   stored fragment.
+7. **Save** every 30 s and when the page is hidden/left: confirmed → the fragment as
+   loaded, plus the session's own observations resampled into its frame and fused
+   (newer observation wins where they disagree); other confirmed fragments are
+   **stitched** into it (Q → live → P) and deleted. Not confirmed → the session is saved as
+   its own new fragment (if it covers ≥ 4 m²), which a later session can find or stitch.
+
+Fragments in memory are never modified: every save re-derives the new version from the
+loaded one, so an undo can always put the stored version back.
+
+**The session's own observations** after a restore: the live grid then mixes stored and
+live evidence. MapMemory keeps `liveOnly` (own evidence at restore time) and `base` (the grid
+right after the restore); own evidence now = `liveOnly + (grid − base)` per voxel (log-odds
+are additive; clamping loses little). When the world model rewrites the grid itself
+(floor relevel, drift realignment, aging, rescan), the bookkeeping is re-based on the
+last computed evidence (rescan drops restores).
+
+### Relocalization
+
+1. **Features** per map: per 5 cm column, counts of confidently occupied voxels in three
+   height bands (15–60, 60–130, 130–240 cm) and of confidently free voxels; voxel samples
+   (one per column and height band, so tall walls don't outweigh furniture), each marked
+   *furniture* (column below 1.1 m) or *structure* (column reaching above 1.1 m), with the
+   wall normal for structure samples; for the stored map, a per-voxel class lookup
+   (confident obstacle / obstacle / next to an obstacle / confidently free / unknown).
+2. **Coarse search**: 2D signature images (bands + free space) at 20–30 cm cells; for each
+   yaw (3° steps) the live image is rotated and correlated with the stored one by FFT over
+   all translations at once. Obstacle-on-obstacle scores +, obstacle-on-seen-empty (both
+   ways) −, seen-empty-on-seen-empty a little + (rewards overlapping as an area rather than
+   touching along one wall). The best distinct peaks become candidates.
+3. **Refine** each candidate in 3D: coarse-to-fine over yaw, x/z and ±1 layer, scoring
+   voxel samples against the stored classes.
+4. **Verify** both ways: live obstacles in the stored map, stored obstacles in the live
+   map, live free space against stored obstacles, area overlap of free space (relative to
+   the smaller map), furniture agreement, and how well the agreeing walls pin the pose
+   (smallest eigenvalue of Σ n·nᵀ over their normals).
+5. **Judge**: enough overlap; inlier share ≥ 0.8; ≥ 50% of live obstacles explained; a real
+   area overlap; no rival placement (another basin, > 75 cm or 15° away, not ruled out by
+   clearly more contradictions) scoring ≥ 70% of the best; furniture not mostly
+   contradicting (another room of the same shape); and if the walls don't pin the pose in
+   every direction, at least 3 separate pieces of furniture must agree almost perfectly
+   (one piece moved along a wall would otherwise drag the placement with it).
+
+Symmetric rooms are therefore refused rather than guessed.
+
+### Storage
+
+IndexedDB `hopper-maps`, one object store: `index` (JSON: fragment metadata) and
+`frag:<id>:<generation>` (binary). A save writes a new generation, then switches the index,
+then deletes the generation before the previous one (the previous one is a backup). Budget
+40 MB; the smallest fragments are dropped first. Quota errors, missing IndexedDB (private
+windows) and corrupt records are reported and skipped. `navigator.storage.persist()` is
+requested after the first successful save.
+
+## Harness
+
+* `src/sim/Home.ts`: homes of 2–6 rooms with interior walls and doorways, furnished;
+  `rearrange()` moves/removes furniture between sessions; region-limited scan paths.
+* `src/sim/MultiSession.ts`: `SimSession` — one session in a random WebXR-like frame
+  (yaw ∈ ±180°, x/z ∈ ±4 m, floor at 0 or ~−1.5 m), 'real' sensor noise (drift,
+  relocalization jumps, tracking loss, hard materials, people walking), the drift
+  monitor running as in the app; `FramedSensor` reports depth poses and planes in that
+  frame, planes clipped to the rooms visited. `storedMapQuality()` scores a stored map
+  against the ground truth.
+* `scripts/persist-trials.ts` + `scripts/rejudge.py`: relocalization attempts (SAME room /
+  OTHER room / moved furniture) logged with every verification metric, to calibrate the
+  acceptance rule offline.
+* `scripts/persist-bench.ts` (`src/sim/PersistBench.ts`): N sessions in one home sharing a
+  store, measuring relocalization rate, time, accuracy, wrong restores (kept / undone),
+  fragments, storage, map quality, save/load time and per-frame cost.
+
+## Round log
+
+See below (newest last).

@@ -69,6 +69,25 @@ export function fft2(re: Float64Array, im: Float64Array, n: number, inverse = fa
   }
 }
 
+/** fft2 in slices: yields after every `lines` 1D transforms. */
+export function* fft2Gen(re: Float64Array, im: Float64Array, n: number, inverse = false, lines = 64): Generator<void, void, void> {
+  for (let r = 0; r < n; r++) {
+    fft1(re, im, n, r * n, 1, inverse);
+    if ((r + 1) % lines === 0) yield;
+  }
+  for (let c = 0; c < n; c++) {
+    fft1(re, im, n, c, n, inverse);
+    if ((c + 1) % lines === 0) yield;
+  }
+  if (inverse) {
+    const s = 1 / (n * n);
+    for (let q = 0; q < n * n; q++) {
+      re[q] *= s;
+      im[q] *= s;
+    }
+  }
+}
+
 export function nextPow2(v: number): number {
   let n = 1;
   while (n < v) n <<= 1;

@@ -1,5 +1,6 @@
 import { CS, CS2, chunkKey, emptyMap, getOrCreateChunk, newChunk, type ChunkedMap, type MapChunk } from './ChunkedMap';
 import { invertPose, type Pose2 } from './pose';
+import { every, runToEnd, type Work } from './gen';
 
 /**
  * Moving maps between frames and fusing evidence:
@@ -15,8 +16,8 @@ import { invertPose, type Pose2 } from './pose';
 const OCC = 20;
 /** Evidence at least this confident is an observation, not a guess. */
 export const STRONG_LIVE = 12;
-/** Restored obstacles: confident enough to count as obstacles, weak enough to be cleared by ~10 rays. */
-export const PRIOR_OCC_CAP = 50;
+/** Restored obstacles: obstacles, but below STRONG_OCC (45) so they do not count as contradictions for the drift and health checks, and ~12 rays clear them. */
+export const PRIOR_OCC_CAP = 44;
 export const PRIOR_FREE_CAP = -30;
 const MAX_LO = 120, MIN_LO = -60;
 
@@ -26,11 +27,16 @@ export interface Lattice {
   origin: { x: number; y: number; z: number };
 }
 
+export function transformMap(src: ChunkedMap, T: Pose2, dst: Lattice, limit?: { i0: number; k0: number; i1: number; k1: number }): ChunkedMap {
+  return runToEnd(transformMapGen(src, T, dst, limit));
+}
+
 /**
  * Resample `src` into the frame where p_dst = T(p_src), on `dst`'s lattice.
  * `limit`: only produce dst columns in [i0, i1) × [k0, k1).
  */
-export function transformMap(src: ChunkedMap, T: Pose2, dst: Lattice, limit?: { i0: number; k0: number; i1: number; k1: number }): ChunkedMap {
+export function* transformMapGen(src: ChunkedMap, T: Pose2, dst: Lattice, limit?: { i0: number; k0: number; i1: number; k1: number }, per = 4): Work<ChunkedMap> {
+  const y = every(per);
   const out = emptyMap(dst.res, dst.ny, dst.origin);
   const inv = invertPose(T);
   const ci = Math.cos(inv.yaw), si = Math.sin(inv.yaw), c = Math.cos(T.yaw), s = Math.sin(T.yaw);
@@ -38,6 +44,7 @@ export function transformMap(src: ChunkedMap, T: Pose2, dst: Lattice, limit?: { 
   const sr = src.res, dr = dst.res;
   const ny = Math.min(dst.ny, src.ny);
   for (const sc of src.chunks.values()) {
+    if (y()) yield;
     // Destination column box covering this source chunk.
     let i0 = Infinity, k0 = Infinity, i1 = -Infinity, k1 = -Infinity;
     for (const [u, v] of [
@@ -103,14 +110,20 @@ function keysOf(...maps: (ChunkedMap | null)[]): Set<number> {
   return s;
 }
 
+export function combinePrior(live: ChunkedMap, prior: ChunkedMap): ChunkedMap {
+  return runToEnd(combinePriorGen(live, prior));
+}
+
 /**
  * The live grid's contents after restoring `prior` (already on the live
  * lattice) into `live`.
  */
-export function combinePrior(live: ChunkedMap, prior: ChunkedMap): ChunkedMap {
+export function* combinePriorGen(live: ChunkedMap, prior: ChunkedMap, per = 6): Work<ChunkedMap> {
+  const y = every(per);
   const out = emptyMap(live.res, live.ny, live.origin);
   const ny = live.ny;
   for (const key of keysOf(live, prior)) {
+    if (y()) yield;
     const l = live.chunks.get(key), p = prior.chunks.get(key);
     if (!p) {
       out.chunks.set(key, l!);
@@ -144,15 +157,21 @@ function mergeAux(c: MapChunk, first: MapChunk | null, second: MapChunk | null, 
   }
 }
 
+export function fuseEvidence(m: ChunkedMap, e: ChunkedMap): ChunkedMap {
+  return runToEnd(fuseEvidenceGen(m, e));
+}
+
 /**
  * Fold a session's own evidence `e` (on the stored map's lattice) into the
  * stored map `m`. Returns a new map (unchanged chunks are shared).
  */
-export function fuseEvidence(m: ChunkedMap, e: ChunkedMap): ChunkedMap {
+export function* fuseEvidenceGen(m: ChunkedMap, e: ChunkedMap, per = 6): Work<ChunkedMap> {
+  const y = every(per);
   const out = emptyMap(m.res, m.ny, m.origin);
   for (const [k, c] of m.chunks) out.chunks.set(k, c);
   const ny = m.ny;
   for (const [key, ec] of e.chunks) {
+    if (y()) yield;
     const mc = m.chunks.get(key);
     const c = newChunk(ec.cx, ec.cz, ny);
     for (let q = 0; q < CS2 * ny; q++) {
@@ -171,15 +190,21 @@ export function fuseEvidence(m: ChunkedMap, e: ChunkedMap): ChunkedMap {
   return out;
 }
 
+export function liveEvidence(now: ChunkedMap, base: ChunkedMap, liveOnly: ChunkedMap): ChunkedMap {
+  return runToEnd(liveEvidenceGen(now, base, liveOnly));
+}
+
 /**
  * The session's own evidence: liveOnly + (now − base), voxel by voxel, where
  * `base` is the live grid right after the last restore and `liveOnly` the
  * session's own evidence at that moment.
  */
-export function liveEvidence(now: ChunkedMap, base: ChunkedMap, liveOnly: ChunkedMap): ChunkedMap {
+export function* liveEvidenceGen(now: ChunkedMap, base: ChunkedMap, liveOnly: ChunkedMap, per = 6): Work<ChunkedMap> {
+  const y = every(per);
   const out = emptyMap(now.res, now.ny, now.origin);
   const ny = now.ny;
   for (const key of keysOf(now, base, liveOnly)) {
+    if (y()) yield;
     const g = now.chunks.get(key), b = base.chunks.get(key), lo = liveOnly.chunks.get(key);
     const ref = g ?? b ?? lo!;
     const c = newChunk(ref.cx, ref.cz, ny);
