@@ -64,6 +64,7 @@ export interface SessionReport {
   loadMs: number;
   busyMs: number;
   maxTickMs: number;
+  maxStep: { ms: number; job: string };
 }
 
 export interface BenchReport {
@@ -160,9 +161,10 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
       loadMs,
       busyMs: memory.busyMs,
       maxTickMs: memory.maxTickMs,
+      maxStep: memory.maxStep,
     });
     log(
-      `session ${s}: rooms ${rooms.join('+')} ${known ? 'known' : 'new'} → ${firstGood ? `restored at ${firstGood.t.toFixed(0)}s` : 'no restore'}${restores.some((r) => r.wrong) ? ' WRONG RESTORE' : ''}; fragments ${store.list().length}, ${(store.totalBytes / 1024).toFixed(0)}KB, save ${saveMs.toFixed(0)}ms load ${loadMs.toFixed(0)}ms busy ${memory.busyMs.toFixed(0)}ms (max tick ${memory.maxTickMs.toFixed(1)}ms) ${memory.status.lastReason}`,
+      `session ${s}: rooms ${rooms.join('+')} ${known ? 'known' : 'new'} → ${firstGood ? `restored at ${firstGood.t.toFixed(0)}s` : 'no restore'}${restores.some((r) => r.wrong) ? ' WRONG RESTORE' : ''}; fragments ${store.list().length}, ${(store.totalBytes / 1024).toFixed(0)}KB, save ${saveMs.toFixed(0)}ms load ${loadMs.toFixed(0)}ms busy ${memory.busyMs.toFixed(0)}ms (max tick ${memory.maxTickMs.toFixed(1)}ms, max step ${memory.maxStep.ms.toFixed(1)}ms in ${memory.maxStep.job}) ${memory.status.lastReason}`,
     );
   }
   // Final map quality per stored fragment.

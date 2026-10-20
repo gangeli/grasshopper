@@ -115,6 +115,15 @@ export function exportLive(world: WorldModel, into?: ChunkedMap, rows?: [number,
   return out;
 }
 
+/** Number of live grid columns with observed floor (cheap: one pass over the column mask). */
+export function liveObservedColumns(world: WorldModel): number {
+  const o = world.grid?.observed;
+  if (!o) return 0;
+  let n = 0;
+  for (let q = 0; q < o.length; q++) n += o[q];
+  return n;
+}
+
 /** exportLive in slices (a couple of chunk rows per step). */
 export function* exportLiveGen(world: WorldModel, rowsPerStep = 2): Generator<void, ChunkedMap | null, void> {
   const g = world.grid;
@@ -164,4 +173,74 @@ export function importLive(world: WorldModel, m: ChunkedMap): boolean {
   g.touchAll();
   g.version++;
   return true;
+}
+
+/**
+ * What MapMemory needs from the live map, so it can run next to the world
+ * model (WorldSource) or in a worker fed with snapshots (memoryWorker.ts).
+ */
+export interface LiveStamp {
+  /** Identity of the grid object (changes when the world model replaces it). */
+  grid: number;
+  epoch: number;
+  hard: number;
+  soft: number;
+  /** relevel + realign recoveries. */
+  other: number;
+}
+
+export function sameStamp(a: LiveStamp, b: LiveStamp): boolean {
+  return a.grid === b.grid && a.epoch === b.epoch && a.hard === b.hard && a.soft === b.soft && a.other === b.other;
+}
+
+export interface LiveSource {
+  readonly ready: boolean;
+  /** Waiting for another thread (a snapshot or an import): don't spin. */
+  readonly waiting?: boolean;
+  lattice(): LiveLattice | null;
+  stamp(): LiveStamp;
+  /** Columns with observed floor (cheap). */
+  observedColumns(): number;
+  /** A snapshot of the live map (sliced). */
+  exportGen(): Generator<void, ChunkedMap | null, void>;
+  /** Replace the live map's contents, if the grid is still `expectGrid`. */
+  importGen(m: ChunkedMap, expectGrid: number): Generator<void, boolean, void>;
+}
+
+const gridIds = new WeakMap<object, number>();
+let nextGridId = 1;
+export function gridId(g: object | null): number {
+  if (!g) return 0;
+  let id = gridIds.get(g);
+  if (!id) gridIds.set(g, (id = nextGridId++));
+  return id;
+}
+
+export function worldStamp(world: WorldModel): LiveStamp {
+  const r = world.recoveries;
+  return { grid: gridId(world.grid), epoch: world.epoch, hard: r.hard, soft: r.soft, other: r.relevel + r.realign };
+}
+
+/** The live map of a WorldModel in this thread. */
+export class WorldSource implements LiveSource {
+  constructor(readonly world: WorldModel) {}
+  get ready(): boolean {
+    return !!this.world.grid;
+  }
+  lattice() {
+    return liveLattice(this.world);
+  }
+  stamp() {
+    return worldStamp(this.world);
+  }
+  observedColumns() {
+    return liveObservedColumns(this.world);
+  }
+  exportGen() {
+    return exportLiveGen(this.world);
+  }
+  *importGen(m: ChunkedMap, expectGrid: number): Generator<void, boolean, void> {
+    if (gridId(this.world.grid) !== expectGrid) return false;
+    return importLive(this.world, m);
+  }
 }

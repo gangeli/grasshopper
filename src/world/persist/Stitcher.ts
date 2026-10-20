@@ -118,7 +118,7 @@ export function combinePrior(live: ChunkedMap, prior: ChunkedMap): ChunkedMap {
  * The live grid's contents after restoring `prior` (already on the live
  * lattice) into `live`.
  */
-export function* combinePriorGen(live: ChunkedMap, prior: ChunkedMap, per = 6): Work<ChunkedMap> {
+export function* combinePriorGen(live: ChunkedMap, prior: ChunkedMap, per = 6, fillOnly = false): Work<ChunkedMap> {
   const y = every(per);
   const out = emptyMap(live.res, live.ny, live.origin);
   const ny = live.ny;
@@ -133,7 +133,9 @@ export function* combinePriorGen(live: ChunkedMap, prior: ChunkedMap, per = 6): 
     for (let q = 0; q < CS2 * ny; q++) {
       const lv = l ? l.occ[q] : 0;
       const pv = q < p.occ.length ? capPrior(p.occ[q]) : 0;
-      c.occ[q] = lv >= STRONG_LIVE || lv <= -STRONG_LIVE ? lv : lv === 0 ? pv : clampLO(lv + pv);
+      // fillOnly: only where the live grid knows nothing (re-applying a restore
+      // after the world model rewrote its grid; never counts a prior twice).
+      c.occ[q] = lv >= STRONG_LIVE || lv <= -STRONG_LIVE ? lv : lv === 0 ? pv : fillOnly ? lv : clampLO(lv + pv);
     }
     for (let q = 0; q < CS2; q++) c.observed[q] = (l?.observed[q] ?? 0) | p.observed[q];
     mergeAux(c, l ?? null, p, ny);

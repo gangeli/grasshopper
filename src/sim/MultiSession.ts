@@ -229,12 +229,15 @@ export interface StoredMapQuality {
   coverage: number;
   /** Occupied voxels far (>15cm) from any real geometry: ghosts (misaligned merges show up here). */
   ghosts: number;
+  /** Precision and ghosts above 1.3m only (walls, tall cupboards): unaffected by furniture moved since. */
+  wallPrecision: number;
+  wallGhosts: number;
 }
 
 export function storedMapQuality(m: ChunkedMap, room: SimRoom, roomToMap: Pose2): StoredMapQuality {
   const inv = invertPose(roomToMap);
   const res = m.res;
-  let occ = 0, good = 0, ghosts = 0, inside = 0, insideFree = 0, cov = 0;
+  let occ = 0, good = 0, ghosts = 0, inside = 0, insideFree = 0, cov = 0, wOcc = 0, wGood = 0, wGhosts = 0;
   for (const c of m.chunks.values())
     for (let lz = 0; lz < CS; lz++)
       for (let lx = 0; lx < CS; lx++) {
@@ -249,16 +252,32 @@ export function storedMapQuality(m: ChunkedMap, room: SimRoom, roomToMap: Pose2)
           const y = (j + 0.5) * res;
           if (v > OCC_THRESHOLD) {
             occ++;
-            if (room.solidAt({ x: p.x, y, z: p.z }, res * 1.2)) good++;
-            else if (!room.solidAt({ x: p.x, y, z: p.z }, 0.15)) ghosts++;
+            const near = room.solidAt({ x: p.x, y, z: p.z }, res * 1.2);
+            const ghost = !near && !room.solidAt({ x: p.x, y, z: p.z }, 0.15);
+            if (near) good++;
+            else if (ghost) ghosts++;
+            if (y >= 1.3) {
+              wOcc++;
+              if (near) wGood++;
+              else if (ghost) wGhosts++;
+            }
           } else if (y < 0.3 && room.solidAt({ x: p.x, y, z: p.z }, -0.07)) {
             inside++;
             if (v < -2) insideFree++;
-          } else if (y < 0.3 && room.solidAt({ x: p.x, y, z: p.z }, -0.07)) inside++;
+          }
         }
       }
   // Real free floor area of the home (approx.).
   let freeArea = 0;
   for (let x = -room.halfW + 0.025; x < room.halfW; x += 0.05) for (let z = -room.halfD + 0.025; z < room.halfD; z += 0.05) if (!room.solidAt({ x, y: 0.3, z }, 0)) freeArea += 0.0025;
-  return { precision: occ ? good / occ : 1, occupied: occ, falseFree: inside ? insideFree / inside : 0, coveredArea: cov * res * res, coverage: freeArea ? (cov * res * res) / freeArea : 0, ghosts };
+  return {
+    precision: occ ? good / occ : 1,
+    occupied: occ,
+    falseFree: inside ? insideFree / inside : 0,
+    coveredArea: cov * res * res,
+    coverage: freeArea ? (cov * res * res) / freeArea : 0,
+    ghosts,
+    wallPrecision: wOcc ? wGood / wOcc : 1,
+    wallGhosts: wGhosts,
+  };
 }

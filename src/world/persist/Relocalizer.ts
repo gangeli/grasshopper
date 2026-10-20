@@ -73,8 +73,14 @@ export interface VerifyMetrics {
   bwdConf: number;
   /** Agreement share among informative samples (hits / (hits + conflicts)). */
   inlier: number;
-  /** Share of live occupied samples explained by the stored map. */
+  /**
+   * Share of the live occupied samples that land where the stored map has
+   * seen something (its known columns) and are on its obstacles. (Live
+   * observations outside the stored map say nothing either way.)
+   */
   explained: number;
+  /** Live occupied samples landing in the stored map's known columns. */
+  fwdKnown: number;
   score: number;
 }
 
@@ -274,13 +280,15 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
   const c = Math.cos(T.yaw), s = Math.sin(T.yaw), dj = T.dj ?? 0;
   const F = frag.lookup, Lk = live.lookup;
   const lo = live.features.occ, lf = live.features.free, fo = frag.features.occ;
-  let fwdN = 0, fwdHit = 0, fwdConf = 0, lowN = 0, lowHit = 0, lowConf = 0;
+  let fwdN = 0, fwdHit = 0, fwdConf = 0, fwdKnown = 0, lowN = 0, lowHit = 0, lowConf = 0;
   // Furniture that agrees, by 25cm cell (live frame), to count separate objects.
   const hitCells = new Map<number, number>();
   for (let q = 0; q < lo.n; q++) {
     const x = lo.x[q], z = lo.z[q];
-    const k = F.classAt(c * x - s * z + T.tx, s * x + c * z + T.tz, lo.j[q] + dj);
+    const fx = c * x - s * z + T.tx, fz = s * x + c * z + T.tz;
+    const k = F.classAt(fx, fz, lo.j[q] + dj);
     fwdN++;
+    if (k !== 0 || F.knownAt(fx, fz) > 0) fwdKnown++;
     const hit = k === 1 || k === 2 || k === 3;
     if (hit) fwdHit++;
     else if (k === 4) fwdConf++;
@@ -349,7 +357,7 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
   const inlier = hits + conf > 0 ? hits / (hits + conf) : 0;
   // Free-space agreement counts at half weight (it is what tells a whole-room
   // overlap from two maps touching along one wall).
-  return { fwdN, fwdHit, fwdConf, freeN, freeConf, freeHit, freeSamples: lf.n, bwdFreeHit, fragFreeSamples: ff.n, lowObjects, lowN, lowHit, lowConf, bwdLowN, bwdLowHit, bwdLowConf, wallHit, wallWeak, bwdN, bwdHit, bwdConf, inlier, explained: fwdN ? fwdHit / fwdN : 0, score: hits + 0.5 * freeHit - 3 * conf };
+  return { fwdN, fwdHit, fwdConf, freeN, freeConf, freeHit, freeSamples: lf.n, bwdFreeHit, fragFreeSamples: ff.n, lowObjects, lowN, lowHit, lowConf, bwdLowN, bwdLowHit, bwdLowConf, wallHit, wallWeak, bwdN, bwdHit, bwdConf, inlier, explained: fwdKnown ? fwdHit / fwdKnown : 0, fwdKnown, score: hits + 0.5 * freeHit - 3 * conf };
 }
 
 const cellKey = (x: number, z: number) => (Math.floor(x / 0.25) + 32768) * 65536 + (Math.floor(z / 0.25) + 32768);

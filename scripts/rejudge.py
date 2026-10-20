@@ -57,3 +57,26 @@ print(f"{P}\nattempts {len(rows)} correct-best {good} accepted-correct {tp} FALS
 for r in fps:
     m = r['best']
     print('  FP seed', r['seed'], 't', r['t'], 'moved', r['moved'], 'err', r['errCm'], r['errDeg'], 'inl', round(m['inlier'], 2), 'furn', m['lowN'], m['lowConf'], m['bwdLowN'], m['bwdLowConf'], 'wallWeak', round(m.get('wallWeak', 0)), 'objects', m.get('lowObjects'), 'amb', r['amb'])
+
+# Session level: a restore needs two consecutive accepted attempts that agree
+# (same placement: here, both correct or both the same error).
+by = {}
+for r in rows:
+    by.setdefault(r['seed'], []).append(r)
+sfp = stp = 0
+for seed, rs in by.items():
+    rs.sort(key=lambda r: r['t'])
+    acc = [judge(r.get('best'), r['amb'], P)[0] for r in rs]
+    for k in range(1, len(rs)):
+        if acc[k] and acc[k - 1]:
+            a, b = rs[k - 1], rs[k]
+            same = a['errCm'] is not None and b['errCm'] is not None and abs(a['errCm'] - b['errCm']) < 10 and abs(a['errDeg'] - b['errDeg']) < 2
+            if not same:
+                continue
+            if correct(b):
+                stp += 1
+            else:
+                sfp += 1
+                print('  SESSION FP seed', seed, 't', b['t'], 'err', b['errCm'], b['errDeg'])
+            break
+print(f"session level: restores {stp + sfp} (correct {stp}, WRONG {sfp}) of {len(by)} sessions ({sum(1 for rs in by.values() if rs[0]['same'])} same-room)")

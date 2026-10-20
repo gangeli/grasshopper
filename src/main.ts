@@ -112,7 +112,7 @@ async function main() {
       // Rooms remembered from earlier sessions (restored once Hopper recognises one).
       void startMemory(stack, hud, voice, { onMapChanged: () => stage.updateOccluder(stack, true) }).then((m) => {
         ar.memory = m;
-        if (window.__hopper) window.__hopper.memory = m?.memory;
+        if (window.__hopper) window.__hopper.memory = m;
       });
       // Leaving AR (or AR failing) goes back to a fresh start page: never a dead AR screen.
       const backToStart = (msg?: string) => {
@@ -177,7 +177,7 @@ async function main() {
       if (q.get('bot') !== '1')
         void startMemory(sim.sim, hud, voice, { onMapChanged: () => stage.debug && stage.updateOccluder(sim.sim) }).then((m) => {
           sim.memory = m;
-          if (window.__hopper) window.__hopper.memory = m?.memory;
+          if (window.__hopper) window.__hopper.memory = m;
         });
     }
   };

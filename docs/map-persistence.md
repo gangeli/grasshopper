@@ -131,3 +131,52 @@ requested after the first successful save.
 ## Round log
 
 See below (newest last).
+
+### Round 0 — first relocalizer (trials: A maps 1–2 rooms, B in a fresh frame maps the same or another room, attempts at 10/20/30/40 s; dressed homes, 'real' noise, furniture moved in half the trials)
+
+* Harness bug found first: the simulated plane detector reported the floor and outer
+  walls of the *whole home* as soon as any part was seen, so every session "knew" every
+  room's outer walls. Planes are now clipped to the rooms the camera has been in.
+* Accuracy was good from the start (typically 1–5 cm, < 0.3°), but **3 false accepts in
+  84 attempts**: (1) two maps aligned along one shared wall with their floors not
+  overlapping at all; (2) a wrong placement 53 cm off in a room whose only visible walls
+  were parallel and whose dominant piece of furniture had moved ~50 cm along them;
+  (3) a bare room placed into another room of the same size.
+* Also: rivals were mostly the *same* placement nudged a few degrees (same basin), so the
+  score-ratio "ambiguity" refused good matches.
+
+### Round 1 — overlap and rivals
+
+* Seen-empty space must overlap as an area (≥ 30% of the smaller map's free samples).
+* Rivals only from other basins (> 75 cm or > 15° away), and a rival with clearly more
+  contradictions (≥ 2× and +60 samples) doesn't count.
+* Voxel samples one per column and height band (walls had outweighed furniture 10:1).
+* First "walls must pin the pose" test (shift the pose ±15 cm, see how many wall hits are
+  lost) — useless: thick, noisy walls keep their hits; it refused 85% of good matches.
+* Result: 0 false accepts in 146 attempts, but only 17 of 75 correct answers accepted.
+
+### Round 2–4 — what the walls constrain; furniture as evidence
+
+* Structure = columns reaching above 1.1 m (the camera mostly looks down; walls are rarely
+  seen above 1.3 m). Each structure sample gets the normal of its wall (PCA of the tall
+  columns around it); the smallest eigenvalue of Σ n·nᵀ over agreeing walls says whether
+  they pin the pose in every direction.
+* A unit test then caught a new false accept: a same-shaped room where 95% of the
+  furniture landed in seen-empty space → **furniture mostly contradicting → reject**
+  (another room of the same shape, or so much moved that the stored map isn't worth it).
+* When the walls don't pin the pose: furniture must agree almost perfectly *and* come from
+  ≥ 3 separate pieces (clusters). With 2 pieces the 53 cm slide (round 0, case 2) comes back.
+* 0 false accepts in 320 attempts; 22 of 171 correct answers accepted: still mostly refused
+  for "walls don't pin it".
+
+### Round 5 — harness realism: interior walls
+
+* The simulated plane detector only ever produced planes for a home's *outer* walls;
+  ARCore finds interior walls just the same (blank ones need a better look). Added
+  interior wall planes (both faces, detected when seen, 8 samples for blank walls).
+* 117 of 196 correct answers accepted per attempt; 1 single-attempt false accept (a bare
+  room, 10 s in, placed into another room of the same size — furniture barely seen).
+  Session level (two agreeing attempts, as the app does): 35 of 51 same-room sessions
+  restored within 40 s, **0 wrong**.
+* Response: walls-only matches (fewer than 2 pieces of furniture agreeing) need a third
+  agreeing look.

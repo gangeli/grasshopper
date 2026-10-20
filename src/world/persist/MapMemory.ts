@@ -1,5 +1,5 @@
 import type { WorldModel } from '../WorldModel';
-import { exportLive, exportLiveGen, importLive, liveLattice } from './adapter';
+import { sameStamp, WorldSource, type LiveSource, type LiveStamp } from './adapter';
 import { observedColumns, type ChunkedMap } from './ChunkedMap';
 import { encodeBody, packBody } from './codec';
 import { extractFeaturesGen, FragmentLookup, type MapFeatures } from './features';
@@ -84,6 +84,11 @@ interface Frag {
   map: ChunkedMap;
   index: FragmentIndex | null;
   lastTried: number;
+  /** Back-off: no full search of this fragment before this time unless the live map changed a lot. */
+  nextTry: number;
+  backoff: number;
+  /** Live map size (occupied + free voxels) at the last full search. */
+  triedAt: number;
 }
 
 export interface Link {
@@ -136,7 +141,7 @@ export class MapMemory {
   readonly fragments = new Map<string, Frag>();
   links: Link[] = [];
   readonly sessionId: string;
-  private world: WorldModel | null = null;
+  private source: LiveSource | null = null;
   private job: Job | null = null;
   private jobName = '';
   private tracker: { liveOnly: ChunkedMap; base: ChunkedMap } | null = null;
@@ -146,7 +151,7 @@ export class MapMemory {
   private nextAttempt = 0;
   private nextVerify = 0;
   private nextSave = 0;
-  private watch: { grid: unknown; epoch: number; hard: number; other: number } | null = null;
+  private watch: LiveStamp | null = null;
   private writing: Promise<void> | null = null;
   /** This session's own fragment has been written (id = sessionId). */
   private ownSaved = false;
@@ -161,6 +166,8 @@ export class MapMemory {
   busyMs = 0;
   /** Longest single tick (ms). */
   maxTickMs = 0;
+  /** Longest single slice of work, and which job it was in (diagnostics). */
+  maxStep = { ms: 0, job: '' };
 
   constructor(
     readonly store: MapStore | null,
@@ -183,7 +190,7 @@ export class MapMemory {
         this.log(`fragment ${meta.id} unreadable: skipped`);
         continue;
       }
-      this.fragments.set(meta.id, { meta, map, index: null, lastTried: -Infinity });
+      this.fragments.set(meta.id, { meta, map, index: null, lastTried: -Infinity, nextTry: -Infinity, backoff: 0, triedAt: 0 });
     }
     this.status.fragments = this.fragments.size;
     this.status.storedBytes = this.store.totalBytes;
@@ -191,8 +198,9 @@ export class MapMemory {
     this.status.state = 'idle';
   }
 
-  attach(world: WorldModel): void {
-    this.world = world;
+  /** The live map to work with: a WorldModel in this thread, or any LiveSource (e.g. snapshots in a worker). */
+  attach(world: WorldModel | LiveSource): void {
+    this.source = 'exportGen' in world ? world : new WorldSource(world);
     this.watch = null;
   }
 
@@ -209,17 +217,20 @@ export class MapMemory {
     const t0 = performance.now();
     this.now = now;
     try {
-      const w = this.world;
-      if (!w || !w.grid) return;
-      this.checkWorldEvents(w);
+      const src = this.source;
+      if (!src || !src.ready) return;
+      this.checkWorldEvents(src);
       if (!this.job) this.job = this.nextJob(now);
       while (this.job) {
+        const s0 = performance.now();
         const r = this.job.next();
+        const ds = performance.now() - s0;
+        if (ds > this.maxStep.ms) this.maxStep = { ms: ds, job: this.jobName };
         if (r.done) {
           this.job = null;
           break;
         }
-        if (performance.now() - t0 >= budgetMs) break;
+        if (performance.now() - t0 >= budgetMs || src.waiting) break;
       }
     } catch (e) {
       // Never let persistence break the game: drop the job and carry on.
@@ -249,13 +260,17 @@ export class MapMemory {
 
   private nextJob(now: number): Job | null {
     this.status.state = this.links.length ? 'restored' : this.fragments.size ? 'searching' : 'idle';
+    if (this.needRebase) {
+      this.jobName = 'rebase';
+      return this.rebaseJob();
+    }
     if (this.links.length && now >= this.nextVerify) {
       this.nextVerify = now + this.opts.verifyEvery;
       this.jobName = 'verify';
       return this.verifyJob();
     }
     const unlinked = [...this.fragments.values()].filter((f) => !this.links.some((l) => l.fragment === f.meta.id) && f.meta.id !== this.sessionId && !this.absorbed.has(f.meta.id));
-    if (unlinked.length && now >= this.nextAttempt) {
+    if (unlinked.length && now >= this.nextAttempt && this.source && unlinked.some((f) => this.isDue(f, this.source!.observedColumns()))) {
       this.nextAttempt = now + this.opts.attemptEvery;
       this.jobName = 'relocalize';
       return this.relocJob(unlinked);
@@ -275,13 +290,11 @@ export class MapMemory {
    * correction, drift realignment, map aging, rescan): the restored-prior
    * bookkeeping is re-based on the evidence computed most recently.
    */
-  private checkWorldEvents(w: WorldModel) {
-    const rec = w.recoveries;
-    const cur = { grid: w.grid, epoch: w.epoch, hard: rec.hard, other: rec.relevel + rec.soft + rec.realign };
+  private checkWorldEvents(src: LiveSource) {
+    const cur = src.stamp();
     const prev = this.watch;
     this.watch = cur;
-    if (!prev) return;
-    if (prev.grid === cur.grid && prev.epoch === cur.epoch && prev.hard === cur.hard && prev.other === cur.other) return;
+    if (!prev || sameStamp(prev, cur)) return;
     // Any job in flight was computing against the old grid.
     this.job = null;
     if (cur.hard !== prev.hard) {
@@ -291,19 +304,57 @@ export class MapMemory {
       this.tracker = null;
       this.evidence = null;
       this.hyps.clear();
+      this.needRebase = false;
       return;
     }
     if (this.tracker) {
-      const g = exportLive(w);
-      if (!g) return;
-      this.tracker = { liveOnly: this.evidence?.map ?? this.tracker.liveOnly, base: g };
-      this.log('grid rewritten by the world model: re-based restored-map bookkeeping');
+      // A floor relevel or drift realignment may have dropped (part of) the
+      // restored maps (a realignment restores a snapshot from before them):
+      // fill them in again where the grid now knows nothing. (Not after the
+      // map was aged: that is the world model reacting to contradictions,
+      // and the next check decides whether the restore stays.)
+      this.needRebase = true;
+      this.reapplyAfter = this.reapplyAfter || cur.soft === prev.soft;
+      if (cur.soft !== prev.soft) this.reapplyAfter = false;
     }
+  }
+  private needRebase = false;
+  private reapplyAfter = false;
+
+  /**
+   * Re-base the restored-map bookkeeping on the grid as the world model left
+   * it (own evidence = the last computed), then fill the restored maps back
+   * in where the grid now knows nothing.
+   */
+  private *rebaseJob(): Job {
+    const src = this.source!;
+    const tr = this.tracker;
+    this.needRebase = false;
+    if (!tr) return;
+    const cur = yield* src.exportGen();
+    if (!cur) return;
+    const e = this.evidence?.map ?? tr.liveOnly;
+    this.tracker = { liveOnly: e, base: cur };
+    const reapply = this.reapplyAfter;
+    this.reapplyAfter = false;
+    this.log(`grid rewritten by the world model: re-based${reapply ? ', re-applying restored maps' : ''}`);
+    if (!reapply || !this.links.length) return;
+    const stamp = src.stamp();
+    let g = cur;
+    for (const l of this.links) {
+      const f = this.fragments.get(l.fragment);
+      const prior = f ? yield* this.priorGen(f, l.pose) : null;
+      if (prior) g = yield* combinePriorGen(g, prior, 6, true);
+    }
+    if (!(yield* src.importGen(g, stamp.grid))) return;
+    this.tracker = { liveOnly: e, base: g };
+    this.watch = src.stamp();
+    this.hooks.onMapChanged?.();
   }
 
   /** The session's own observations right now (stored maps excluded). Sliced. */
   private *evidenceGen(): Work<ChunkedMap | null> {
-    const g = yield* exportLiveGen(this.world!);
+    const g = yield* this.source!.exportGen();
     if (!g) return null;
     const tr = this.tracker;
     const e = tr ? yield* liveEvidenceGen(g, tr.base, tr.liveOnly) : g;
@@ -334,12 +385,20 @@ export class MapMemory {
 
   /** A fragment transformed into the live grid's frame and lattice (clipped to the grid). */
   private *priorGen(f: Frag, pose: Pose2): Work<ChunkedMap | null> {
-    const lat = liveLattice(this.world!);
+    const lat = this.source!.lattice();
     if (!lat) return null;
     return yield* transformMapGen(f.map, invertPose(pose), lat, { i0: 0, k0: 0, i1: lat.nx, k1: lat.nz });
   }
 
   // --- Jobs ----------------------------------------------------------------------------
+
+  /**
+   * Fragments that keep saying no are searched less often (the global search
+   * is the expensive part), unless the live map has grown a lot since.
+   */
+  private isDue(f: Frag, size: number): boolean {
+    return this.hyps.has(f.meta.id) || this.now >= f.nextTry || size > f.triedAt * 1.3 + 400;
+  }
 
   private *relocJob(unlinked: Frag[]): Job {
     const e = yield* this.evidenceGen();
@@ -348,9 +407,15 @@ export class MapMemory {
     if (area < this.opts.minSearchArea) return;
     const live = yield* this.liveSearchData(e);
     const at = live.features.bbox ? { x: (live.features.bbox.x0 + live.features.bbox.x1) / 2, z: (live.features.bbox.z0 + live.features.bbox.z1) / 2 } : { x: 0, z: 0 };
-    const picks = unlinked.sort((a, b) => a.lastTried - b.lastTried).slice(0, this.opts.perAttempt);
+    const size = this.source!.observedColumns();
+    const picks = unlinked.filter((f) => this.isDue(f, size)).sort((a, b) => a.lastTried - b.lastTried).slice(0, this.opts.perAttempt);
     for (const f of picks) {
       f.lastTried = this.now;
+      if (!this.hyps.has(f.meta.id)) {
+        f.triedAt = size;
+        f.backoff = Math.min(32, f.backoff ? f.backoff * 2 : this.opts.attemptEvery);
+        f.nextTry = this.now + f.backoff;
+      }
       const index = yield* this.fragIndex(f);
       this.status.attempts++;
       // With a candidate already, re-check it (and its rivals) instead of searching again.
@@ -388,8 +453,13 @@ export class MapMemory {
         } else this.hyps.set(id, fresh());
       } else this.hyps.set(id, fresh());
       const hh = this.hyps.get(id)!;
-      this.log(`${id}: candidate ${fmtPose(best.pose)} (${hh.count}/${this.opts.agree}) inlier ${best.metrics?.inlier.toFixed(2)} amb ${r.ambiguity.toFixed(2)}`);
-      if (hh.count >= this.opts.agree) {
+      f.backoff = 0;
+      f.nextTry = -Infinity;
+      // Walls alone (bare rooms: little furniture seen) fit any room of the
+      // same shape: ask for one more agreeing look.
+      const need = this.opts.agree + ((best.metrics?.lowObjects ?? 0) < 2 ? 1 : 0);
+      this.log(`${id}: candidate ${fmtPose(best.pose)} (${hh.count}/${need}) inlier ${best.metrics?.inlier.toFixed(2)} amb ${r.ambiguity.toFixed(2)}`);
+      if (hh.count >= need) {
         this.hyps.delete(id);
         yield* this.restore(f, hh.pose, best.metrics ?? null, e);
         return; // the live grid changed: start the next job afresh
@@ -400,17 +470,17 @@ export class MapMemory {
 
   /** Restore fragment f into the live grid at `pose` (live → fragment); `e` = the session's own evidence. */
   private *restore(f: Frag, pose: Pose2, metrics: VerifyMetrics | null, e: ChunkedMap): Work<void> {
-    const w = this.world!;
-    const grid = w.grid;
+    const src = this.source!;
+    const stamp = src.stamp();
     const prior = yield* this.priorGen(f, pose);
-    const g = yield* exportLiveGen(w);
+    const g = yield* src.exportGen();
     if (!prior || !g) return;
     const merged = yield* combinePriorGen(g, prior);
     // Only if nothing rewrote the grid meanwhile (a later attempt will retry).
-    if (w.grid !== grid || !importLive(w, merged)) return;
+    if (!sameStamp(stamp, src.stamp()) || !(yield* src.importGen(merged, stamp.grid))) return;
     // Right after the import the grid is exactly `merged`.
     this.tracker = { liveOnly: e, base: merged };
-    this.watch = { grid: w.grid, epoch: w.epoch, hard: w.recoveries.hard, other: w.recoveries.relevel + w.recoveries.soft + w.recoveries.realign };
+    this.watch = src.stamp();
     this.links.push({ fragment: f.meta.id, pose, since: this.now, good: 0, bad: 0, confirmed: false, last: metrics });
     this.nextVerify = this.now + this.opts.verifyEvery;
     this.status.restores++;
@@ -459,7 +529,7 @@ export class MapMemory {
   }
 
   private *undoGen(link: Link, reason: string, evidence: ChunkedMap | null): Work<void> {
-    const w = this.world;
+    const src = this.source;
     this.links = this.links.filter((l) => l !== link);
     this.absorbed.delete(link.fragment);
     const bl = this.blocked.get(link.fragment) ?? [];
@@ -468,8 +538,8 @@ export class MapMemory {
     this.status.undos++;
     // If it had been written into storage, put the stored version back on the next save.
     if (link.confirmed) this.restoreStored.add(link.fragment);
-    if (w && w.grid) {
-      const grid = w.grid;
+    if (src && src.ready) {
+      const stamp = src.stamp();
       const e = evidence ?? (yield* this.evidenceGen());
       if (e) {
         let g = e;
@@ -478,9 +548,9 @@ export class MapMemory {
           const prior = f ? yield* this.priorGen(f, l.pose) : null;
           if (prior) g = yield* combinePriorGen(g, prior);
         }
-        if (w.grid === grid && importLive(w, g)) {
+        if (sameStamp(stamp, src.stamp()) && (yield* src.importGen(g, stamp.grid))) {
           this.tracker = this.links.length ? { liveOnly: e, base: g } : null;
-          this.watch = { grid: w.grid, epoch: w.epoch, hard: w.recoveries.hard, other: w.recoveries.relevel + w.recoveries.soft + w.recoveries.realign };
+          this.watch = src.stamp();
           this.hooks.onMapChanged?.();
         }
       }
@@ -558,17 +628,26 @@ export class MapMemory {
 
   /** Save now (page hidden / leaving). Resolves when written. */
   async flush(): Promise<void> {
-    if (!this.store || !this.world?.grid) return;
+    if (!this.store || !this.source?.ready) return;
     if (this.writing) await this.writing.catch(() => undefined);
     this.job = null;
-    const g = this.saveJob();
-    for (let r = g.next(); !r.done; r = g.next());
+    await this.runAsync(this.saveJob());
     if (this.writing) await (this.writing as Promise<void>).catch(() => undefined);
+  }
+
+  /** Run a job to completion, letting other work (messages from the page) in while the source is waiting. */
+  private async runAsync<T>(g: Work<T>): Promise<T> {
+    for (;;) {
+      const r = g.next();
+      if (r.done) return r.value;
+      if (this.source?.waiting) await new Promise((res) => setTimeout(res, 2));
+    }
   }
 
   /** Forget every stored map, and take back anything restored into the live map. */
   async forget(): Promise<boolean> {
-    for (const l of [...this.links]) this.undo(l, 'forgotten');
+    this.job = null;
+    for (const l of [...this.links]) await this.runAsync(this.undoGen(l, 'forgotten', null));
     this.blocked.clear();
     this.hyps.clear();
     this.fragments.clear();
@@ -586,7 +665,7 @@ export class MapMemory {
 
   /** The session's own evidence (diagnostics, harness). */
   sessionEvidence(): ChunkedMap | null {
-    return this.world?.grid ? this.computeEvidence() : null;
+    return this.source?.ready ? this.computeEvidence() : null;
   }
 }
 
