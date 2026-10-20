@@ -95,6 +95,30 @@ What the pictures and traces showed:
 - main-thread spikes of 1–2 s: an unbounded path search when a walk is
   blocked (`guardPath` → A* over the whole graph with jump links).
 
+## Where it stands (after round 8)
+
+Same three homes and walk lengths as the baseline, current system with
+defaults (`house` is now harder than the baseline's profile: densified
+depth with its interpolation errors, per-room floors):
+
+| home | profile | coverage | precision | ghost m² | falseFree | frame err (max) | map MB | CPU mean/p95/max ms |
+|---|---|---|---|---|---|---|---|---|
+| 10×12 | baseline | 23.6% | 58.5% | 1.6 | 0.9% | 23 (79) cm | 41 | 2.4 / 9.3 / 1364 |
+| 10×12 | house | 91.2% | 92.0% | 0.5 | 4.8% | 4 (18) cm | 70 | 4.5 / 16.2 / 370 |
+| 10×12 | house-hard | 89.2% | 74.9% | 1.5 | 18.1% | 15 (45) cm | 45 | 4.5 / 16.5 / 369 |
+| 12×15 | baseline | 21.4% | 70.2% | 2.4 | 3.6% | 29 (45) cm | 42 | 2.2 / 7.9 / 1242 |
+| 12×15 | house | 75.2% | 87.4% | 6.4 | 2.1% | 2 (44) cm | 75 | 5.6 / 18.6 / 107 |
+| 12×15 | house-hard | 75.3% | 73.0% | 9.5 | 19.6% | 4 (58) cm | 76 | 5.4 / 18.3 / 116 |
+| 15×20 | baseline | 9.1% | 41.6% | 4.4 | 19.7% | 16 (94) cm | 35 | 2.2 / 7.9 / 1423 |
+| 15×20 | house | 64.4% | 80.9% | 14.5 | 18.5% | 16 (29) cm | 82 | 5.8 / 19.8 / 183 |
+| 15×20 | house-hard | 40.8% | 78.2% | 8.4 | 6.0% | 23 (68) cm | 73 | 3.8 / 12.3 / 136 |
+
+(CPU: main-thread work per frame in node, sensing + game; the CPU mean
+rose with the hold probe, multi-view checks and nav upkeep for a map
+several times larger; the multi-second spikes are gone. The house-hard
+15×20 run lost half its map to one "couldn't realign → cleared" reset at
+the end — see round 8.)
+
 ## Round log
 
 ### Round 1 — unbounded map (window + archive), harness fidelity
@@ -267,5 +291,37 @@ One unit test's setup was made explicit rather than relying on timing:
 stands still (with fewer spurious jumps the bot's game runs ahead, and a
 walking pet is put back on the floor by its gait, not by the health check
 under test). The assertions are unchanged.
+
+### Round 8 — breaking it again: long walks, camera-only depth; why loops don't close
+
+New defaults against harder conditions (house-hard, fast pans, 6 homes):
+
+| run | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | path coll% | map MB | resets |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 min walks | 75.2 | 73.3 | 75.2 | 6.1 | 18.2 | 19.8 | 24.8 | 67 | 1.2 |
+| 20 min walks | 73.6 | 71.6 | 72.0 | 6.8 | 20.6 | 18.2 | 34.4 | 68 | 2.3 |
+| 20 min, local resets (4 m) | 76.8 | 69.5 | 72.0 | 7.8 | 24.5 | 21.7 | 49.4 | 70 | 3.0 |
+| 20 min, local resets (6 m) | 77.1 | 67.7 | 71.7 | 7.9 | 24.1 | 23.3 | 42.9 | 68 | 2.0 |
+| 10 min, camera-only depth | 23.2 | 68.8 | 81.5 | 1.7 | 5.8 | 23.6 | 5.5 | 56 | 0.3 |
+
+- Memory is flat with walk length (window + sparse archive); precision
+  holds at 20 min. Coverage plateaus: in the two largest homes a single
+  "tracking loss, couldn't realign → map cleared" takes coverage from
+  ~65% to ~35%, and it takes minutes to come back. Local resets keep
+  coverage but cost precision and pet-path safety (49% of sampled paths
+  touch real obstacles vs 34%), so they stay off.
+- Camera-only depth (no depth API: depth estimated from the image) is the
+  break point: a quarter of the home after 10 minutes. (Its CPU numbers in
+  node include the image depth estimation and aren't comparable.)
+- Default loop closure fired 0 times in 12 long runs. `scripts/la-loop-truth.ts`
+  puts each candidate next to the true correction (simulator ground truth):
+  in the 15×20 home only 7 of 28 candidates were within 10 cm, median error
+  22 cm, and several wrong ones were consistent and well supported (three
+  in a row pointing the opposite way of the truth — matching a doubled copy
+  of a wall laid down in another era). The two-agreeing-estimates gate is
+  what keeps those out; loosening it would make things worse. Reliable
+  loop closure needs a better estimator (matching against a single,
+  de-duplicated generation of the old structure, or richer features than
+  occupancy), not a looser gate.
 
 (continued below as rounds complete)
