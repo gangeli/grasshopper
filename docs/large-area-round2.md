@@ -157,3 +157,96 @@ between consecutive submaps and loop edges, solved, then the voxel map
 re-rendered or warped per submap instead of linearly), and aliasing
 protection from more than one look (two different earlier visits, or a
 look from a clearly different view, must agree).
+
+### 5. Shielded carving (falseFree, resets) — on by default
+
+A ray that passes through a confidently occupied voxel now erodes that
+voxel but carves nothing behind it (`VoxelGrid.shieldedCarving`): a reading
+behind a surface the map is sure of is more often wrong (interpolated depth
+across a dark sofa, a flying pixel, a drifted frame) than proof that the
+space behind is empty; if the surface really is gone, it erodes first and
+then the space behind clears.
+
+| house-hard, 4 homes × 600 s | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm (max) | pathColl% | resets |
+|---|---|---|---|---|---|---|---|---|
+| before | 75.9 | 69.3 | 73.4 | 7.1 | 15.6 | 23 (74) | 33.4 | 2.0 |
+| shielded carving | 80.1 | 72.3 | 74.8 | 6.6 | 17.5 | 10 (70) | 40.9 | 0.0 |
+
+The big effect is indirect: drifted frames no longer carve through the old
+map, so contradictions never build up to a "map contradictory → evidence
+aged / cleared" reset (2.0 → 0 per run), and the map keeps its coverage and
+its frame. falseFree did not improve (15.6 → 17.5%; per piece it is mostly
+crates, plants and the dark couch, see `scripts/la-falsefree.ts`), nor did
+the share of sampled pet paths touching furniture (more of the map is
+walkable, so more paths are tested in hard places).
+
+### 6. The jump sim breaks the system
+
+`house-jumps` (6 persistent jumps of 0.2–0.7 m / up to ±0.2 rad in 10 min)
+on the four homes:
+
+| arm | cover% | prec% | local% | falseFree% | frameErr cm (max) | pathColl% |
+|---|---|---|---|---|---|---|
+| clear on unresolved jumps (round 1 behaviour) | 63.0 | 63.1 | 40.5 | 32.7 | 151 (244) | 62.6 |
+| detach instead of clear | 62.4 | 61.2 | 41.0 | 36.3 | 151 (244) | 63.0 |
+| + post-loss place check (unrestricted) | 68.3 | 51.7 | 40.5 | 38.8 | 159 (258) | 78.4 |
+
+Local precision 40% and frame errors of 1.5 m: jumps pile up and nothing
+undoes them in the homes, although the directed tests do (`test/jump.test.ts`:
+a 54 cm / 0.15 rad and a 42 cm / 0.25 rad jump in a scanned room, corrected
+to < 8 / < 10 cm by the post-loss place check; `test/reattach.test.ts` for
+detach → re-attach). Detaches happen rarely (0.5 per run) and did not
+re-attach in the homes. The unrestricted post-loss place check also fired
+on ordinary losses (drift, no jump) and then behaved like the loop closure
+of §4 (house-hard precision 69.3 → 66.1%); it is now trusted only when it
+undoes a position jump the pose gate saw at the loss.
+
+### 7. Camera-only depth
+
+`scripts/la-coverage-why.ts` (10×12, camera-only, 300 s): of the truly
+walkable floor, 50% covered, 4% floor never observed, **42% floor observed
+but the space just above it never seen empty** (motion stereo rarely
+measures the floor itself, so rays don't carve the first 25 cm above it),
+2% blocked by a mapped obstacle. Allowing one seen-empty voxel instead of
+two (`WorldModel.navParams`, `CameraDepthSource.sparseNav`) changed nothing
+(26.6 vs 26.5% on 10×12 + 12×15, 400 s): those columns have none. Off.
+Separately, camera-only never establishes walkable floor in the 12×15 home
+(0 m² for 90 s, 2% after 400 s — same in the baseline): a floor/plane
+problem there, not a density one. Camera-only stays at the baseline's 23%
+(six homes, 600 s: 23.2% coverage, 68.8% precision).
+
+### 8. CPU
+
+Same two runs (12×15 s2 and 10×12 s1, 300 s, house-hard) of the baseline and
+the final code, side by side on the same loaded machine (ms per frame, main
+thread, wall clock): 4.93/16.7/495 → 5.59/18.9/377 and 4.20/15.7/196 →
+4.26/15.5/513 (mean/p95/max). Place memory adds ~0.2 ms per depth frame
+(settling) and the post-loss place check is spread over frames (each step
+under ~10 ms CPU on this box; `scripts/perf-warp.ts` measures in CPU time).
+Loop warps, when enabled, are now spread over frames (a warp over a 12×15
+home was 260 ms in one go). The large spikes in both columns are pre-existing
+(blocked-path replans, floor re-levelling, realignment replays —
+`WorldModel.sliceReplays` spreads the latter but is off pending an A/B).
+
+## Where it stands (round 2)
+
+| house-hard, fast pans, 600 s | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm (max) | pathColl% | resets |
+|---|---|---|---|---|---|---|---|---|
+| baseline, six homes | 75.2 | 73.3 | 75.2 | 6.1 | 18.2 | 20 (64) | 24.8 | 1.2 |
+| baseline, the four A/B homes | 75.9 | 69.3 | 73.4 | 7.1 | 15.6 | 23 (74) | 33.4 | 2.0 |
+| round 2, the four A/B homes | 80.1 | 72.3 | 74.8 | 6.6 | 17.5 | 10 (70) | 40.9 | 0.0 |
+| house-jumps (new), round-1 behaviour | 63.0 | 63.1 | 40.5 | 8.9 | 32.7 | 151 (244) | 62.6 | 2.8 |
+| house-jumps, round 2 | 71.9 | 56.6 | 39.2 | 14.1 | 24.4 | 192 (263) | 55.3 | 0.0 |
+
+Remaining, in order of how much they hurt:
+1. Persistent tracking jumps in a real walk (house-jumps) still wreck the
+   map: corrected in directed tests, but in the homes the post-loss checks
+   rarely find a clear, unique match, jumps pile up beyond the ±1 m search,
+   and a detached map has not re-attached once.
+2. Loop closure: estimator accurate when right, but perceptual aliasing
+   gives confident wrong matches, and the linear warp damages a map whose
+   drift built up unevenly. Needs a pose graph over submaps and multi-look
+   verification (§4). Off.
+3. falseFree ~17% (crates, plants, the dark couch) and ~40% of sampled pet
+   paths touching furniture in the hard profile.
+4. Camera-only depth: 23% coverage; the floor isn't carved (§7).

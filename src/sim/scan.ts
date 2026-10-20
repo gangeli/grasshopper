@@ -23,8 +23,8 @@ export class CameraDepthSource {
     this.every = opts.every ?? 2;
   }
   private every: number;
-  /** Tell the map its depth is sparse (WorldModel.navParams). */
-  sparseNav = true;
+  /** Tell the map its depth is sparse (WorldModel.navParams). Off: it measured no different (the columns lack any seen-empty voxel, not just one). */
+  sparseNav = false;
   private tick = 0;
   /** Tracking was lost: old frames' poses can't be trusted against new ones. */
   lost(): void {
