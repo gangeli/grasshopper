@@ -324,4 +324,4 @@ New defaults against harder conditions (house-hard, fast pans, 6 homes):
   de-duplicated generation of the old structure, or richer features than
   occupancy), not a looser gate.
 
-(continued below as rounds complete)
+(continued in `docs/large-area-round2.md`: place memory and loop closure that fires, detach/re-attach instead of clearing, sliced warps, harder sims.)

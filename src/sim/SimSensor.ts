@@ -78,6 +78,15 @@ export interface NoiseProfile {
   lossRate?: number;
   /** Angular speed (rad/s) above which frames are too blurred to give depth. */
   blurAngVel?: number;
+  /**
+   * Chance that a tracking loss ends with the tracker's world frame
+   * persistently moved (it re-localised wrongly, or restarted its map: on
+   * ARCore/WebXR the reference space can come back offset), by a uniform
+   * shift of up to `lossJumpPos` m in x/z and a yaw of up to ±lossJumpRot.
+   */
+  lossJumpChance?: number;
+  lossJumpPos?: number;
+  lossJumpRot?: number;
   /** Fill every hole by interpolation, like ARCore's full (densified) depth in WebXR. */
   densify?: boolean;
   /**
@@ -136,6 +145,8 @@ export const NOISE_PROFILES = {
   house: { name: 'house', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.004, blurAngVel: 2.5, odometry: HOUSE_ODOMETRY, densify: true },
   /** 'house' with twice the odometry drift and a tracker that rarely closes loops by itself. */
   'house-hard': { name: 'house-hard', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.006, blurAngVel: 2.5, odometry: { posPerM: 0.025, yawPerSqrtM: 0.004, yawPerSqrtRad: 0.003, loopRate: 0.03, loopMinAge: 30, localFactor: 0.15, oldFactor: 0.6, localAge: 30 }, densify: true },
+  /** 'house-hard' where some tracking losses end with the tracker's frame persistently moved (up to 0.7m, ±0.2 rad). */
+  'house-jumps': { name: 'house-jumps', depthRes: [40, 30], sigmaA: 0.008, sigmaB: 0.015, flyingPixels: 0.6, edgeBlur: 1, smooth: 0.4, dropout: 0.12, holeBlobs: 2, outliers: 0.01, maxRange: 5, driftPos: 0.012, driftRot: 0.005, jitterPos: 0.004, jitterRot: 0.002, planeEdgeErr: 0.06, planeHeightErr: 0.012, floorErr: 0.015, persistentBias: 1.0, materials: true, relocRate: 0.01, relocPos: 0.08, relocRot: 0.03, lossRate: 0.006, blurAngVel: 2.5, odometry: { posPerM: 0.025, yawPerSqrtM: 0.004, yawPerSqrtRad: 0.003, loopRate: 0.03, loopMinAge: 30, localFactor: 0.15, oldFactor: 0.6, localAge: 30 }, densify: true, lossJumpChance: 0.2, lossJumpPos: 0.7, lossJumpRot: 0.2 },
   harsh: { name: 'harsh', depthRes: [32, 24], sigmaA: 0.01, sigmaB: 0.025, flyingPixels: 0.8, edgeBlur: 1, smooth: 0.5, dropout: 0.25, holeBlobs: 4, outliers: 0.02, maxRange: 4, driftPos: 0.025, driftRot: 0.01, jitterPos: 0.008, jitterRot: 0.005, planeEdgeErr: 0.1, planeHeightErr: 0.02, floorErr: 0.03 },
 } satisfies Record<string, NoiseProfile>;
 export type NoiseName = keyof typeof NOISE_PROFILES;
@@ -402,7 +413,19 @@ export class SimSensor {
     const N = this.noise;
     if (this.lossFrames > 0) {
       this.lossFrames--;
-      if (this.lossFrames === 0) this.relocalise();
+      if (this.lossFrames === 0) {
+        this.relocalise();
+        if (N.lossJumpChance && this.rng.chance(N.lossJumpChance)) {
+          const a = this.rng.range(0, Math.PI * 2), r = this.rng.range(0.3, 1) * (N.lossJumpPos ?? 0.5);
+          // (Turned about where the camera is, as the tracker sees it.)
+          const p = this.odo.last ?? { x: 0, y: 0, z: 0 }, T = this.trackingFromTruth();
+          const cx = T[0] * p.x + T[8] * p.z + T[12], cz = T[2] * p.x + T[10] * p.z + T[14];
+          const yaw = this.rng.range(-1, 1) * (N.lossJumpRot ?? 0.2), c = Math.cos(yaw), sn = Math.sin(yaw);
+          // x' = R x + t with R about the room origin: pick t so that the camera moves by (dx, dz) only.
+          this.injectPoseJump(cx - (c * cx + sn * cz) + Math.cos(a) * r, cz - (-sn * cx + c * cz) + Math.sin(a) * r, yaw);
+          this.lossJumps++;
+        }
+      }
       return false;
     }
     if (N.lossRate && this.rng.chance(N.lossRate)) {
@@ -442,6 +465,8 @@ export class SimSensor {
   private odo: { last: Vec3 | null; lastYaw: number; dirAngle: number; yawBias: number; walked: number; nextKey: number; keys: { p: Vec3; D: number[]; t: number }[] } = { last: null, lastYaw: 0, dirAngle: 0, yawBias: 0, walked: 0, nextKey: 0, keys: [] };
   /** Loop closures performed by the simulated tracker. */
   loopClosures = 0;
+  /** Tracking losses that ended with a persistent frame jump (lossJumpChance). */
+  lossJumps = 0;
   /** Distance walked so far (m). */
   get walked(): number {
     return this.odo.walked;

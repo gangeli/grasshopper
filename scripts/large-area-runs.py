@@ -22,5 +22,5 @@ for f in files:
     print(
         f"{name:26} cov {fi['coverage']*100:3.0f} prec {fi['precision']*100:3.0f} loc {lp*100:3.0f} locPC {lpc*100:3.0f} ghost {fi['ghostM2']:5.1f} "
         f"ff {fi['falseFree']*100:4.1f} ferr {fi['frameErr']*100:3.0f}/{max(s['frameErrMax'] for s in ss)*100:3.0f} "
-        f"resets {h.get('mapReset', 0) + h.get('mapContradictory', 0)} loops {r['events'].get('loopsClosed', 0)} mem {fi['memMB']:.0f}"
+        f"resets {h.get('mapReset', 0) + h.get('mapContradictory', 0)} det {r['events'].get('detaches', 0)}/{r['events'].get('reattaches', 0)} jumps {r['events'].get('lossJumps', 0)} loops {r['events'].get('loopsClosed', 0)} mem {fi['memMB']:.0f}"
     )

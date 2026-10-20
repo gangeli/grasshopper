@@ -92,6 +92,15 @@ export class VoxelGrid {
   staleMissGain = 3;
   /** See integrateRay: occupied voxels resist erosion by passing rays. */
   stickyOccupied = true;
+  /**
+   * A ray that passes through a confidently occupied voxel erodes that voxel
+   * but carves nothing behind it: a reading behind a surface the map is sure
+   * of is more often a wrong one (interpolated depth across a dark sofa, a
+   * flying pixel, a frame that drifted) than proof that the space behind is
+   * empty. If the surface really is gone, it erodes first and then the space
+   * behind clears.
+   */
+  shieldedCarving = false;
   /** Increments whenever occupancy changes meaningfully, so derived data can be cached. */
   version = 0;
 
@@ -259,6 +268,7 @@ export class VoxelGrid {
     const r = this.res, o = this.origin;
     const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
     const hits = this.staleAfter > 0 ? this.hitTime : null;
+    const shielded = this.shieldedCarving;
     const staleStamp = this.stamp - this.staleAfter, staleMiss = Math.min(-1, missDelta) * this.staleMissGain;
     let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
     const stepX = dX > 0 ? 1 : dX < 0 ? -1 : 0;
@@ -278,12 +288,14 @@ export class VoxelGrid {
         const q = (j * nz + k) * nx + i;
         const v = data[q];
         if (v > STRONG_OCC) conflicts++;
+        const shield = shielded && v > STRONG_OCC && v !== 127;
         let nv = v + (v > OCC_THRESHOLD ? (hits !== null && (hits[q] & 0xffff) < staleStamp && v !== 127 ? staleMiss : occMiss) : missDelta);
         if (nv > MAX_LO) nv = MAX_LO;
         if (nv < MIN_LO) nv = MIN_LO;
         data[q] = nv;
         this.touch(q);
         if (cls(v) !== cls(nv)) this.version++;
+        if (shield) break;
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
         t = tMaxX;

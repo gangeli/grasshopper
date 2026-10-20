@@ -61,6 +61,22 @@ export interface LargeAreaOptions {
   log?: (line: string) => void;
   /** Write a top-down picture of the final map (PNG) here. */
   png?: string;
+  /**
+   * Window churn (per second): the map window is jerked a chunk away and
+   * back on the next frame, without time to merge archived chunks back in
+   * between (what a tracking jump and its undo, or a fast walk along the
+   * window's edge, do). Exercises the window/archive bookkeeping.
+   */
+  windowChurn?: number;
+  /**
+   * Furniture moved between visits: every `every` seconds, `n` pieces (not
+   * walls, not the room's big built-ins) are moved 0.3–0.9 m, in rooms the
+   * walker isn't in (it comes back later to a changed room). The scoring
+   * follows the new layout.
+   */
+  moveFurniture?: { every: number; n: number };
+  /** Scripted tracking resets: at time t the tracker's frame jumps (dx, dz m, dyaw rad about the camera) and reports a loss. */
+  jumps?: { t: number; dx: number; dz: number; dyaw: number }[];
   /** Called at every metric interval (diagnostics). */
   inspect?: (ctx: { t: number; world: WorldModel; sensor: SimSensor; cam: SimCamera; room: SimRoom; house: House }) => void;
 }
@@ -124,7 +140,7 @@ export interface LargeAreaReport {
   rooms: RoomRetention[];
   cpu: { sense: Stat; game: Stat; frame: Stat; nav: Stat; frameOver16: number };
   final: LargeAreaSample & { pathsColliding: number; pathsTested: number; pathMaxPen: number; nodesColliding: number };
-  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; realigns: { t: number; before: number; after: number; what: string }[] };
+  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; realigns: { t: number; before: number; after: number; what: string }[] };
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
@@ -176,7 +192,9 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   const path = houseWalk(house, seed, { seconds, ...o.walk });
   const depthEvery = o.depthEvery ?? 3;
   const evalEvery = o.evalEvery ?? 30;
-  const truth = walkableTruth(house);
+  let truth = walkableTruth(house);
+  const moveRng = new Rng(seed * 57 + 3);
+  let nextMove = o.moveFurniture ? o.moveFurniture.every : Infinity, moved = 0;
   const log = o.log ?? (() => {});
 
   // Nav builds run in a worker on the device: time them separately.
@@ -197,6 +215,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   let abPeak = 0;
   let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
   const pathRng = new Rng(seed * 13 + 1);
+  const churnRng = new Rng(seed * 31 + 7);
+  let churnBack: [number, number] | null = null;
   const dt = 1 / 30;
   // Every map-frame correction, scored against the truth (frame error before → after).
   const realigns: { t: number; before: number; after: number; what: string }[] = [];
@@ -226,6 +246,40 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
           roomFirst.set(lastRoom, { ...roomScore(full.world, full.nav, house, truth, lastRoom), t: step.t });
         }
         lastRoom = r;
+      }
+      for (const J of o.jumps ?? [])
+        if (step.t >= J.t && step.t - dt < J.t) {
+          const T = sensor.trackingFromTruth(), p = step.cam.pos;
+          const cx = T[0] * p.x + T[8] * p.z + T[12], cz = T[2] * p.x + T[10] * p.z + T[14];
+          const c = Math.cos(J.dyaw), sn = Math.sin(J.dyaw);
+          sensor.injectPoseJump(cx - (c * cx + sn * cz) + J.dx, cz - (-sn * cx + c * cz) + J.dz, J.dyaw);
+          world.noteTrackingEvent(step.t);
+          if (process.env.TRACE) log(`  scripted jump at ${step.t.toFixed(1)}s: (${J.dx}, ${J.dz}, ${J.dyaw})`);
+        }
+      if (step.t >= nextMove && o.moveFurniture) {
+        nextMove += o.moveFurniture.every;
+        const movable = room.pieces.filter((pc) => pc.label !== 'wall' && pc.label !== 'bed' && pc.label !== 'bookshelf' && pc.max.x - pc.min.x < 2.2 && pc.max.z - pc.min.z < 2.2);
+        const here = step.roomId;
+        for (let q = 0, done = 0; q < 40 && done < o.moveFurniture.n && movable.length; q++) {
+          const pc = movable[moveRng.int(0, movable.length - 1)];
+          const cx = (pc.min.x + pc.max.x) / 2, cz = (pc.min.z + pc.max.z) / 2;
+          const inRoom = house.rooms.find((r) => cx > r.min.x && cx < r.max.x && cz > r.min.z && cz < r.max.z);
+          if (!inRoom || inRoom.id === here) continue;
+          const a = moveRng.range(0, Math.PI * 2), d = moveRng.range(0.3, 0.9);
+          const dx = Math.cos(a) * d, dz = Math.sin(a) * d;
+          // Stay inside its room.
+          if (pc.min.x + dx < inRoom.min.x + 0.05 || pc.max.x + dx > inRoom.max.x - 0.05 || pc.min.z + dz < inRoom.min.z + 0.05 || pc.max.z + dz > inRoom.max.z - 0.05) continue;
+          if (room.movePiece(pc.id, dx, dz)) done++, moved++;
+        }
+        truth = walkableTruth(house);
+      }
+      if (churnBack) {
+        world.moveWindow(churnBack[0], churnBack[1], step.t);
+        churnBack = null;
+      } else if (o.windowChurn && world.grid && churnRng.chance(o.windowChurn * dt)) {
+        const si = churnRng.int(-1, 1), sk = si ? churnRng.int(-1, 1) : churnRng.chance(0.5) ? 1 : -1;
+        world.moveWindow(si, sk, step.t);
+        churnBack = [-si, -sk];
       }
       const navBefore = navTimes.length;
       const t0 = performance.now();
@@ -337,7 +391,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     rooms,
     cpu: { sense: stat(senseT), game: stat(gameT), frame: fs, nav: stat(navTimes), frameOver16: frameT.filter((x) => x > 16).length },
     final: { ...fin, pathsColliding: em.pathsColliding, pathsTested: em.pathsTested, pathMaxPen: em.pathMaxPenetration, nodesColliding: em.nodesColliding },
-    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
+    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
     arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,

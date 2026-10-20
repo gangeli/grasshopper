@@ -5,6 +5,7 @@ import { WorldModel } from '../src/world/WorldModel';
 describe('map warp (loop closure)', () => {
   it('moves structure observed in the interval by its share of the correction, in the window and the archive', () => {
     const w = new WorldModel();
+    w.sliceWarps = false; // (all at once: the result is checked right after)
     w.setFloor(0, { x: 0, y: 0, z: 0 });
     w.timeCode(0); // session clock starts at t = 0
     const g = w.grid!;
@@ -28,6 +29,7 @@ describe('map warp (loop closure)', () => {
 
   it('warps archived chunks too', () => {
     const w = new WorldModel();
+    w.sliceWarps = false; // (all at once: the result is checked right after)
     w.setFloor(0, { x: 0, y: 0, z: 0 });
     w.timeCode(0);
     const g = w.grid!;
@@ -41,5 +43,28 @@ describe('map warp (loop closure)', () => {
     const h = w.grid!;
     expect(h.get(h.cellX(-4.025), h.cellY(0.525), h.cellZ(0.025))).toBe(0);
     expect(h.get(h.cellX(-4.025), h.cellY(0.525), h.cellZ(0.325))).toBe(90);
+  });
+
+  it('a sliced warp spreads over steps and ends as the all-at-once warp does', () => {
+    const make = () => {
+      const w = new WorldModel();
+      w.setFloor(0, { x: 0, y: 0, z: 0 });
+      w.timeCode(0);
+      const g = w.grid!;
+      for (let t = 1; t <= 40; t++) {
+        g.stamp = t;
+        g.set(g.cellX(1 + t * 0.01), g.cellY(0.5), g.cellZ(t * 0.05), 60);
+      }
+      return w;
+    };
+    const a = make(), b = make();
+    a.sliceWarps = false;
+    a.warpSince(0, 40, { dx: 0, dz: 0.3, dyaw: 0, pivot: { x: 0, z: 0 } });
+    b.warpSince(0, 40, { dx: 0, dz: 0.3, dyaw: 0, pivot: { x: 0, z: 0 } });
+    expect(b.warpBusy).toBe(true);
+    let steps = 0;
+    while (b.warpBusy && steps < 1000) (b.stepWarp(1), steps++);
+    expect(steps).toBeGreaterThan(10);
+    expect(Array.from(b.grid!.data)).toEqual(Array.from(a.grid!.data));
   });
 });
