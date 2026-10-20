@@ -29,8 +29,17 @@ coverage.
   called), `scripts/la-carve-why.ts` (which rays carve the inside of real
   furniture, and why), `scripts/la-falsefree.ts` gained `LOCAL=1` (current
   frame) and `BOTTOM=1` (voxels straddling a piece's bottom face).
-- Spec helper for batches: `artifacts/` is not committed; the spec format is
-  the one `scripts/large-area-batch.ts` documents.
+- `scripts/la-hide.ts` / `la-hide-batch.ts`: the game's hide-spot search
+  under several policies on the *same* walks (every 15 s, seeker at the
+  camera), scored in reality through the current frame — an exact paired
+  comparison of hide-spot rules, several policies per run.
+- `TRACE=place` / `TRACE=mis`: every place-memory / voxel-map estimate next
+  to the frame error it would leave (ground truth), and loss jumps and
+  re-attaches traced and scored.
+- Harder sims: `DARK=share` (that share of the furniture in dark
+  fabric/finish: 60% depth dropout, densified over), `MOVE` also in la-hide.
+- `artifacts/` is not committed; batch specs are the format
+  `scripts/large-area-batch.ts` documents.
 
 ## Baseline (round 2 as merged, aa95d23)
 
@@ -286,3 +295,72 @@ around it is the copy laid down while it was 20–50 cm off; aligning the
 frame to it is "right" locally and wrong for everything mapped since.
 Without per-submap poses (a pose graph that can move the old copy instead
 of the frame) loop closure stays off.
+
+## Camera-only depth: inferring the layer above observed floor
+
+Round 2's diagnosis: motion stereo rarely measures a blank floor itself, so
+rays never carve the first 25 cm above it, and walkable floor needs two
+seen-empty voxels there. `NavParams.inferLowFree` (m): in a floor-observed
+column (floor planes or depth), never-measured voxels from the floor up to
+the lowest seen-empty voxel count as seen empty if that voxel is at most
+this high and nothing solid, guessed solid, shadowed or with any occupancy
+evidence lies below it (rays passed over without meeting anything; a toy
+that was ever measured blocks it). Six homes, camera-only (`CAMERA=1`),
+house-hard, 300 s:
+
+| arm | cover% | prec% | local% | pathColl% | locPath% | locNode% | hideBad% |
+|---|---|---|---|---|---|---|---|
+| camera-only | 17.8 | 74.4 | 88.8 | 1.2 | 2.0 | 0.6 | 0.0 |
+| + inferLowFree 0.35 m | 24.7 | 74.6 | 89.0 | 5.7 | 4.4 | 1.6 | 0.0 |
+
+Paired: coverage +6.9 ± 1.7 (+39% relative), but local pet paths into
+furniture +2.5 ± 1.3 and nodes +1.1 ± 0.7: what is under the never-measured
+layer is sometimes a low object nobody measured (a toy, the dark base of a
+sofa). With a depth sensor (house-hard, ten homes) the same rule adds coverage
++1.8 ± 0.4 and local pet paths into furniture +0.6 ± 0.4, nodes +0.2 ± 0.1.
+Off by default (pet safety first); a camera-only build could take the
+trade. Unit tests: `test/inferfree.test.ts`.
+
+## Where it stands (round 3)
+
+Ten homes, house-hard, 600 s, fast pans; "round 3" is the final defaults
+(the same walks: mapping is unchanged, so every map metric is identical):
+
+| | cover% | prec% | local% | falseFree% | localFF% | frameErr cm (max) | pathColl% | locPath% | locNode% | hide spots inside furniture | open floor named after a phantom |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| round 2 (aa95d23) | 76.3 | 77.6 | 78.6 | 14.8 | 11.4 | 19 (56) | 28.1 | 5.9 | 0.9 | 4.4% (la-hide) / 4.3% (in-run) | 16.4% (14×16 home) |
+| round 3 | 76.3 | 77.6 | 78.6 | 14.8 | 11.4 | 19 (56) | 28.1 | 5.9 | 0.9 | **2.1% / 2.6%** | **1.6%** |
+| perfect tracking (reference) | 78.6 | 96.2 | 97.1 | 0.9 | 0.7 | 0 | 3.5 | 1.5 | 0.2 | 0.0% | |
+
+Harder (70% dark furniture, two pieces moved every minute): hide spots
+inside furniture 3.8 → 2.4%. house-jumps: unchanged (local 37.6%, frame
+error 164 cm, local paths into furniture 21.6%). Camera-only: unchanged by
+default (17.8% coverage at 300 s; 24.7% with `inferLowFree`, at a cost in
+pet safety).
+
+What changed by default: hide spots keep clear of uncertain structure
+(§5), low objects aren't named at hide spots (§8), the app follows
+XRReferenceSpace `reset` events. Main-thread cost: the hide-spot checks run
+once per round inside the existing search (game tests' `planMs` within its
+1.5 s bound); nothing per frame.
+
+Remaining, in order of how much they hurt:
+1. The frame. With perfect tracking the mapper is nearly clean (falseFree
+   0.9%, no hide spot inside furniture); with house-hard drift the live map
+   around the player is 21% wrong and 6% of the pet's paths touch real
+   furniture; with persistent jumps, 62% and 22%. Every map-side rule tried
+   this round (decay, fading, margins, foot rules) trades coverage or
+   hiding quality for a point or two; the leverage is in keeping the old
+   map consistent with the current frame, which needs per-submap poses (a
+   pose graph that moves old copies, not the frame) and match verification
+   that survives look-alikes: single looks are confidently wrong (uniqueness
+   57–115 on wrong place matches).
+2. Unmeasured low structure (blank wall bases, table and chair legs): the
+   nav rule that blocks it under anything seen higher up cuts pet paths into
+   furniture by a quarter but closes the space under tables; a rule that
+   tells legs from open space under a table is the next step.
+3. Camera-only coverage: inference of the layer above observed floor works
+   (+39%) but walks the pet into low unmeasured things; it needs a check
+   that the inferred floor is clear (plane polygons from the platform, or
+   image texture) before it can be on.
+
