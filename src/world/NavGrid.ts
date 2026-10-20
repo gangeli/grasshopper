@@ -56,6 +56,8 @@ export interface NavParams {
    * minute ago). Columns back from the archive count as old. 0 = off.
    */
   freeMaxAge: number;
+  /** ...only where structure is this close (m; 0 = everywhere): open floor can't put the pet inside furniture. */
+  freeMaxAgeNear: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
@@ -75,6 +77,7 @@ export const DEFAULT_NAV: NavParams = {
   staleMargin: 0,
   staleSeconds: 30,
   freeMaxAge: 0,
+  freeMaxAgeNear: 0,
 };
 
 export interface Waypoint {
@@ -744,8 +747,21 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
             if (!support) ok = false;
           }
         }
-      // Old free space (see NavParams.freeMaxAge): not walkable.
-      if (ok && stale && p.freeMaxAge > 0 && j === floorTopJ && stale[k * nx + i] & 2) ok = false;
+      // Old free space (see NavParams.freeMaxAge): not walkable (near structure, with freeMaxAgeNear).
+      if (ok && stale && p.freeMaxAge > 0 && j === floorTopJ && stale[k * nx + i] & 2) {
+        const rn = Math.round(p.freeMaxAgeNear / r);
+        let near = rn <= 0;
+        for (let dk = -rn; dk <= rn && !near; dk++)
+          for (let di = -rn; di <= rn && !near; di++) {
+            if (di * di + dk * dk > rn * rn) continue;
+            for (let jj = j + 1 + Math.floor(stepCells); jj <= j + needCells; jj++)
+              if (solid(i + di, jj, k + dk)) {
+                near = true;
+                break;
+              }
+          }
+        if (near) ok = false;
+      }
       // Stale structure (see NavParams.staleMargin) keeps the pet further away.
       if (ok && stale && p.staleMargin > 0 && j === floorTopJ)
         for (let dk = -rs; dk <= rs && ok; dk++)
