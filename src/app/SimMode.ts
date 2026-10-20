@@ -10,6 +10,7 @@ import type { Stage } from './Stage';
 import type { Voice } from './Voice';
 import { GameUI } from './GameUI';
 import type { CameraFeed } from './CameraFeed';
+import type { AppMemory } from './Memory';
 
 /**
  * Virtual-room mode: the same world model, pet and game, but the "camera
@@ -46,6 +47,8 @@ export class SimMode {
   private readonly camera: CameraFeed | null;
   private readonly _e = new THREE.Euler();
   onExit: (() => void) | null = null;
+  /** Remembered rooms (virtual room only; see app/Memory). */
+  memory: AppMemory | null = null;
 
   constructor(readonly stage: Stage, readonly hud: Hud, readonly voice: Voice, readonly opts: SimModeOptions) {
     this.camera = opts.camera ?? null;
@@ -134,6 +137,11 @@ export class SimMode {
     const t0 = performance.now();
     for (let s = 0; s < this.opts.speed; s++) this.step(dt);
     this.stage.perf.add('sim.step*', performance.now() - t0);
+    if (this.memory && !this.camera) {
+      const t1 = performance.now();
+      this.memory.tick(this.sim.time);
+      this.stage.perf.add('memory*', performance.now() - t1);
+    }
     this.frames++;
     const cam = this.stage.camera;
     const c = this.sim.cam;

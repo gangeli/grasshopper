@@ -10,6 +10,7 @@ import { Animator } from './pet/Animator';
 import { buildPet } from './pet/PetModel';
 import { applyPetEnvironment } from './pet/lighting';
 import { installNavWorker } from './world/NavWorkerClient';
+import { setupForgetControl, startMemory } from './app/Memory';
 
 /**
  * Entry point. URL parameters (handy for testing):
@@ -83,6 +84,8 @@ async function main() {
   }
 
   setupInstall(note, installMode);
+  // "Hopper remembers your room · forget": only when something is stored.
+  void setupForgetControl(document.getElementById('memory-row'), document.getElementById('btn-forget'), document.getElementById('memory-text'));
 
   // Showcase: Hopper waves on the landing page, and giggles when tapped.
   const showcase = startShowcase(() => {
@@ -106,6 +109,11 @@ async function main() {
       stage.addPet(stack);
       const ar = new ArMode(stage, stack, hud, voice);
       window.__hopper = { ...window.__hopper, mode: 'ar', stage, hud, stack, ar, game: stack.game, THREE, navWorker };
+      // Rooms remembered from earlier sessions (restored once Hopper recognises one).
+      void startMemory(stack, hud, voice, { onMapChanged: () => stage.updateOccluder(stack, true) }).then((m) => {
+        ar.memory = m;
+        if (window.__hopper) window.__hopper.memory = m?.memory;
+      });
       // Leaving AR (or AR failing) goes back to a fresh start page: never a dead AR screen.
       const backToStart = (msg?: string) => {
         try {
@@ -165,6 +173,12 @@ async function main() {
       window.__hopper = { ...window.__hopper, mode: 'sim', stage, hud, sim, game: sim.sim.game, THREE };
       sim.onExit = () => location.reload();
       sim.start();
+      // The virtual room is remembered too (and is how the browser tests exercise it).
+      if (q.get('bot') !== '1')
+        void startMemory(sim.sim, hud, voice, { onMapChanged: () => stage.debug && stage.updateOccluder(sim.sim) }).then((m) => {
+          sim.memory = m;
+          if (window.__hopper) window.__hopper.memory = m?.memory;
+        });
     }
   };
   arBtn.onclick = () => void enter('ar');

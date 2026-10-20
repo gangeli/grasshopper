@@ -1,0 +1,575 @@
+import { fft2, nextPow2 } from './fft';
+import { FragmentLookup, type ColumnFeatures, type MapFeatures, type VoxelSamples } from './features';
+import { poseDelta, wrapAngle, type Pose2 } from './pose';
+
+/**
+ * Relocalization: where does the live session's map sit in a stored map?
+ *
+ * 1. Coarse global search over yaw (2° steps) and translation (20cm cells):
+ *    2D "signature" images of both maps — occupied voxels in three height
+ *    bands, plus space seen empty — are cross-correlated with FFTs (one
+ *    correlation per yaw covers every translation). Occupied-vs-occupied
+ *    agreement scores positively; occupied-vs-seen-empty (either way)
+ *    negatively, which is what rejects look-alike placements.
+ * 2. The best few distinct peaks are refined in 3D at full resolution
+ *    (5cm, 0.25°, ±1 layer) by scoring sampled voxels against the stored
+ *    map's per-voxel classes.
+ * 3. Each refined candidate is verified (agreement and conflicts both ways),
+ *    and the winner must beat the runner-up by a clear margin. Symmetric
+ *    rooms (two equally good answers) are therefore refused, not guessed.
+ *
+ * All work is a generator that yields often, so callers can spread it over
+ * frames (or run it to completion in tests).
+ */
+export const SIG_CELL = 0.2;
+const BAND_W = [0.6, 0.8, 1.0];
+const FREE_W = 0.8;
+/** Seen-empty space agreeing with seen-empty space: rewards overlapping the whole room, not just an edge. */
+const FREEFREE_W = 0.3;
+
+export interface Candidate {
+  /** live → stored map. */
+  pose: Pose2;
+  coarse: number;
+  score: number;
+  metrics?: VerifyMetrics;
+}
+
+export interface VerifyMetrics {
+  fwdN: number;
+  fwdHit: number;
+  fwdConf: number;
+  freeN: number;
+  freeConf: number;
+  /** Live free samples landing in stored free space (and all live free samples). */
+  freeHit: number;
+  freeSamples: number;
+  /** Furniture-only (low, not under anything tall) live samples: count, hits, conflicts. */
+  lowN: number;
+  lowHit: number;
+  lowConf: number;
+  /** Same for the stored map's furniture samples landing in live-known space. */
+  bwdLowN: number;
+  bwdLowHit: number;
+  bwdLowConf: number;
+  /** Live structure samples (columns reaching above 1.1m) on stored obstacles (strict: on the voxel). */
+  wallHit: number;
+  /**
+   * How well the walls alone pin the pose: the smallest relative loss of
+   * wall hits when the pose is moved 15cm in any of 4 directions (taking the
+   * better side) or turned 3°. Near 0: the walls seen let the pose slide
+   * (e.g. only parallel walls), so the furniture decides — and furniture moves.
+   */
+  wallPin: number;
+  bwdN: number;
+  bwdHit: number;
+  bwdConf: number;
+  /** Agreement share among informative samples (hits / (hits + conflicts)). */
+  inlier: number;
+  /** Share of live occupied samples explained by the stored map. */
+  explained: number;
+  score: number;
+}
+
+export interface RelocResult {
+  best: Candidate | null;
+  second: Candidate | null;
+  /** Second-best verified score / best (0 = unique, 1 = tie). */
+  ambiguity: number;
+  accepted: boolean;
+  reason: string;
+  /** Work done (for diagnostics): yaw steps, poses scored. */
+  work: { yaws: number; poses: number; fftN: number };
+}
+
+export interface RelocOptions {
+  yawStep?: number;
+  /** Distinct coarse candidates to refine. */
+  candidates?: number;
+  /** Acceptance thresholds (see accept()). */
+  minOverlap?: number;
+  minInlier?: number;
+  minExplained?: number;
+  maxAmbiguity?: number;
+}
+
+/** A stored map prepared for searching (cached while the map doesn't change). */
+export class FragmentIndex {
+  readonly lookup: FragmentLookup;
+  readonly sig: SigImage;
+  private qCache = new Map<number, { re: Float64Array[]; im: Float64Array[] }>();
+  constructor(readonly features: MapFeatures, lookup: FragmentLookup) {
+    this.lookup = lookup;
+    this.sig = buildStaticSig(features.cols);
+  }
+
+  /** Frequency-domain correlation kernels for an N×N FFT (cached per N). */
+  kernels(N: number): { re: Float64Array[]; im: Float64Array[] } {
+    let q = this.qCache.get(N);
+    if (q) return q;
+    const s = this.sig;
+    const img = (ch: Float32Array) => {
+      const re = new Float64Array(N * N), im = new Float64Array(N * N);
+      for (let v = 0; v < s.h && v < N; v++) for (let u = 0; u < s.w && u < N; u++) re[v * N + u] = ch[v * s.w + u];
+      fft2(re, im, N);
+      return { re, im };
+    };
+    const B = [img(s.b[0]), img(s.b[1]), img(s.b[2])];
+    const F = img(s.free);
+    const O = img(s.occ);
+    // Q_b = w_b·S_b − α·S_free ; Q_free = −α·S_occ
+    const re: Float64Array[] = [], im: Float64Array[] = [];
+    for (let b = 0; b < 3; b++) {
+      const r = new Float64Array(N * N), i = new Float64Array(N * N);
+      for (let q2 = 0; q2 < N * N; q2++) {
+        r[q2] = BAND_W[b] * B[b].re[q2] - FREE_W * F.re[q2];
+        i[q2] = BAND_W[b] * B[b].im[q2] - FREE_W * F.im[q2];
+      }
+      re.push(r);
+      im.push(i);
+    }
+    const r = new Float64Array(N * N), i = new Float64Array(N * N);
+    for (let q2 = 0; q2 < N * N; q2++) {
+      r[q2] = -FREE_W * O.re[q2] + FREEFREE_W * F.re[q2];
+      i[q2] = -FREE_W * O.im[q2] + FREEFREE_W * F.im[q2];
+    }
+    re.push(r);
+    im.push(i);
+    q = { re, im };
+    this.qCache.set(N, q);
+    return q;
+  }
+}
+
+interface SigImage {
+  w: number;
+  h: number;
+  x0: number;
+  z0: number;
+  /** Band images (blurred for the stored map). */
+  b: Float32Array[];
+  free: Float32Array;
+  /** Sum of the band images (stored map: for the live-free penalty). */
+  occ: Float32Array;
+}
+
+function bandValue(n: number) {
+  return Math.min(1, n / 12);
+}
+
+/** Accumulate column features into cells of an image (positions already in image coordinates). */
+function rasterize(cols: ColumnFeatures, w: number, h: number, cellOf: (q: number) => number): { b: Float32Array[]; free: Float32Array } {
+  const sums = [new Float32Array(w * h), new Float32Array(w * h), new Float32Array(w * h)];
+  const fr = new Float32Array(w * h);
+  for (let q = 0; q < cols.n; q++) {
+    const c = cellOf(q);
+    if (c < 0) continue;
+    sums[0][c] += cols.b0[q];
+    sums[1][c] += cols.b1[q];
+    sums[2][c] += cols.b2[q];
+    fr[c] += cols.free[q];
+  }
+  const b = sums.map((s) => s.map(bandValue));
+  const free = new Float32Array(w * h);
+  for (let c = 0; c < w * h; c++) free[c] = sums[0][c] + sums[1][c] > 2 ? 0 : Math.min(1, fr[c] / 64);
+  return { b, free: erode(free, w, h) };
+}
+
+/** Free space shrunk by one cell (a wall one cell off isn't a contradiction). */
+function erode(a: Float32Array, w: number, h: number): Float32Array {
+  const out = new Float32Array(w * h);
+  for (let v = 1; v < h - 1; v++)
+    for (let u = 1; u < w - 1; u++) {
+      let m = a[v * w + u];
+      if (!m) continue;
+      for (let dv = -1; dv <= 1 && m; dv++) for (let du = -1; du <= 1; du++) m = Math.min(m, a[(v + dv) * w + u + du]);
+      out[v * w + u] = m;
+    }
+  return out;
+}
+
+/** Occupancy spread to the 4-neighbours at half weight (tolerates half-cell misalignment). */
+function spread(a: Float32Array, w: number, h: number): Float32Array {
+  const out = a.slice();
+  for (let v = 0; v < h; v++)
+    for (let u = 0; u < w; u++) {
+      let m = a[v * w + u];
+      if (u > 0) m = Math.max(m, 0.5 * a[v * w + u - 1]);
+      if (u < w - 1) m = Math.max(m, 0.5 * a[v * w + u + 1]);
+      if (v > 0) m = Math.max(m, 0.5 * a[(v - 1) * w + u]);
+      if (v < h - 1) m = Math.max(m, 0.5 * a[(v + 1) * w + u]);
+      out[v * w + u] = m;
+    }
+  return out;
+}
+
+function buildStaticSig(cols: ColumnFeatures): SigImage {
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (let q = 0; q < cols.n; q++) {
+    x0 = Math.min(x0, cols.x[q]);
+    z0 = Math.min(z0, cols.z[q]);
+    x1 = Math.max(x1, cols.x[q]);
+    z1 = Math.max(z1, cols.z[q]);
+  }
+  if (!cols.n) return { w: 1, h: 1, x0: 0, z0: 0, b: [new Float32Array(1), new Float32Array(1), new Float32Array(1)], free: new Float32Array(1), occ: new Float32Array(1) };
+  x0 -= SIG_CELL;
+  z0 -= SIG_CELL;
+  const w = Math.ceil((x1 - x0) / SIG_CELL) + 2, h = Math.ceil((z1 - z0) / SIG_CELL) + 2;
+  const r = rasterize(cols, w, h, (q) => Math.floor((cols.z[q] - z0) / SIG_CELL) * w + Math.floor((cols.x[q] - x0) / SIG_CELL));
+  const b = r.b.map((im) => spread(im, w, h));
+  const occ = new Float32Array(w * h);
+  for (let c = 0; c < w * h; c++) occ[c] = Math.min(1, b[0][c] + b[1][c] + b[2][c]);
+  return { w, h, x0, z0, b, free: r.free, occ };
+}
+
+/**
+ * Score of the live samples at a pose against a stored map's classes.
+ * Occupied samples: on/near stored obstacles +, in stored free space −.
+ * Free samples: inside stored obstacles −.
+ */
+export function scorePose(L: FragmentLookup, occ: VoxelSamples, free: VoxelSamples, T: Pose2, stride = 1): number {
+  const c = Math.cos(T.yaw), s = Math.sin(T.yaw), dj = T.dj ?? 0;
+  let sc = 0;
+  for (let q = 0; q < occ.n; q += stride) {
+    const x = occ.x[q], z = occ.z[q];
+    const k = L.classAt(c * x - s * z + T.tx, s * x + c * z + T.tz, occ.j[q] + dj);
+    if (k === 1) sc += 1;
+    else if (k === 2) sc += 0.7;
+    else if (k === 3) sc += 0.35;
+    else if (k === 4) sc -= 1;
+    else if (k === 5) sc -= 0.2;
+  }
+  for (let q = 0; q < free.n; q += stride) {
+    const x = free.x[q], z = free.z[q];
+    const k = L.classAt(c * x - s * z + T.tx, s * x + c * z + T.tz, free.j[q] + dj);
+    if (k === 1) sc -= 0.7;
+    else if (k === 2) sc -= 0.4;
+    else if (k === 4) sc += 0.2;
+  }
+  return sc;
+}
+
+/**
+ * Agreement of the live map with a stored map at pose T (live → stored),
+ * both ways: live obstacles in the stored map, stored obstacles in the live
+ * map, and live free space against stored obstacles.
+ */
+export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup }, frag: { features: MapFeatures; lookup: FragmentLookup }, T: Pose2): VerifyMetrics {
+  const c = Math.cos(T.yaw), s = Math.sin(T.yaw), dj = T.dj ?? 0;
+  const F = frag.lookup, Lk = live.lookup;
+  const lo = live.features.occ, lf = live.features.free, fo = frag.features.occ;
+  let fwdN = 0, fwdHit = 0, fwdConf = 0, lowN = 0, lowHit = 0, lowConf = 0;
+  for (let q = 0; q < lo.n; q++) {
+    const x = lo.x[q], z = lo.z[q];
+    const k = F.classAt(c * x - s * z + T.tx, s * x + c * z + T.tz, lo.j[q] + dj);
+    fwdN++;
+    const hit = k === 1 || k === 2 || k === 3;
+    if (hit) fwdHit++;
+    else if (k === 4) fwdConf++;
+    if (lo.low[q] === 1 && k !== 0) {
+      lowN++;
+      if (hit) lowHit++;
+      else if (k === 4) lowConf++;
+    }
+  }
+  let freeN = 0, freeConf = 0, freeHit = 0;
+  for (let q = 0; q < lf.n; q++) {
+    const x = lf.x[q], z = lf.z[q];
+    const k = F.classAt(c * x - s * z + T.tx, s * x + c * z + T.tz, lf.j[q] + dj);
+    if (k === 0) continue;
+    freeN++;
+    if (k === 1) freeConf++;
+    else if (k === 4 || k === 5) freeHit++;
+  }
+  // Stored → live: inverse pose.
+  let bwdN = 0, bwdHit = 0, bwdConf = 0, bwdLowN = 0, bwdLowHit = 0, bwdLowConf = 0;
+  for (let q = 0; q < fo.n; q++) {
+    const x = fo.x[q] - T.tx, z = fo.z[q] - T.tz;
+    const lx = c * x + s * z, lz = -s * x + c * z;
+    const k = Lk.classAt(lx, lz, fo.j[q] - dj);
+    if (k === 0) continue;
+    bwdN++;
+    const hit = k === 1 || k === 2 || k === 3;
+    if (hit) bwdHit++;
+    else if (k === 4) bwdConf++;
+    if (fo.low[q] === 1) {
+      bwdLowN++;
+      if (hit) bwdLowHit++;
+      else if (k === 4) bwdLowConf++;
+    }
+  }
+  // Wall pinning (see VerifyMetrics.wallPin).
+  let mx = 0, mz = 0, nw = 0;
+  for (let q = 0; q < lo.n; q++)
+    if (lo.low[q] === 2) {
+      mx += lo.x[q];
+      mz += lo.z[q];
+      nw++;
+    }
+  if (nw) {
+    mx /= nw;
+    mz /= nw;
+  }
+  const wallHits = (ox: number, oz: number, dyaw: number) => {
+    const c2 = Math.cos(T.yaw + dyaw), s2 = Math.sin(T.yaw + dyaw);
+    // Rotate about the walls' centroid: keep its image fixed.
+    const px = c * mx - s * mz + T.tx, pz = s * mx + c * mz + T.tz;
+    const tx = px - (c2 * mx - s2 * mz) + ox, tz = pz - (s2 * mx + c2 * mz) + oz;
+    let h = 0;
+    for (let q = 0; q < lo.n; q++) {
+      if (lo.low[q] !== 2) continue;
+      const x = lo.x[q], z = lo.z[q];
+      const k = F.classAt(c2 * x - s2 * z + tx, s2 * x + c2 * z + tz, lo.j[q] + dj);
+      if (k === 1 || k === 2) h++;
+    }
+    return h;
+  };
+  const wallHit = nw ? wallHits(0, 0, 0) : 0;
+  let wallPin = 0;
+  if (wallHit > 0) {
+    wallPin = 1;
+    const d = 0.15, r2 = Math.SQRT1_2 * d;
+    for (const [ox, oz] of [[d, 0], [0, d], [r2, r2], [r2, -r2]]) {
+      const keep = Math.max(wallHits(ox, oz, 0), wallHits(-ox, -oz, 0)) / wallHit;
+      wallPin = Math.min(wallPin, 1 - keep);
+    }
+    const yawKeep = Math.max(wallHits(0, 0, 0.0524), wallHits(0, 0, -0.0524)) / wallHit;
+    wallPin = Math.min(wallPin, 1 - yawKeep);
+  }
+  // Rescale sample counts to a common unit (the live occupied sample size)
+  // so maps of very different sizes are weighed alike.
+  const hits = fwdHit + bwdHit, conf = fwdConf + bwdConf + freeConf;
+  const inlier = hits + conf > 0 ? hits / (hits + conf) : 0;
+  // Free-space agreement counts at half weight (it is what tells a whole-room
+  // overlap from two maps touching along one wall).
+  return { fwdN, fwdHit, fwdConf, freeN, freeConf, freeHit, freeSamples: lf.n, lowN, lowHit, lowConf, bwdLowN, bwdLowHit, bwdLowConf, wallHit, wallPin, bwdN, bwdHit, bwdConf, inlier, explained: fwdN ? fwdHit / fwdN : 0, score: hits + 0.5 * freeHit - 3 * conf };
+}
+
+export const DEFAULT_ACCEPT = { minOverlap: 300, minInlier: 0.8, minExplained: 0.5, maxAmbiguity: 0.7 };
+
+/** Is this verified candidate (with this runner-up) strong, unambiguous evidence? */
+export function judge(best: Candidate | null, ambiguity: number, o: RelocOptions = {}): { ok: boolean; reason: string } {
+  const minOverlap = o.minOverlap ?? DEFAULT_ACCEPT.minOverlap, minInlier = o.minInlier ?? DEFAULT_ACCEPT.minInlier;
+  const minExplained = o.minExplained ?? DEFAULT_ACCEPT.minExplained, maxAmb = o.maxAmbiguity ?? DEFAULT_ACCEPT.maxAmbiguity;
+  const m = best?.metrics;
+  if (!best || !m) return { ok: false, reason: 'no candidate' };
+  if (m.fwdHit + m.fwdConf < minOverlap) return { ok: false, reason: `overlap ${m.fwdHit + m.fwdConf} < ${minOverlap}` };
+  if (m.bwdHit + m.bwdConf < minOverlap * 0.5) return { ok: false, reason: `reverse overlap ${m.bwdHit + m.bwdConf}` };
+  // The live map must overlap the stored one as an area (its seen-empty
+  // floor space inside the stored map's), not just touch it along a wall.
+  if (m.freeHit < 1000 || m.freeHit < 0.3 * m.freeSamples) return { ok: false, reason: `free overlap ${m.freeHit}/${m.freeSamples}` };
+  if (m.inlier < minInlier) return { ok: false, reason: `inlier ${m.inlier.toFixed(2)} < ${minInlier}` };
+  if (m.explained < minExplained) return { ok: false, reason: `explained ${m.explained.toFixed(2)} < ${minExplained}` };
+  if (ambiguity > maxAmb) return { ok: false, reason: `ambiguous ${ambiguity.toFixed(2)}` };
+  // Walls (which don't move) must pin the pose down; where they don't, the
+  // furniture decides, so it must agree almost perfectly (it may have moved).
+  if (m.wallHit < 150 || m.wallPin < 0.35) {
+    const lowConf = m.lowConf / Math.max(1, m.lowN), bwdLowConf = m.bwdLowConf / Math.max(1, m.bwdLowN);
+    if (m.lowN < 150 || lowConf > 0.06 || bwdLowConf > 0.08)
+      return { ok: false, reason: `walls don't pin it (${m.wallHit} hits, pin ${m.wallPin.toFixed(2)}) and furniture disagrees ${(lowConf * 100).toFixed(0)}%/${(bwdLowConf * 100).toFixed(0)}%` };
+  }
+  return { ok: true, reason: 'ok' };
+}
+
+/**
+ * Search the stored map for the live map. Yields between small work units.
+ * `live` and `frag` hold features + class lookups of each map in its own frame.
+ */
+export function* relocalize(
+  live: { features: MapFeatures; lookup: FragmentLookup },
+  frag: FragmentIndex,
+  opts: RelocOptions = {},
+): Generator<void, RelocResult, void> {
+  const work = { yaws: 0, poses: 0, fftN: 0 };
+  const fail = (reason: string): RelocResult => ({ best: null, second: null, ambiguity: 1, accepted: false, reason, work });
+  const cols = live.features.cols;
+  if (cols.n < 50 || live.features.occ.n < 100 || frag.features.occ.n < 100) return fail('too little map');
+  // --- 1. coarse search ---------------------------------------------------------
+  const S = frag.sig;
+  // Live columns relative to their centroid (rotation pivot).
+  let mx = 0, mz = 0;
+  for (let q = 0; q < cols.n; q++) {
+    mx += cols.x[q];
+    mz += cols.z[q];
+  }
+  mx /= cols.n;
+  mz /= cols.n;
+  let rad = 0;
+  for (let q = 0; q < cols.n; q++) rad = Math.max(rad, Math.hypot(cols.x[q] - mx, cols.z[q] - mz));
+  const L = Math.ceil((2 * rad) / SIG_CELL) + 3;
+  const N = nextPow2(Math.max(S.w, S.h) + L);
+  work.fftN = N;
+  if (N > 512) return fail('map too large for the coarse search');
+  const Q = frag.kernels(N);
+  yield;
+  const yawStep = opts.yawStep ?? (2 * Math.PI) / 180;
+  const nYaw = Math.round((2 * Math.PI) / yawStep);
+  const peaks: { yaw: number; tx: number; tz: number; v: number }[] = [];
+  const reA = new Float64Array(N * N), imA = new Float64Array(N * N), reB = new Float64Array(N * N), imB = new Float64Array(N * N);
+  const pr = new Float64Array(N * N), pi = new Float64Array(N * N);
+  const half = (L * SIG_CELL) / 2;
+  for (let a = 0; a < nYaw; a++) {
+    const yaw = a * yawStep;
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    // Rotated live image: cell (u, v) covers x ∈ [−half + u·cell, ...) around the centroid.
+    const img = rasterize(cols, L, L, (q) => {
+      const dx = cols.x[q] - mx, dz = cols.z[q] - mz;
+      const u = Math.floor((c * dx - s * dz + half) / SIG_CELL), v = Math.floor((s * dx + c * dz + half) / SIG_CELL);
+      return u < 0 || v < 0 || u >= L || v >= L ? -1 : v * L + u;
+    });
+    reA.fill(0);
+    imA.fill(0);
+    reB.fill(0);
+    imB.fill(0);
+    for (let v = 0; v < L; v++)
+      for (let u = 0; u < L; u++) {
+        const o = v * L + u, d = v * N + u;
+        reA[d] = img.b[0][o];
+        imA[d] = img.b[1][o];
+        reB[d] = img.b[2][o];
+        imB[d] = img.free[o];
+      }
+    fft2(reA, imA, N);
+    yield;
+    fft2(reB, imB, N);
+    // Unpack the two real transforms in each and correlate: P = Σ conj(L_c)·Q_c.
+    for (let ky = 0; ky < N; ky++)
+      for (let kx = 0; kx < N; kx++) {
+        const k = ky * N + kx, nk = ((N - ky) % N) * N + ((N - kx) % N);
+        // X = (Z[k] + conj(Z[−k]))/2 ; Y = (Z[k] − conj(Z[−k]))/(2i)
+        const x0r = (reA[k] + reA[nk]) / 2, x0i = (imA[k] - imA[nk]) / 2;
+        const x1r = (imA[k] + imA[nk]) / 2, x1i = -(reA[k] - reA[nk]) / 2;
+        const x2r = (reB[k] + reB[nk]) / 2, x2i = (imB[k] - imB[nk]) / 2;
+        const x3r = (imB[k] + imB[nk]) / 2, x3i = -(reB[k] - reB[nk]) / 2;
+        // conj(X)·Q = (xr − i·xi)(qr + i·qi) = xr·qr + xi·qi + i(xr·qi − xi·qr)
+        let r = 0, i = 0;
+        r += x0r * Q.re[0][k] + x0i * Q.im[0][k];
+        i += x0r * Q.im[0][k] - x0i * Q.re[0][k];
+        r += x1r * Q.re[1][k] + x1i * Q.im[1][k];
+        i += x1r * Q.im[1][k] - x1i * Q.re[1][k];
+        r += x2r * Q.re[2][k] + x2i * Q.im[2][k];
+        i += x2r * Q.im[2][k] - x2i * Q.re[2][k];
+        r += x3r * Q.re[3][k] + x3i * Q.im[3][k];
+        i += x3r * Q.im[3][k] - x3i * Q.re[3][k];
+        pr[k] = r;
+        pi[k] = i;
+      }
+    yield;
+    fft2(pr, pi, N, true);
+    // Peaks: correlation index t means live cell (u, v) ↔ stored cell (u + tu, v + tv).
+    const local: { k: number; v: number }[] = [];
+    for (let k = 0; k < N * N; k++) {
+      const v = pr[k];
+      if (v <= 0) continue;
+      if (local.length < 3 || v > local[local.length - 1].v) {
+        // Non-maximum suppression (2 cells, circular).
+        const ku = k % N, kv = (k - ku) / N;
+        let dominated = false;
+        for (let e = 0; e < local.length; e++) {
+          const eu = local[e].k % N, ev = (local[e].k - eu) / N;
+          const du = Math.min(Math.abs(eu - ku), N - Math.abs(eu - ku)), dv = Math.min(Math.abs(ev - kv), N - Math.abs(ev - kv));
+          if (du <= 2 && dv <= 2) {
+            if (local[e].v >= v) dominated = true;
+            else local.splice(e--, 1);
+          }
+        }
+        if (dominated) continue;
+        local.push({ k, v });
+        local.sort((p, q) => q.v - p.v);
+        if (local.length > 3) local.length = 3;
+      }
+    }
+    for (const p of local) {
+      let tu = p.k % N, tv = (p.k - tu) / N;
+      if (tu > N - L) tu -= N;
+      if (tv > N - L) tv -= N;
+      // u·cell ≈ R(x − m) + half and x_s ≈ x0 + (u + tu)·cell  →  x_s = R(x − m) + (x0 + half + tu·cell).
+      const ox = S.x0 + half + tu * SIG_CELL, oz = S.z0 + half + tv * SIG_CELL;
+      // Pose live→stored: x_s = R·(x − m) + o  =  R·x + (o − R·m)
+      const tx = ox - (c * mx - s * mz), tz = oz - (s * mx + c * mz);
+      peaks.push({ yaw: wrapAngle(yaw), tx, tz, v: p.v });
+    }
+    work.yaws++;
+    yield;
+  }
+  // Distinct candidates (by pose at the live centroid).
+  peaks.sort((p, q) => q.v - p.v);
+  const nCand = opts.candidates ?? 6;
+  const cands: Candidate[] = [];
+  const at = { x: mx, z: mz };
+  for (const p of peaks) {
+    const pose = { yaw: p.yaw, tx: p.tx, tz: p.tz, dj: 0 };
+    if (cands.some((c) => { const d = poseDelta(c.pose, pose, at); return d.dist < 0.5 && d.dyaw < (8 * Math.PI) / 180; })) continue;
+    cands.push({ pose, coarse: p.v, score: -Infinity });
+    if (cands.length >= nCand) break;
+  }
+  if (!cands.length) return fail('no coarse peak');
+  // --- 2. refine in 3D -------------------------------------------------------------
+  const occ = live.features.occ, free = live.features.free;
+  // A lighter sample for the search; verification uses all of them.
+  const stride = Math.max(1, Math.floor(occ.n / 3000));
+  const deg = Math.PI / 180;
+  for (const cand of cands) {
+    let best = cand.pose, bestS = -Infinity;
+    const searchAround = function* (center: Pose2, dyaw: number, ystep: number, dt: number, tstep: number, djs: number[]) {
+      let b = center, bs = -Infinity;
+      for (let y = -dyaw; y <= dyaw + 1e-9; y += ystep) {
+        for (const dj of djs)
+          for (let ux = -dt; ux <= dt + 1e-9; ux += tstep)
+            for (let uz = -dt; uz <= dt + 1e-9; uz += tstep) {
+              // Rotate about the live centroid (keeps translation and yaw decoupled).
+              const yaw = center.yaw + y;
+              const c0 = Math.cos(center.yaw), s0 = Math.sin(center.yaw), c1 = Math.cos(yaw), s1 = Math.sin(yaw);
+              const pmx = c0 * mx - s0 * mz + center.tx, pmz = s0 * mx + c0 * mz + center.tz;
+              const pose = { yaw, tx: pmx - (c1 * mx - s1 * mz) + ux, tz: pmz - (s1 * mx + c1 * mz) + uz, dj };
+              const sc = scorePose(frag.lookup, occ, free, pose, stride);
+              work.poses++;
+              if (sc > bs) {
+                bs = sc;
+                b = pose;
+              }
+            }
+        yield;
+      }
+      return { b, bs };
+    };
+    let r = yield* searchAround(best, 4 * deg, 1 * deg, 0.25, 0.05, [0]);
+    best = r.b;
+    bestS = r.bs;
+    r = yield* searchAround(best, 0.75 * deg, 0.25 * deg, 0.05, 0.025, [-1, 0, 1]);
+    if (r.bs > bestS) {
+      best = r.b;
+      bestS = r.bs;
+    }
+    cand.pose = { ...best, yaw: wrapAngle(best.yaw) };
+    cand.metrics = verifyPose(live, frag, cand.pose);
+    cand.score = cand.metrics.score;
+    yield;
+  }
+  // --- 3. pick and judge ----------------------------------------------------------
+  cands.sort((a, b) => b.score - a.score);
+  const best = cands[0];
+  // Runner-up: the best candidate that is really a different placement and
+  // that the evidence doesn't rule out. A placement that contradicts clearly
+  // more of what was seen (seen-empty space where the other map has
+  // obstacles, or the reverse) is not a rival, however many surfaces it
+  // happens to line up (sliding along a long wall does that).
+  const conf = (c: Candidate) => c.metrics!.fwdConf + c.metrics!.bwdConf + c.metrics!.freeConf;
+  const ruledOut = (c: Candidate) => conf(c) >= Math.max(2 * conf(best), conf(best) + 60);
+  // (Near placements — within 75cm and 15° — are the same basin as the best;
+  // whether the walls pin the pose down within it is judged separately.)
+  const distinct = cands.slice(1).filter((c) => { const d = poseDelta(c.pose, best.pose, at); return d.dist > 0.75 || d.dyaw > 15 * deg; });
+  const second = distinct.find((c) => !ruledOut(c)) ?? distinct[0] ?? null;
+  const rival = distinct.find((c) => !ruledOut(c));
+  const ambiguity = best.score > 0 ? Math.max(0, rival?.score ?? 0) / best.score : 1;
+  const j = judge(best, ambiguity, opts);
+  return { best, second, ambiguity, accepted: j.ok, reason: j.reason, work };
+}
+
+/** Run a generator to completion (tests, workers). */
+export function runToEnd<T>(g: Generator<void, T, void>): T {
+  for (;;) {
+    const r = g.next();
+    if (r.done) return r.value;
+  }
+}
