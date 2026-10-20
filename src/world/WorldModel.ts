@@ -509,6 +509,8 @@ export class WorldModel {
   anchorMinMove = 0.03;
   anchorMinTurn = 0.012;
   anchorMaxMove = 3;
+  /** Submaps without a live anchor follow the nearest one in time that has one. */
+  anchorProxy = true;
   /** Express anchor motion through the current registration only (realignments since don't move the submap). */
   anchorRegNow = false;
   /** Polls per depth frame (anchors read round-robin). */
@@ -545,6 +547,8 @@ export class WorldModel {
   private stepAnchors(raw: ArrayLike<number>, t: number): void {
     const src = this.anchorSource;
     if (!src || !this.grid) return;
+    // (Sub-voxel positions of moved structure: only needed when submaps move.)
+    if (!this.grid.subX) (this.grid.subX = new Int8Array(this.grid.data.length)), (this.grid.subZ = new Int8Array(this.grid.data.length));
     const code = this.timeCode(t);
     const last = this.submaps[this.submaps.length - 1];
     const live = this.submaps.reduce((n, sm) => n + (sm.state === 'live' || sm.state === 'pending' || sm.state === 'paused' ? 1 : 0), 0);
@@ -716,6 +720,15 @@ export class WorldModel {
     this.anchorQueue = rest;
     let code0 = 65535, code1 = 0;
     for (const [sm, b] of batch) (code0 = Math.min(code0, sm.code0)), (code1 = Math.max(code1, b.codeMax));
+    if (this.anchorProxy)
+      for (let i = 0; i < this.submaps.length; i++) {
+        const sm = this.submaps[i], b = batch.get(sm);
+        if (!b) continue;
+        for (let d = -3; d <= 3; d++) {
+          const nb = this.submaps[i + d];
+          if (nb && (nb.state === 'failed' || nb.state === 'lost')) (code0 = Math.min(code0, nb.code0)), (code1 = Math.max(code1, Math.min(nb.code1, b.codeMax)));
+        }
+      }
     if (code1 < code0) {
       for (const sm of batch.keys()) sm.moving = false;
       return;
@@ -732,7 +745,18 @@ export class WorldModel {
       const sm = subs[lo];
       if (!sm || sm.code0 > code) return null;
       const b = batch.get(sm);
-      return b && code <= b.codeMax ? b.c : null;
+      if (b) return code <= b.codeMax ? b.c : null;
+      // A submap without an anchor (creation failed, or lost) follows the
+      // nearest one in time that has one: its drift was much the same.
+      if (sm.state !== 'failed' && sm.state !== 'lost') return null;
+      for (let d = 1; d <= 3; d++)
+        for (const q of [lo - d, lo + d]) {
+          const nb = subs[q];
+          if (!nb || nb.state === 'failed' || nb.state === 'lost') continue;
+          const e = batch.get(nb);
+          return e && this.anchorProxy ? e.c : null;
+        }
+      return null;
     };
     this.submapWarps++;
     if (this.anchorForgetFree) this.forgetFreeOf(corrOf);
@@ -1507,8 +1531,9 @@ export class WorldModel {
     const wcx = this.wi / C, wcz = this.wk / C;
     const inWin = (cx: number, cz: number) => cx >= wcx && cx < wcx + W && cz >= wcz && cz < wcz + W;
     // Movers: lattice cell (I, J, K) → (I', J, K'), with what they carry.
-    const dI: number[] = [], dK: number[] = [], dJ: number[] = [], sI: number[] = [], sK: number[] = [], vals: number[] = [], hits: number[] = [], tops: number[] = [], unders: number[] = [];
-    const visit = (I: number, J: number, K: number, v: number, h: number, top: number, under: number): boolean => {
+    const dI: number[] = [], dK: number[] = [], dJ: number[] = [], sI: number[] = [], sK: number[] = [], vals: number[] = [], hits: number[] = [], tops: number[] = [], unders: number[] = [], offX: number[] = [], offZ: number[] = [];
+    const gx = g.subX, gz = g.subZ;
+    const visit = (I: number, J: number, K: number, v: number, h: number, top: number, under: number, ox = 0, oz = 0): boolean => {
       if (v <= 0 || v === 127) return false;
       // When the voxel was laid down (birth) or last hit: structure from
       // before t0 that was merely seen again since (in the drifting frame,
@@ -1518,10 +1543,22 @@ export class WorldModel {
       const e = corrFor(when);
       if (!e) return false;
       const [cs, sn, ax, az] = e;
-      const x = this.latX + (I + 0.5) * r, z = this.latZ + (K + 0.5) * r;
+      const x = this.latX + (I + 0.5 + ox / 128) * r, z = this.latZ + (K + 0.5 + oz / 128) * r;
       const X = cs * x + sn * z + ax, Z = -sn * x + cs * z + az;
-      const I2 = Math.floor((X - this.latX) / r), K2 = Math.floor((Z - this.latZ) / r);
-      if (I2 === I && K2 === K) return false;
+      const fx = (X - this.latX) / r, fz = (Z - this.latZ) / r;
+      const I2 = Math.floor(fx), K2 = Math.floor(fz);
+      const nox = Math.max(-64, Math.min(63, Math.round((fx - I2 - 0.5) * 128))), noz = Math.max(-64, Math.min(63, Math.round((fz - K2 - 0.5) * 128)));
+      if (I2 === I && K2 === K) {
+        // Stays in its voxel: only where in it changes (window voxels).
+        if (gx && gz && I >= this.wi && K >= this.wk && I < this.wi + g.nx && K < this.wk + g.nz) {
+          const q = J * layer + (K - this.wk) * g.nx + (I - this.wi);
+          gx[q] = nox;
+          gz[q] = noz;
+        }
+        return false;
+      }
+      offX.push(nox);
+      offZ.push(noz);
       sI.push(I);
       sK.push(K);
       dI.push(I2);
@@ -1565,11 +1602,12 @@ export class WorldModel {
       for (let k = 0; k < g.nz; k++)
         for (let i = 0; i < g.nx; i++) {
           const q = j * layer + k * g.nx + i;
-          if (visit(this.wi + i, j, this.wk + k, g.data[q], gh[q], g.topFrac[q], g.underside[q])) {
+          if (visit(this.wi + i, j, this.wk + k, g.data[q], gh[q], g.topFrac[q], g.underside[q], gx ? gx[q] : 0, gz ? gz[q] : 0)) {
             g.data[q] = 0;
             gh[q] = 0;
             g.topFrac[q] = 255;
             g.underside[q] = 0;
+            if (gx && gz) gx[q] = gz[q] = 0;
           }
         }
     this.warpPhase = 'archive';
@@ -1642,6 +1680,7 @@ export class WorldModel {
         if (g.data[t] >= vals[q] && g.data[t] > 0) continue;
         g.data[t] = vals[q];
         gh[t] = hits[q];
+        if (gx && gz) (gx[t] = offX[q]), (gz[t] = offZ[q]);
         if (tops[q] !== 255) g.topFrac[t] = tops[q];
         g.underside[t] |= unders[q];
         continue;
@@ -1738,6 +1777,8 @@ export class WorldModel {
     g.hitTime = shifted(old.hitTime ?? new Uint32Array(n), this.takeSpare('hitTime', n, () => new Uint32Array(n)), old.ny, () => 0);
     // (Columns entering from the archive: seen empty long ago, if ever.)
     g.colFree = old.colFree ? shifted(old.colFree, new Uint16Array(old.nx * old.nz), 1, () => 1) : null;
+    g.subX = old.subX ? shifted(old.subX, new Int8Array(n), old.ny, () => 0) : null;
+    g.subZ = old.subZ ? shifted(old.subZ, new Int8Array(n), old.ny, () => 0) : null;
     g.stamp = old.stamp;
     const entering: [number, number][] = [];
     for (let a = 0; a < W; a++)

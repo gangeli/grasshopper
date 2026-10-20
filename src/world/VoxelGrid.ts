@@ -86,6 +86,17 @@ export class VoxelGrid {
    * current frame. 0 = not since the column entered the window. Null: off.
    */
   colFree: Uint16Array | null = null;
+  /**
+   * Per voxel: where in the voxel (x, z) the structure really is, as an
+   * offset from its centre in 1/128 of a voxel. Structure moved by a warp
+   * (submaps following anchors) lands between voxel centres; without this,
+   * every move would round it to the nearest centre and repeated small
+   * moves would add up the rounding (a 0.25 rad turn in 20 steps put a wall
+   * 20 cm off on average). Window only (archived voxels go back to centres);
+   * null: off.
+   */
+  subX: Int8Array | null = null;
+  subZ: Int8Array | null = null;
   freeBandTop = 0;
   /** Time code written by hits (whole seconds since the session started, from 1). */
   stamp = 1;

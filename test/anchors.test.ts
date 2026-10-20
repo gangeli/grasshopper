@@ -90,6 +90,32 @@ describe('submaps glued to anchors', () => {
     expect(occ(w, 2.0175, -0.1775)).toBe(80);
   });
 
+  it('many small turns add up without rounding drift (sub-voxel positions)', () => {
+    const src = new StubAnchors();
+    const w = world(src);
+    frame(w, 0, 0, 0);
+    const g = w.grid!;
+    g.stamp = 1;
+    for (let x = 2; x < 5; x += 0.05) g.set(g.cellX(x), g.cellY(0.525), g.cellZ(1.02), 80);
+    const total = 0.25, steps = 20;
+    for (let q = 1; q <= steps; q++) {
+      const a = (total * q) / steps;
+      src.poses.set(1, [Math.cos(a), 0, -Math.sin(a), 0, 0, 1, 0, 0, Math.sin(a), 0, Math.cos(a), 0, 0, 1.4, 0, 1]);
+      frame(w, q, 0, 0);
+    }
+    // Every voxel of the wall within ~3 cm of the wall turned by 0.25 rad in one go.
+    const c = Math.cos(total), s = Math.sin(total), h = w.grid!;
+    let n = 0, worst = 0;
+    for (let k = 0; k < h.nz; k++)
+      for (let i = 0; i < h.nx; i++) {
+        if (h.get(i, h.cellY(0.525), k) <= 20) continue;
+        n++;
+        worst = Math.max(worst, Math.abs(-s * h.centerX(i) - c * h.centerZ(k) + 1.02));
+      }
+    expect(n).toBeGreaterThan(45);
+    expect(worst).toBeLessThan(0.035);
+  });
+
   it('only moves what was laid down before the anchor moved (the submap goes on in the corrected frame)', () => {
     const src = new StubAnchors();
     const w = world(src);
