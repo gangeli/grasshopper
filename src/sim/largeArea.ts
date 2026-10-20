@@ -15,6 +15,8 @@ import { Rng } from '../core/rng';
 import { CameraDepthSource, senseFrame } from './scan';
 import { cameraBasis, SimSensor, type NoiseName, type NoiseProfile, type SimCamera } from './SimSensor';
 import type { SimRoom } from './SimRoom';
+import { SimAnchors, type AnchorSimOptions } from './SimAnchors';
+import { anchorCorrection, transformDelta } from '../app/runtime';
 
 /**
  * Large-area mapping benchmark: a person walks through a whole multi-room
@@ -78,6 +80,13 @@ export interface LargeAreaOptions {
   moveFurniture?: { every: number; n: number };
   /** Scripted tracking resets: at time t the tracker's frame jumps (dx, dz m, dyaw rad about the camera) and reports a loss. */
   jumps?: { t: number; dx: number; dz: number; dyaw: number }[];
+  /**
+   * Simulated WebXR anchors (see SimAnchors): with `submaps`, the world model
+   * cuts the map into submaps glued to anchors (WorldModel.anchorSource);
+   * with `pet`, the app's single placement anchor corrects the whole map
+   * frame (ArMode.updateAnchor, the behaviour before submaps).
+   */
+  anchors?: { sim?: AnchorSimOptions; submaps?: boolean; pet?: boolean };
   /** Called at every metric interval (diagnostics). */
   inspect?: (ctx: { t: number; world: WorldModel; sensor: SimSensor; cam: SimCamera; room: SimRoom; house: House }) => void;
 }
@@ -102,6 +111,13 @@ export interface LargeAreaSample {
   /** Local precision of structure last observed ≥15s ago / within 15s, and the old share. */
   localPrecOld: number;
   localPrecRecent: number;
+  /**
+   * Obstacle precision of the live window within 6 m of the player through
+   * the current frame (every 10 s): is the wider map consistent with what the
+   * camera sees now? (precision is scored in the truth frame instead; a map
+   * that follows the tracker's corrections can be consistent and off the truth.)
+   */
+  windowPrecision?: number;
   localOldShare: number;
   /**
    * Hopper's paths near the player, walked in reality through the current
@@ -154,7 +170,7 @@ export interface LargeAreaReport {
   rooms: RoomRetention[];
   cpu: { sense: Stat; game: Stat; frame: Stat; nav: Stat; frameOver16: number };
   final: LargeAreaSample & { pathsColliding: number; pathsTested: number; pathMaxPen: number; nodesColliding: number };
-  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; realigns: { t: number; before: number; after: number; what: string }[] };
+  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; anchors: Record<string, number> | null; realigns: { t: number; before: number; after: number; what: string }[] };
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
@@ -201,6 +217,14 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   // paced by search steps so runs don't depend on this machine's speed.
   game.health.drift.budgetSteps = o.driftBudgetSteps ?? 10;
   world.setFloor(sensor.floorEstimate(), { x: house.start.x, y: 0, z: house.start.z });
+  const anchors = o.anchors ? new SimAnchors(sensor, o.anchors.sim ?? {}, seed) : null;
+  if (anchors && o.anchors?.submaps)
+    world.setAnchorSource({
+      create: (pose, done) => done(anchors.create(pose)),
+      pose: (h) => anchors.pose(h as number),
+      release: (h) => anchors.release(h as number),
+    });
+  let petAnchor: { id: number; a0: number[] | null; last: number[] | null } | null = null;
   o.setup?.(world, stack, sensor);
   const camera = o.depthFrom === 'camera' ? new CameraDepthSource(room, sensor, { seed, every: 1 }) : null;
   const path = houseWalk(house, seed, { seconds, ...o.walk });
@@ -228,7 +252,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   let frameErrMax = 0, walked = 0, spawned = false;
   let abPeak = 0;
   let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
-  let nodeTested = 0, nodeHit = 0, nodeDeep = 0, ffShell = 0, ffBad = 0, hideTested = 0, hideBad = 0;
+  let nodeTested = 0, nodeHit = 0, nodeDeep = 0, ffShell = 0, ffBad = 0, hideTested = 0, hideBad = 0, winOcc = 0, winGood = 0;
   const hideRng = new Rng(seed * 7 + 5);
   const pathRng = new Rng(seed * 13 + 1);
   const churnRng = new Rng(seed * 31 + 7);
@@ -285,6 +309,22 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       room.time = step.t;
       if (f > 0) walked += Math.hypot(step.cam.pos.x - path[f - 1].cam.pos.x, step.cam.pos.z - path[f - 1].cam.pos.z);
       sensor.moveTo(step.cam, step.t, dt);
+      anchors?.step(step.t, dt);
+      if (petAnchor && anchors) {
+        // ArMode.updateAnchor: C = A0 · A(t)⁻¹ corrects the whole map frame.
+        const P = anchors.pose(petAnchor.id);
+        if (Array.isArray(P)) {
+          if (!petAnchor.a0) petAnchor.a0 = P;
+          else {
+            const c = anchorCorrection(petAnchor.a0, P);
+            const d = transformDelta(petAnchor.last ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], c);
+            if (d.dist > 0.01 || d.angle > (0.3 * Math.PI) / 180) {
+              petAnchor.last = c;
+              world.setAnchorCorrection(c);
+            }
+          }
+        }
+      }
       // Rooms: note the first time the walker leaves each one (retention baseline).
       const r = step.roomId;
       if (r >= 0) {
@@ -363,6 +403,12 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
           const n = nav.nearest(world.toMapPoint(p), 1.0);
           const at = n >= 0 ? nav.pos(n) : p;
           game.spawn(new THREE.Vector3(at.x, at.y, at.z), new THREE.Vector3(step.cam.pos.x, 0, step.cam.pos.z));
+          if (anchors && o.anchors?.pet) {
+            // The placement anchor, at the tapped point (tracking frame).
+            const T = sensor.trackingFromTruth();
+            const id = anchors.create([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, T[0] * p.x + T[8] * p.z + T[12], T[1] * p.x + T[9] * p.z + T[13], T[2] * p.x + T[10] * p.z + T[14], 1]);
+            if (id !== null) petAnchor = { id, a0: null, last: null };
+          }
         }
         if (spawned) game.update(dt, trackedView(sensor, step.cam));
       }
@@ -386,6 +432,11 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         const hs = hideSpotSafety(world, game.nav, sensor, room, step.cam, game.pet.pos, hideRng);
         hideTested += hs.tested;
         hideBad += hs.bad;
+      }
+      if (f % 300 === 150 && world.grid) {
+        const wp = localPrecision(world, sensor, room, step.cam, 6);
+        winOcc += wp.occ;
+        winGood += wp.good;
       }
       if (f % 60 === 0 && world.grid) {
         const lp = localPrecision(world, sensor, room, step.cam);
@@ -422,10 +473,11 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         s.localNodeColl = nodeTested ? nodeHit / nodeTested : 0;
         s.localNodeDeep = nodeTested ? nodeDeep / nodeTested : 0;
         s.localFalseFree = ffShell ? ffBad / ffShell : 0;
+        s.windowPrecision = winOcc ? winGood / winOcc : 1;
         s.hideTested = hideTested;
         s.hideBad = hideBad;
         localSum = ghostSum = localN = oldGood = oldOcc = recGood = recOcc = pathTested = pathHit = 0;
-        nodeTested = nodeHit = nodeDeep = ffShell = ffBad = hideTested = hideBad = 0;
+        nodeTested = nodeHit = nodeDeep = ffShell = ffBad = hideTested = hideBad = winOcc = winGood = 0;
         samples.push(s);
         log(fmtSample(s));
       }
@@ -461,7 +513,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     rooms,
     cpu: { sense: stat(senseT), game: stat(gameT), frame: fs, nav: stat(navTimes), frameOver16: frameT.filter((x) => x > 16).length },
     final: { ...fin, pathsColliding: em.pathsColliding, pathsTested: em.pathsTested, pathMaxPen: em.pathMaxPenetration, nodesColliding: em.nodesColliding },
-    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
+    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, anchors: anchors ? { ...anchors.stats, live: anchors.live, submaps: world.submaps.length, submapWarps: world.submapWarps, anchorMoves: world.anchorMoves } : null, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
     arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,

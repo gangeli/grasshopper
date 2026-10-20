@@ -174,7 +174,7 @@ export function worldNoise(x: number, y: number, z: number): number {
   );
 }
 
-function mulCM(A: ArrayLike<number>, B: ArrayLike<number>): number[] {
+export function mulCM(A: ArrayLike<number>, B: ArrayLike<number>): number[] {
   const o = new Array(16).fill(0);
   for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += A[k * 4 + r] * B[c * 4 + k];
   return o;
@@ -446,6 +446,7 @@ export class SimSensor {
     const c = Math.cos(dyaw), sn = Math.sin(dyaw);
     const J = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, dx, dy, dz, 1];
     this.jump = mulCM(J, this.jump);
+    this.onJump?.(J);
   }
   /** Persistent rigid world-frame offset of the tracking frame (injected faults); unlike drift it doesn't revert. */
   jump: number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -462,7 +463,7 @@ export class SimSensor {
   trackingFromTruth(): number[] {
     return mulCM(this.jump, this.drift);
   }
-  private odo: { last: Vec3 | null; lastYaw: number; dirAngle: number; yawBias: number; walked: number; nextKey: number; keys: { p: Vec3; D: number[]; t: number }[] } = { last: null, lastYaw: 0, dirAngle: 0, yawBias: 0, walked: 0, nextKey: 0, keys: [] };
+  private odo: { last: Vec3 | null; lastYaw: number; dirAngle: number; yawBias: number; walked: number; nextKey: number; keys: { p: Vec3; D: number[]; t: number; w: number }[] } = { last: null, lastYaw: 0, dirAngle: 0, yawBias: 0, walked: 0, nextKey: 0, keys: [] };
   /** Loop closures performed by the simulated tracker. */
   loopClosures = 0;
   /** Tracking losses that ended with a persistent frame jump (lossJumpChance). */
@@ -518,11 +519,11 @@ export class SimSensor {
     this.drift = mulCM(R, D);
     // Keyframes every 0.5m walked; loop closure back near an old one.
     if (o.walked >= o.nextKey) {
-      o.keys.push({ p: { ...p }, D: this.drift.slice(), t });
+      o.keys.push({ p: { ...p }, D: this.drift.slice(), t, w: o.walked });
       o.nextKey = o.walked + 0.5;
     }
     if (O.loopRate > 0 && this.rng.chance(O.loopRate * dt)) {
-      let best: { p: Vec3; D: number[]; t: number } | null = null, bd = 1.0;
+      let best: { p: Vec3; D: number[]; t: number; w: number } | null = null, bd = 1.0;
       for (const k of o.keys) {
         if (t - k.t < O.loopMinAge) continue;
         const d = Math.hypot(k.p.x - p.x, k.p.z - p.z);
@@ -532,13 +533,23 @@ export class SimSensor {
         // Snap back to the frame the place was seen in.
         const off = Math.hypot(best.D[12] - this.drift[12], best.D[14] - this.drift[14]) + Math.abs(Math.atan2(best.D[8], best.D[0]) - Math.atan2(this.drift[8], this.drift[0]));
         if (off > 0.02) {
+          const before = this.trackingFromTruth();
           this.drift = best.D.slice();
           this.loopClosures++;
+          this.onLoop?.({ t, before, after: this.trackingFromTruth(), walkedKey: best.w, walkedNow: o.walked, truePos: { ...p } });
         }
       }
     }
   }
 
+  /**
+   * Observers of the tracker's frame corrections (for simulated anchors, see
+   * SimAnchors): its own loop closures (tracking frame before → after, and
+   * the distance walked at the place it recognised and now), and persistent
+   * frame jumps (the jump, applied on top of the tracking frame).
+   */
+  onLoop?: (e: { t: number; before: number[]; after: number[]; walkedKey: number; walkedNow: number; truePos: Vec3 }) => void;
+  onJump?: (J: number[]) => void;
   /** A sudden pose correction (loop closure / relocalisation). */
   private relocalise() {
     const N = this.noise, e = this.poseErr;

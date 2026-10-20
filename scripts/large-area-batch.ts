@@ -5,16 +5,19 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 // spec: [{ "name": "ideal", "house": "15x20", "seed": 3, "seconds": 240, "profile": "house", "env": { "NOISE": "{...}" } }, ...]
 // A spec may also be { "suite": true, "env": {...}, "name": "x", "scale": 1 } to expand to the standard three homes.
 type Run = { name: string; house?: string; seed?: number; seconds?: number; profile?: string; env?: Record<string, string> };
-const spec = JSON.parse(readFileSync(process.argv[2], 'utf8')) as (Run & { suite?: boolean; quick?: boolean; scale?: number })[];
+const spec = JSON.parse(readFileSync(process.argv[2], 'utf8')) as (Run & { suite?: boolean; quick?: boolean; ten?: boolean; homes?: number; scale?: number })[];
 const out = process.argv[3] ?? '/tmp/large-area-batch';
 const par = Number(process.argv[4] ?? 4);
 mkdirSync(out, { recursive: true });
 const SUITE: [string, number, number][] = [['10x12', 1, 600], ['12x15', 2, 600], ['15x20', 3, 900]];
 // "quick": six homes, five minutes each.
 const QUICK: [string, number, number][] = [['10x12', 1, 300], ['12x15', 2, 300], ['15x20', 3, 300], ['8x12', 4, 300], ['10x12', 5, 300], ['14x16', 6, 300]];
+// "ten": the ten homes of rounds 3-4, ten minutes each (scale multiplies; "homes": n takes the first n).
+const TEN: [string, number, number][] = [['10x12', 1, 600], ['12x15', 2, 600], ['15x20', 3, 600], ['8x12', 4, 600], ['10x12', 5, 600], ['14x16', 6, 600], ['12x12', 7, 600], ['11x14', 8, 600], ['9x13', 9, 600], ['13x15', 10, 600]];
 const runs: Run[] = [];
 for (const s of spec) {
-  if (s.quick) QUICK.forEach(([h, seed, secs]) => runs.push({ ...s, name: `${s.name}:${h}s${seed}`, house: h, seed, seconds: Math.round(secs * (s.scale ?? 1)) }));
+  if (s.ten) TEN.slice(0, s.homes ?? 10).forEach(([h, seed, secs]) => runs.push({ ...s, name: `${s.name}:${h}s${seed}`, house: h, seed, seconds: Math.round(secs * (s.scale ?? 1)) }));
+  else if (s.quick) QUICK.forEach(([h, seed, secs]) => runs.push({ ...s, name: `${s.name}:${h}s${seed}`, house: h, seed, seconds: Math.round(secs * (s.scale ?? 1)) }));
   else if (s.suite) SUITE.forEach(([h, seed, secs]) => runs.push({ ...s, name: `${s.name}:${h}`, house: h, seed, seconds: Math.round(secs * (s.scale ?? 1)) }));
   else runs.push(s);
 }

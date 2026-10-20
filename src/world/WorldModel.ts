@@ -484,6 +484,194 @@ export class WorldModel {
   /** Tracking-origin resets with a known transform, applied (diagnostics). */
   originResets = 0;
 
+  // --- Submaps glued to platform anchors -------------------------------------------
+  /**
+   * The platform's anchors (WebXR XRAnchor on a phone). The tracker keeps an
+   * anchor glued to its own map of the room and moves it when it corrects
+   * itself (closes a loop, merges a map it had lost); between corrections an
+   * anchor drifts with the tracker, so its reported pose doesn't change.
+   * With a source, the map is cut into time-bounded submaps, each with an
+   * anchor created where the camera was when it began; when an anchor's pose
+   * moves, what was laid down during its submap moves with it (a sliced
+   * warp), so old parts of the map follow the tracker's corrections. Without
+   * a source (unsupported, or every creation failed) nothing changes; a lost
+   * anchor just leaves its submap where it is.
+   */
+  anchorSource: AnchorSource | null = null;
+  /** A new submap at most this often (s)... */
+  submapSeconds = 10;
+  /** ...and once the camera has moved this far (m) from where the last one began. */
+  submapWalk = 0.75;
+  /** At most this many anchors at a time (later submaps extend the last one). */
+  maxAnchors = 60;
+  /** Anchor motion that moves its submap: translation (m) or yaw (rad) beyond these; beyond anchorMaxMove it's ignored. */
+  anchorMinMove = 0.03;
+  anchorMinTurn = 0.012;
+  anchorMaxMove = 3;
+  /** Express anchor motion through the current registration only (realignments since don't move the submap). */
+  anchorRegNow = false;
+  /** Polls per depth frame (anchors read round-robin). */
+  anchorPollsPerFrame = 12;
+  readonly submaps: SubmapAnchor[] = [];
+  /** Submap moves applied, anchors that moved (diagnostics). */
+  submapWarps = 0;
+  anchorMoves = 0;
+  private anchorQueue: { s: SubmapAnchor; c: Affine2; codeMax: number }[] = [];
+  private anchorPoll = 0;
+
+  setAnchorSource(src: AnchorSource | null): void {
+    if (this.anchorSource && this.anchorSource !== src) this.releaseAnchors();
+    this.anchorSource = src;
+  }
+  /** Session end, or anchors no longer wanted: release them all (submaps stay where they are). */
+  releaseAnchors(): void {
+    const src = this.anchorSource;
+    for (const sm of this.submaps) {
+      if (src && sm.h !== null && sm.state !== 'lost') {
+        try {
+          src.release(sm.h);
+        } catch {
+          // (A dead session's anchors can't be deleted: nothing to do.)
+        }
+      }
+      sm.h = null;
+      sm.state = 'lost';
+    }
+    this.anchorQueue = [];
+  }
+
+  /** Start submaps, read anchors, queue and start submap moves (each depth frame; `raw`: camera pose in tracking coordinates). */
+  private stepAnchors(raw: ArrayLike<number>, t: number): void {
+    const src = this.anchorSource;
+    if (!src || !this.grid) return;
+    const code = this.timeCode(t);
+    const last = this.submaps[this.submaps.length - 1];
+    const live = this.submaps.reduce((n, sm) => n + (sm.state === 'live' || sm.state === 'pending' || sm.state === 'paused' ? 1 : 0), 0);
+    if (live < this.maxAnchors && (!last || (t - last.t >= this.submapSeconds && code > last.code0 && Math.hypot(raw[12] - last.at[12], raw[14] - last.at[14]) >= this.submapWalk) || (last.state === 'failed' && t - last.t >= this.submapSeconds))) {
+      if (last) last.code1 = code - 1;
+      // Upright, at the camera (what matters is how it moves, not how it's turned).
+      const at = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, raw[12], raw[13], raw[14], 1];
+      const sm: SubmapAnchor = { code0: code, code1: 65535, t, at, ref: at.slice(), reg: this.t2m.slice(), h: null, state: 'pending' };
+      this.submaps.push(sm);
+      try {
+        src.create(at.slice(), (h) => {
+          if (sm.state !== 'pending') {
+            if (h !== null) src.release(h);
+            return;
+          }
+          if (h === null || h === undefined) sm.state = 'failed';
+          else (sm.h = h), (sm.state = 'live');
+        });
+      } catch {
+        sm.state = 'failed';
+      }
+    }
+    // Read anchors (round-robin when there are many).
+    const n = this.submaps.length, polls = Math.min(n, this.anchorPollsPerFrame);
+    for (let q = 0; q < polls; q++) {
+      const sm = this.submaps[(this.anchorPoll + q) % n];
+      // (One correction per submap in flight: the next one is measured from where that one leaves it.)
+      if (sm.h === null || (sm.state !== 'live' && sm.state !== 'paused') || sm.moving) continue;
+      let P: number[] | null | 'lost';
+      try {
+        P = src.pose(sm.h);
+      } catch {
+        P = 'lost';
+      }
+      if (P === 'lost') {
+        sm.state = 'lost';
+        try {
+          src.release(sm.h);
+        } catch {
+          // ignore
+        }
+        sm.h = null;
+        continue;
+      }
+      if (!P || P.length !== 16 || !P.every(Number.isFinite)) {
+        sm.state = 'paused';
+        continue;
+      }
+      sm.state = 'live';
+      const R = sm.ref;
+      const dx = P[12] - R[12], dz = P[14] - R[14];
+      // Yaw of the change (trackers correct about gravity).
+      const D = mul4(P, invertRigid4(R));
+      const dyaw = Math.atan2(D[8], D[0]);
+      const mv = Math.hypot(dx, dz);
+      if (mv < this.anchorMinMove && Math.abs(dyaw) < this.anchorMinTurn) continue;
+      if (mv > this.anchorMaxMove) {
+        sm.ref = P;
+        continue;
+      }
+      // Tracking-frame motion of what is near the anchor: x' = R(x − a) + a + d.
+      const c = Math.cos(dyaw), sn = Math.sin(dyaw);
+      const M = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, R[12] - (c * R[12] + sn * R[14]) + dx, 0, R[14] - (-sn * R[12] + c * R[14]) + dz, 1];
+      // The same in map coordinates: what was mapped through the registration
+      // of then (sm.reg) goes where the current registration puts it now.
+      const reg = this.anchorRegNow ? this.t2m : sm.reg;
+      const C = mul4(mul4(this.t2m, M), invertRigid4(reg));
+      const yaw = Math.atan2(C[8], C[0]), cs = Math.cos(yaw), sy = Math.sin(yaw);
+      // Voxels move by whole cells: apply the anchor's shift rounded to the
+      // grid and keep the rest for later (small moves must add up, not be lost).
+      const ax0 = reg[0] * R[12] + reg[4] * R[13] + reg[8] * R[14] + reg[12], az0 = reg[2] * R[12] + reg[6] * R[13] + reg[10] * R[14] + reg[14];
+      const ax1 = cs * ax0 + sy * az0 + C[12], az1 = -sy * ax0 + cs * az0 + C[14];
+      const r = this.res, ex = ax1 - ax0, ez = az1 - az0;
+      const rx = ex - Math.round(ex / r) * r, rz = ez - Math.round(ez / r) * r;
+      if (Math.abs(ex - rx) < r / 2 && Math.abs(ez - rz) < r / 2 && Math.abs(dyaw) < this.anchorMinTurn) continue;
+      // Pending residual back in tracking coordinates (rotation of the inverse registration).
+      const Ti = this.m2t;
+      sm.ref = P.slice();
+      sm.ref[12] -= Ti[0] * rx + Ti[8] * rz;
+      sm.ref[13] -= Ti[1] * rx + Ti[9] * rz;
+      sm.ref[14] -= Ti[2] * rx + Ti[10] * rz;
+      sm.reg = this.t2m.slice();
+      this.anchorMoves++;
+      sm.moving = true;
+      this.anchorQueue.push({ s: sm, c: [cs, sy, C[12] - rx, C[14] - rz], codeMax: code - 1 });
+    }
+    this.anchorPoll = n ? (this.anchorPoll + polls) % n : 0;
+    if (this.anchorQueue.length && !this.warpTask) this.startAnchorWarp();
+  }
+
+  /** Move the submaps whose anchors moved (one pass; a submap queued twice waits for the next). */
+  private startAnchorWarp(): void {
+    const batch = new Map<SubmapAnchor, { c: Affine2; codeMax: number }>();
+    const rest: typeof this.anchorQueue = [];
+    for (const e of this.anchorQueue) {
+      if (batch.has(e.s)) rest.push(e);
+      else batch.set(e.s, { c: e.c, codeMax: Math.min(e.codeMax, e.s.code1) });
+    }
+    this.anchorQueue = rest;
+    let code0 = 65535, code1 = 0;
+    for (const [sm, b] of batch) (code0 = Math.min(code0, sm.code0)), (code1 = Math.max(code1, b.codeMax));
+    if (code1 < code0) return;
+    const subs = this.submaps;
+    const corrOf = (code: number): Affine2 | null => {
+      // The submap holding this code (submaps are in time order).
+      let lo = 0, hi = subs.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (subs[mid].code0 <= code) lo = mid;
+        else hi = mid - 1;
+      }
+      const sm = subs[lo];
+      if (!sm || sm.code0 > code) return null;
+      const b = batch.get(sm);
+      return b && code <= b.codeMax ? b.c : null;
+    };
+    this.submapWarps++;
+    const it = this.warpPass(code0, code1, corrOf, this.timeOf(code0), this.timeOf(code1 + 1));
+    const self = this;
+    this.warpTask = (function* () {
+      const m = yield* it;
+      for (const sm of batch.keys()) sm.moving = false;
+      self.emit({ kind: 'submaps', t: self.now, moved: m });
+      return m;
+    })();
+    if (!this.sliceWarps) this.finishWarp();
+  }
+
   /** Apply an extra map-frame correction on top of the current one (from self-registration). */
   applyRegistration(delta: ArrayLike<number>): void {
     if (!Array.from(delta).every(Number.isFinite)) return;
@@ -529,6 +717,7 @@ export class WorldModel {
    * was rejected.
    */
   ingestDepthImage(img: DepthImage, t: number, emulatedPose = false): boolean {
+    const raw = img.camToWorld;
     if (!this.frameIsIdentity) img = { ...img, camToWorld: mul4(this.t2m, img.camToWorld) };
     this.now = t;
     const M = img.camToWorld;
@@ -577,6 +766,8 @@ export class WorldModel {
       this.stepReplayQueue(3);
       // A warp in progress: a few window layers / archive chunks per frame.
       this.stepWarp(2);
+      // Submaps following their anchors.
+      if (this.anchorSource && !this.replaying && !emulatedPose) this.stepAnchors(raw, t);
     }
     if (!this.poseGate.accept(eye, fwd, t, emulatedPose) && this.gateFrames) return false;
     const sig: number[] | undefined = img.sigma ? [] : undefined;
@@ -1196,12 +1387,32 @@ export class WorldModel {
     const w0 = this.walkedAt(code0), w1 = this.walkedAt(code1);
     const span = w1 - w0;
     const alpha = (code: number) => Math.max(0, Math.min(1, span > 0.05 ? (this.walkedAt(code) - w0) / span : (code - code0) / Math.max(1, code1 - code0)));
-    const cache = new Map<number, [number, number, number, number]>();
+    const px = c.pivot.x, pz = c.pivot.z;
+    const corrFor = (code: number): Affine2 => {
+      const a = alpha(code), yaw = a * c.dyaw, cs = Math.cos(yaw), sn = Math.sin(yaw);
+      // x' = pivot + R(x - pivot) + a*d, as an affine map of x.
+      return [cs, sn, px - cs * px - sn * pz + a * c.dx, pz + sn * px - cs * pz + a * c.dz];
+    };
+    this.warps++;
+    const m = yield* this.warpPass(code0, code1, corrFor, t0, t1);
+    this.emit({ kind: 'warp', t: this.now, t0, t1, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } }, moved: m });
+    return m;
+  }
+
+  /**
+   * Move occupied voxels (window and archive) whose time code (birth or last
+   * hit, see warpByBirth) lies in [code0, code1] by corrFor(code) (an affine
+   * map of map-frame x/z; null = stays), with the buffered frames of [t0, t1]
+   * and place memory. Steps of ~one window layer or archive chunk.
+   */
+  private *warpPass(code0: number, code1: number, corrOf: (code: number) => Affine2 | null, t0: number, t1: number): Generator<void, number, void> {
+    const g = this.grid;
+    if (!g || !g.hitTime) return 0;
+    const cache = new Map<number, Affine2 | null>();
     const corrFor = (code: number) => {
       let e = cache.get(code);
-      if (!e) {
-        const a = alpha(code), yaw = a * c.dyaw;
-        e = [Math.cos(yaw), Math.sin(yaw), a * c.dx, a * c.dz];
+      if (e === undefined) {
+        e = corrOf(code);
         cache.set(code, e);
       }
       return e;
@@ -1211,8 +1422,7 @@ export class WorldModel {
     const wcx = this.wi / C, wcz = this.wk / C;
     const inWin = (cx: number, cz: number) => cx >= wcx && cx < wcx + W && cz >= wcz && cz < wcz + W;
     // Movers: lattice cell (I, J, K) → (I', J, K'), with what they carry.
-    const dI: number[] = [], dK: number[] = [], dJ: number[] = [], vals: number[] = [], hits: number[] = [], tops: number[] = [], unders: number[] = [];
-    const px = c.pivot.x, pz = c.pivot.z;
+    const dI: number[] = [], dK: number[] = [], dJ: number[] = [], sI: number[] = [], sK: number[] = [], vals: number[] = [], hits: number[] = [], tops: number[] = [], unders: number[] = [];
     const visit = (I: number, J: number, K: number, v: number, h: number, top: number, under: number): boolean => {
       if (v <= 0 || v === 127) return false;
       // When the voxel was laid down (birth) or last hit: structure from
@@ -1220,11 +1430,15 @@ export class WorldModel {
       // landing on the same voxel) belongs where it is.
       const when = this.warpByBirth ? h >>> 16 : h & 0xffff;
       if (when < code0 || when > code1) return false;
-      const [cs, sn, tx, tz] = corrFor(when);
-      const x = this.latX + (I + 0.5) * r - px, z = this.latZ + (K + 0.5) * r - pz;
-      const X = px + cs * x + sn * z + tx, Z = pz - sn * x + cs * z + tz;
+      const e = corrFor(when);
+      if (!e) return false;
+      const [cs, sn, ax, az] = e;
+      const x = this.latX + (I + 0.5) * r, z = this.latZ + (K + 0.5) * r;
+      const X = cs * x + sn * z + ax, Z = -sn * x + cs * z + az;
       const I2 = Math.floor((X - this.latX) / r), K2 = Math.floor((Z - this.latZ) / r);
       if (I2 === I && K2 === K) return false;
+      sI.push(I);
+      sK.push(K);
       dI.push(I2);
       dK.push(K2);
       dJ.push(J);
@@ -1242,16 +1456,14 @@ export class WorldModel {
     this.eventSnapshot = null;
     for (const f of this.replay) {
       if (f.t < t0 || f.t > t1) continue;
-      const [cs, sn, tx, tz] = corrFor(this.timeCode(f.t));
-      const fix = (x: number, z: number): [number, number] => {
-        const rx = x - px, rz = z - pz;
-        return [px + cs * rx + sn * rz + tx, pz - sn * rx + cs * rz + tz];
-      };
+      const e = corrFor(this.timeCode(f.t));
+      if (!e) continue;
+      const [cs, sn, ax, az] = e;
+      const fix = (x: number, z: number): [number, number] => [cs * x + sn * z + ax, -sn * x + cs * z + az];
       [f.eye.x, f.eye.z] = fix(f.eye.x, f.eye.z);
       for (let q = 0; q < f.pts.length; q += 3) [f.pts[q], f.pts[q + 2]] = fix(f.pts[q], f.pts[q + 2]);
     }
-    this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)), c.pivot);
-    this.warps++;
+    this.placeMemory?.warp(t0, t1, (tt) => corrFor(this.timeCode(tt)) ?? [1, 0, 0, 0], { x: 0, z: 0 });
     // Chunks still coming back into the window, or still being archived from
     // an earlier window, must be where the passes below look (a few per step).
     while (this.pendingLoads.length) {
@@ -1310,11 +1522,30 @@ export class WorldModel {
         }
       }
     }
+    // Free space the structure was seen in front of didn't move with it:
+    // where the structure moved towards it, that space is now inside the
+    // structure (the inside of a sofa "seen empty"). Forget it (unknown).
+    const clearFree = (I: number, J: number, K: number) => {
+      const cx = Math.floor(I / C), cz = Math.floor(K / C);
+      if (inWin(cx, cz)) {
+        const t = J * layer + (K - this.wk) * g.nx + (I - this.wi);
+        if (g.data[t] < 0) g.data[t] = 0;
+        return;
+      }
+      const ch = this.archive.get(cx, cz);
+      if (!ch || ch.oy !== g.origin.y) return;
+      const li = (J * C + (K - cz * C)) * C + (I - cx * C);
+      if (ch.data[li] < 0) ch.data[li] = 0;
+    };
     // Pass 2: write the movers where they belong (the stronger evidence wins).
     const m = vals.length;
     for (let q = 0; q < m; q++) {
       if (q % 20000 === 19999) yield;
       const I = dI[q], K = dK[q], J = dJ[q];
+      if (this.warpClearSwept) {
+        const steps = Math.max(Math.abs(sI[q] - I), Math.abs(sK[q] - K));
+        for (let st = 1; st < steps; st++) clearFree(Math.round(I + ((sI[q] - I) * st) / steps), J, Math.round(K + ((sK[q] - K) * st) / steps));
+      }
       const cx = Math.floor(I / C), cz = Math.floor(K / C);
       if (inWin(cx, cz)) {
         const t = J * layer + (K - this.wk) * g.nx + (I - this.wi);
@@ -1349,7 +1580,6 @@ export class WorldModel {
       ch.hitIdx = idx.length ? Uint16Array.from(idx) : null;
       ch.hitVal = idx.length ? Uint32Array.from(val) : null;
     }
-    this.emit({ kind: 'warp', t: this.now, t0, t1, correction: { dx: c.dx, dz: c.dz, dyaw: c.dyaw, pivot: { x: c.pivot.x, z: c.pivot.z } }, moved: m });
     if (!m) return 0;
     g.touchAll();
     g.version++;
@@ -1357,6 +1587,8 @@ export class WorldModel {
   }
   /** Warp by when structure was laid down (birth) rather than when it was last seen. */
   warpByBirth = true;
+  /** Moving structure forgets the free space between where it was and where it goes (see warpPass). */
+  warpClearSwept = false;
   /** Loop-closure warps applied (diagnostics). */
   warps = 0;
 
@@ -2530,6 +2762,9 @@ function sameBytes(a: Int8Array | Uint8Array, b: Int8Array | Uint8Array): boolea
 }
 
 /** See WorldModel.mapListeners. Corrections map old map-frame positions to new ones (x' = pivot + R(yaw)(x - pivot) + d, R as in realign). */
+/** An affine map of map-frame x/z: x' = cs*x + sn*z + ax, z' = -sn*x + cs*z + az (a yaw and a shift). */
+export type Affine2 = [number, number, number, number];
+
 export type MapEvent =
   | { kind: 'rewrite'; t: number; why: 'floor' | 'reset' }
   | { kind: 'realign'; t: number; since: number; correction: Correction }
@@ -2537,4 +2772,31 @@ export type MapEvent =
   | { kind: 'window'; t: number; si: number; sk: number }
   | { kind: 'import'; t: number; voxels: number }
   | { kind: 'detach'; t: number }
-  | { kind: 'reattach'; t: number; correction: Correction };
+  | { kind: 'reattach'; t: number; correction: Correction }
+  /** Submaps moved with their anchors (each by its own correction). */
+  | { kind: 'submaps'; t: number; moved: number };
+
+/** Platform anchors for submaps (see WorldModel.anchorSource). Poses are column-major, tracking coordinates. */
+export interface AnchorSource {
+  /** Ask for an anchor at this pose; `done` gets a handle, or null if it failed (now or later). */
+  create(pose: number[], done: (h: unknown) => void): void;
+  /** Its pose now; null while not tracked; 'lost' once it is gone for good. */
+  pose(h: unknown): number[] | null | 'lost';
+  release(h: unknown): void;
+}
+
+export interface SubmapAnchor {
+  /** Time codes of what was laid down during this submap. */
+  code0: number;
+  code1: number;
+  t: number;
+  /** Camera pose (tracking) where it began; the anchor's pose when its submap was last moved. */
+  at: number[];
+  ref: number[];
+  /** Tracking → map registration at that time (what was laid down since went in through it). */
+  reg: number[];
+  h: unknown;
+  state: 'pending' | 'live' | 'paused' | 'lost' | 'failed';
+  /** A correction for it is queued or being applied. */
+  moving?: boolean;
+}

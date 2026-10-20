@@ -14,6 +14,7 @@ import { VoxelGrid } from '../world/VoxelGrid';
 import { NavWorkerClient } from '../world/NavWorkerClient';
 import { HIDE_SEEK_MIN_AREA } from '../game/Activities';
 import type { AppMemory } from './Memory';
+import type { AnchorSource } from '../world/WorldModel';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -95,6 +96,17 @@ export class ArMode {
   private press: { source: XRInputSource; t0: number; petted: boolean } | null = null;
   private anchorA0: number[] | null = null;
   private lastCorrection: number[] | null = null;
+  /** The XR frame being processed (anchor calls need it; null outside the frame callback). */
+  private xrFrame: XRFrame | null = null;
+  /**
+   * Submaps glued to XR anchors (WorldModel.anchorSource): ?submaps=1 / 0
+   * overrides the default. Off: the placement anchor corrects the whole map
+   * frame (updateAnchor), as before.
+   */
+  readonly submapAnchors = (() => {
+    const q = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('submaps') : null;
+    return q === '1' ? true : q === '0' ? false : SUBMAP_ANCHORS;
+  })();
   /** Diagnostics exposed for tests/debug overlay. */
   readonly stats = {
     planes: 0,
@@ -123,6 +135,10 @@ export class ArMode {
     hitFallback: false,
     anchor: 'none' as string,
     anchorUpdates: 0,
+    /** Submap anchors: 'off' | 'unsupported' | 'on'; created, failed (diagnostics). */
+    submapAnchors: 'off' as string,
+    submapAnchorsCreated: 0,
+    submapAnchorsFailed: 0,
     anchorCorrection: null as number[] | null,
     /** noteTrackingEvent calls (loss + regain). */
     trackingEvents: 0,
@@ -192,6 +208,11 @@ export class ArMode {
     // land back on the start page instead of sitting in a broken AR view.
     session.addEventListener('end', () => {
       this.session = null;
+      // Anchors die with the session: forget them (submaps stay where they are).
+      this.guard('anchors', () => {
+        this.stack.world.releaseAnchors();
+        this.stack.world.setAnchorSource(null);
+      });
       r.setAnimationLoop(null);
       this.onExit?.();
     });
@@ -461,6 +482,7 @@ export class ArMode {
       world.setFloor(pos.y, pos);
       world.ingestHit(pos, normal);
       this.createAnchor(frame, pos);
+      this.installSubmapAnchors();
       game.refreshNav(true);
       game.spawn(pos.clone(), camT);
       this.stats.placements++;
@@ -509,13 +531,79 @@ export class ArMode {
     }
   }
 
+  /**
+   * Submaps glued to XR anchors: the world cuts its map into submaps, each
+   * with an anchor where the camera was when it began, and moves a submap
+   * when ARCore moves its anchor (it corrected its own drift). Unsupported
+   * (no createAnchor), failing or lost anchors leave the map as it is.
+   */
+  private installSubmapAnchors() {
+    const world = this.stack.world;
+    if (!this.submapAnchors || world.anchorSource) return;
+    const proto = typeof XRFrame !== 'undefined' ? (XRFrame.prototype as unknown as { createAnchor?: unknown }) : null;
+    if (!proto || typeof proto.createAnchor !== 'function' || typeof XRRigidTransform === 'undefined') {
+      this.stats.submapAnchors = 'unsupported';
+      return;
+    }
+    this.stats.submapAnchors = 'on';
+    const self = this;
+    const src: AnchorSource = {
+      create(pose, done) {
+        const f = self.xrFrame, space = self.refSpace;
+        if (!f || !space) return done(null);
+        try {
+          const create = (f as unknown as { createAnchor: (p: XRRigidTransform, s: XRSpace) => Promise<XRAnchor> | undefined }).createAnchor;
+          Promise.resolve(create.call(f, new XRRigidTransform({ x: pose[12], y: pose[13], z: pose[14] }), space)).then(
+            (a) => {
+              if (!a) return void (self.stats.submapAnchorsFailed++, done(null));
+              if (!self.session) {
+                try {
+                  a.delete();
+                } catch {
+                  /* session gone */
+                }
+                return done(null);
+              }
+              self.stats.submapAnchorsCreated++;
+              done(a);
+            },
+            () => (self.stats.submapAnchorsFailed++, done(null)),
+          );
+        } catch {
+          self.stats.submapAnchorsFailed++;
+          done(null);
+        }
+      },
+      pose(h) {
+        const f = self.xrFrame, space = self.refSpace, a = h as XRAnchor;
+        if (!f || !space) return null;
+        const tracked = (f as unknown as { trackedAnchors?: Set<XRAnchor> }).trackedAnchors;
+        // Not tracked right now (it may come back, moved, when the tracker finds its place again).
+        if (tracked && !tracked.has(a)) return null;
+        const p = f.getPose(a.anchorSpace, space);
+        if (!p || p.emulatedPosition || !isFiniteMatrix(p.transform.matrix)) return null;
+        return Array.from(p.transform.matrix);
+      },
+      release(h) {
+        try {
+          (h as XRAnchor).delete();
+        } catch {
+          /* already gone */
+        }
+      },
+    };
+    world.setAnchorSource(src);
+  }
+
   private onFrame(t: number, frame?: XRFrame) {
     if (!frame) return; // only render from the XR session's frames
     const perf = this.stage.perf;
     perf.beginFrame(t);
+    this.xrFrame = frame;
     try {
       this.frameBody(t, frame);
     } finally {
+      this.xrFrame = null;
       perf.endFrame();
     }
   }
@@ -894,6 +982,9 @@ export class ArMode {
     this.lastCorrection = c;
     this.stats.anchorCorrection = c;
     this.stats.anchorUpdates++;
+    // With submaps on their own anchors, each part of the map follows its
+    // anchor: one correction for the whole frame would fight them.
+    if (this.stack.world.anchorSource) return;
     (this.stack.world as unknown as { setAnchorCorrection?: (m: number[] | null) => void }).setAnchorCorrection?.(c);
   }
 }
@@ -918,6 +1009,9 @@ export function sampleDepthImage(info: { getDepthInMeters(x: number, y: number):
     }
   return { w, h, depth, invProj, camToWorld: Array.from(view.transform.matrix) };
 }
+
+/** Submaps glued to XR anchors by default (see ArMode.submapAnchors). */
+export const SUBMAP_ANCHORS = false;
 
 const ids = new WeakMap<object, number>();
 let nextId = 1;

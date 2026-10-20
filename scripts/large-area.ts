@@ -49,6 +49,8 @@ const rep = runLargeArea({
   windowChurn: Number(process.env.CHURN ?? 0),
   moveFurniture: process.env.MOVE ? JSON.parse(process.env.MOVE) : undefined,
   jumps: process.env.JUMPS ? JSON.parse(process.env.JUMPS) : undefined,
+  // ANCHORS='{"submaps":true,"pet":false,"sim":{...SimAnchors options}}'
+  anchors: process.env.ANCHORS ? JSON.parse(process.env.ANCHORS) : undefined,
   setup: (world, stack) => {
     Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
     Object.assign(stack.game.health.drift.opts, JSON.parse(process.env.DRIFT ?? '{}'));
