@@ -430,14 +430,14 @@ export class NavGrid {
     return { cost, prev };
   }
 
-  findPath(from: Vec3, to: Vec3, maxCost = 60, maxExpand = Infinity): Waypoint[] | null {
+  findPath(from: Vec3, to: Vec3, maxCost = 60, maxExpand = Infinity, jumps = true): Waypoint[] | null {
     const s = this.nearest(from), t = this.nearest(to);
     if (s === NONE || t === NONE) return null;
-    return this.pathBetween(s, t, maxCost, maxExpand);
+    return this.pathBetween(s, t, maxCost, maxExpand, jumps);
   }
 
-  pathBetween(s: number, t: number, maxCost = 60, maxExpand = Infinity): Waypoint[] | null {
-    const { prev } = this.search(s, t, maxCost, true, maxExpand);
+  pathBetween(s: number, t: number, maxCost = 60, maxExpand = Infinity, jumps = true): Waypoint[] | null {
+    const { prev } = this.search(s, t, maxCost, jumps, maxExpand);
     if (s !== t && prev[t] === NONE) return null;
     return this.reconstruct(prev, s, t);
   }

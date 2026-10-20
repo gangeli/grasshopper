@@ -47,6 +47,7 @@ const rep = runLargeArea({
   setup: (world, stack) => {
     Object.assign(world, JSON.parse(process.env.WORLD ?? '{}'));
     Object.assign(stack.game.health.drift.opts, JSON.parse(process.env.DRIFT ?? '{}'));
+    Object.assign(world.poseGate, JSON.parse(process.env.GATE ?? '{}'));
   },
   png: process.env.PNG,
   log: process.env.QUIET ? undefined : (l) => console.log(l),

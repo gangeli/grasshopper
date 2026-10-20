@@ -128,24 +128,36 @@ export function houseWalk(house: House, seed: number, o: Partial<WalkOptions> = 
       let heading = yaw;
       let glanceUntil = -1, glanceYaw = 0;
       let lookOff = rng.range(-0.4, 0.4), lookPitch = rng.range(-0.8, -0.3);
+      // Walk with bounded acceleration (people round corners and ease in
+      // and out of stops; ~1.5 m/s²), steering at the next waypoint.
+      let vx = 0, vz = 0;
+      const last = path[path.length - 1];
       for (let w = 1; w < path.length && t < end; ) {
-        const dx = path[w].x - pos.x, dz = path[w].z - pos.z, d = Math.hypot(dx, dz);
-        v0 = Math.min(speed, v0 + 1.2 * dt);
-        const step = v0 * dt;
-        if (d <= step) {
-          pos.x = path[w].x;
-          pos.z = path[w].z;
+        let dx = path[w].x - pos.x, dz = path[w].z - pos.z, d = Math.hypot(dx, dz);
+        if (w < path.length - 1 && d < 0.35) {
           w++;
-        } else {
-          pos.x += (dx / d) * step;
-          pos.z += (dz / d) * step;
+          continue;
         }
+        const toEnd = Math.hypot(last.x - pos.x, last.z - pos.z);
+        if (w === path.length - 1 && toEnd < 0.08 && Math.hypot(vx, vz) < 0.15) break;
+        const want = Math.min(speed, Math.max(0.15, toEnd * 1.2));
+        const ax = (dx / Math.max(d, 1e-6)) * want - vx, az = (dz / Math.max(d, 1e-6)) * want - vz, am = Math.hypot(ax, az), amax = 1.5 * dt;
+        vx += am > amax ? (ax / am) * amax : ax;
+        vz += am > amax ? (az / am) * amax : az;
+        v0 = Math.hypot(vx, vz);
+        pos.x += vx * dt;
+        pos.z += vz * dt;
+        dx = vx;
+        dz = vz;
+        d = v0;
         pos.y += (height - pos.y) * 0.05;
         if (height < 1.2 && rng.chance(0.02)) height = rng.range(1.3, 1.55);
         // Where to look: mostly ahead (where the walk is going), with drifting interest.
         // Smoothed walking direction (people turn their body gradually).
-        const want = Math.atan2(-dx, -dz);
-        heading += Math.atan2(Math.sin(want - heading), Math.cos(want - heading)) * Math.min(1, dt / 0.4);
+        if (d > 0.05) {
+          const want = Math.atan2(-dx, -dz);
+          heading += Math.atan2(Math.sin(want - heading), Math.cos(want - heading)) * Math.min(1, dt / 0.4);
+        }
         if (rng.chance(0.4 * dt)) lookOff = rng.range(-0.9, 0.9);
         if (rng.chance(0.3 * dt)) lookPitch = rng.chance(0.15) ? rng.range(-0.1, 0.3) : rng.range(-1.0, -0.25);
         let wantYaw = heading + lookOff, rate = 1.2;

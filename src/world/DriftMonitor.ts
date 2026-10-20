@@ -98,6 +98,12 @@ export class DriftMonitor {
    * (the default) runs each check to completion right away.
    */
   budgetMs = Infinity;
+  /**
+   * Alternatively a fixed number of search steps per call (deterministic:
+   * benchmarks use it to pace checks like a phone would, independent of the
+   * machine's speed). Takes precedence over budgetMs when finite.
+   */
+  budgetSteps = Infinity;
   private task: Generator<void, boolean, void> | null = null;
   /** A check is in progress (call resume() each frame). */
   get busy(): boolean {
@@ -107,14 +113,16 @@ export class DriftMonitor {
   resume(): boolean {
     const task = this.task;
     if (!task) return false;
-    const until = Number.isFinite(this.budgetMs) ? performance.now() + this.budgetMs : Infinity;
+    const steps = this.budgetSteps;
+    const until = Number.isFinite(steps) ? Infinity : Number.isFinite(this.budgetMs) ? performance.now() + this.budgetMs : Infinity;
+    let n = 0;
     for (;;) {
       const r = task.next();
       if (r.done) {
         this.task = null;
         return r.value;
       }
-      if (performance.now() >= until) return false;
+      if (++n >= steps || performance.now() >= until) return false;
     }
   }
   private seenEvent = -Infinity;

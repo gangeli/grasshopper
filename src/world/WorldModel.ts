@@ -3,7 +3,7 @@ import { OCC_THRESHOLD, STRONG_OCC, VoxelGrid } from './VoxelGrid';
 import { DepthConsistency, depthImageToPoints, filterDiscontinuities, PoseGate, type DepthImage } from './DepthFrame';
 import type { ImportOptions, SerializedMap } from './MapFormat';
 import { CHUNK, exportGrid, importIntoGrid, type Lattice } from './mapIO';
-import { ChunkStore, copyOverlap, keyCx, keyCz, shiftInPlace } from './ChunkStore';
+import { ChunkStore, keyCx, keyCz, mergeChunkInto, shiftCopy, shiftInPlace } from './ChunkStore';
 import { warpGrid, type Correction } from './warp';
 import type { SerializedChunk } from './MapFormat';
 
@@ -607,6 +607,44 @@ export class WorldModel {
     const target = (c: number) => (c < lo ? Math.min(lo + 1, hi) : c > hi ? Math.max(hi - 1, lo) : c);
     const si = ci - target(ci), sk = ck - target(ck);
     if (si || sk) this.moveWindow(si, sk, t);
+    else {
+      // Between moves: finish archiving what the last move left behind, bring
+      // back what it entered, and have fresh arrays ready for the next one
+      // (all of it off the move's frame).
+      this.archive.step(2);
+      this.loadPending(2);
+      this.prepareSpare();
+    }
+  }
+
+  /** Archived chunks that entered the window and aren't loaded into it yet (lattice chunk coords). */
+  private pendingLoads: [number, number][] = [];
+  /** Merge up to n pending chunks into the window (all of them: Infinity). */
+  loadPending(n = Infinity): void {
+    const g = this.grid;
+    if (!g) return;
+    for (let q = 0; q < n && this.pendingLoads.length; q++) {
+      const [cx, cz] = this.pendingLoads.shift()!;
+      mergeChunkInto(this.archive, g, this.wi, this.wk, cx, cz, this.floorLayer);
+    }
+  }
+
+  /** Arrays for the next window, allocated ahead of a move (one per call). */
+  private spare: { data?: Int8Array; observed?: Uint8Array; underside?: Uint8Array; topFrac?: Uint8Array; hitTime?: Uint16Array } = {};
+  private prepareSpare(): void {
+    const g = this.grid;
+    if (!g) return;
+    const n = g.data.length, s = this.spare;
+    if (!s.data) s.data = new Int8Array(n);
+    else if (!s.hitTime) s.hitTime = new Uint16Array(n);
+    else if (!s.underside) s.underside = new Uint8Array(n);
+    else if (!s.topFrac) s.topFrac = new Uint8Array(n);
+    else if (!s.observed) s.observed = new Uint8Array(g.nx * g.nz);
+  }
+  private takeSpare<K extends keyof WorldModel['spare']>(k: K, len: number, make: () => NonNullable<WorldModel['spare'][K]>): NonNullable<WorldModel['spare'][K]> {
+    const a = this.spare[k];
+    this.spare[k] = undefined;
+    return (a && a.length === len ? a : make()) as NonNullable<WorldModel['spare'][K]>;
   }
 
   /** Session clock start (first depth frame), for hit time codes. */
@@ -648,6 +686,7 @@ export class WorldModel {
   warpSince(t0: number, t1: number, c: Correction): number {
     const g = this.grid;
     if (!g || !g.hitTime || !(t1 > t0)) return 0;
+    this.loadPending();
     const code0 = this.timeCode(t0), code1 = this.timeCode(t1);
     const w0 = this.walkedAt(code0), w1 = this.walkedAt(code1);
     const span = w1 - w0;
@@ -738,22 +777,32 @@ export class WorldModel {
     const oldWi = this.wi, oldWk = this.wk;
     const newWi = oldWi + si * C, newWk = oldWk + sk * C;
     const inWin = (cx: number, cz: number, wi: number, wk: number) => cx >= wi / C && cx < wi / C + W && cz >= wk / C && cz < wk / C + W;
-    // 1. Chunks leaving the window go to the archive.
+    // 1. Chunks leaving the window go to the archive (over the next frames:
+    // the old grid isn't written to any more).
     for (let a = 0; a < W; a++)
       for (let b = 0; b < W; b++) {
         const cx = oldWi / C + a, cz = oldWk / C + b;
-        if (!inWin(cx, cz, newWi, newWk)) this.archive.saveFrom(old, oldWi, oldWk, cx, cz, this.floorLayer, t);
+        if (!inWin(cx, cz, newWi, newWk)) this.archive.defer(old, oldWi, oldWk, cx, cz, this.floorLayer, t);
       }
     // 2. The new window: the overlap copied, the rest from the archive.
-    const g = new VoxelGrid({ origin: { x: this.latX + newWi * r, y: old.origin.y, z: this.latZ + newWk * r }, res: r, nx: old.nx, ny: old.ny, nz: old.nz });
-    const di = newWi - oldWi, dk = newWk - oldWk, layer = g.nx * g.nz;
-    for (let j = 0; j < FLOOR_LAYERS_BELOW; j++) g.data.fill(127, j * layer, (j + 1) * layer);
-    copyOverlap(old.data, g.data, g.nx, g.nz, g.ny, di, dk);
-    copyOverlap(old.underside, g.underside, g.nx, g.nz, g.ny, di, dk);
-    copyOverlap(old.topFrac, g.topFrac, g.nx, g.nz, g.ny, di, dk);
-    copyOverlap(old.observed, g.observed, g.nx, g.nz, 1, di, dk);
-    g.hitTime = new Uint16Array(g.data.length);
-    if (old.hitTime) copyOverlap(old.hitTime, g.hitTime, g.nx, g.nz, g.ny, di, dk);
+    // (Copy whole arrays, then shift in place: one memcpy and a row-wise
+    // copyWithin each, no per-row views.)
+    const di = newWi - oldWi, dk = newWk - oldWk, fl = FLOOR_LAYERS_BELOW;
+    const n = old.data.length;
+    const shifted = <A extends Int8Array | Uint8Array | Uint16Array>(a: A, dst: A, layers: number, fill: (j: number) => number): A => {
+      shiftCopy(a, dst, old.nx, old.nz, layers, di, dk, fill);
+      return dst;
+    };
+    const g = new VoxelGrid(
+      { origin: { x: this.latX + newWi * r, y: old.origin.y, z: this.latZ + newWk * r }, res: r, nx: old.nx, ny: old.ny, nz: old.nz },
+      {
+        data: shifted(old.data, this.takeSpare('data', n, () => new Int8Array(n)), old.ny, (j) => (j < fl ? 127 : 0)),
+        observed: shifted(old.observed, this.takeSpare('observed', old.nx * old.nz, () => new Uint8Array(old.nx * old.nz)), 1, () => 0),
+        underside: shifted(old.underside, this.takeSpare('underside', n, () => new Uint8Array(n)), old.ny, () => 0),
+        topFrac: shifted(old.topFrac, this.takeSpare('topFrac', n, () => new Uint8Array(n)), old.ny, () => 255),
+      },
+    );
+    g.hitTime = shifted(old.hitTime ?? new Uint16Array(n), this.takeSpare('hitTime', n, () => new Uint16Array(n)), old.ny, () => 0);
     g.stamp = old.stamp;
     const entering: [number, number][] = [];
     for (let a = 0; a < W; a++)
@@ -761,7 +810,10 @@ export class WorldModel {
         const cx = newWi / C + a, cz = newWk / C + b;
         if (!inWin(cx, cz, oldWi, oldWk)) entering.push([cx, cz]);
       }
-    for (const [cx, cz] of entering) this.archive.loadInto(g, newWi, newWk, cx, cz, this.floorLayer);
+    // Archived chunks come back over the next frames (merged: what is
+    // observed meanwhile wins); pending ones that left again stay archived.
+    this.pendingLoads = this.pendingLoads.filter(([cx, cz]) => inWin(cx, cz, newWi, newWk));
+    for (const [cx, cz] of entering) if (this.archive.has(cx, cz)) this.pendingLoads.push([cx, cz]);
     g.stickyOccupied = old.stickyOccupied;
     g.now = old.now;
     g.version = old.version + 1;
@@ -773,11 +825,12 @@ export class WorldModel {
       moved.add(a);
       const fl = this.floorLayer;
       shiftInPlace(a, g.nx, g.nz, kind === 'observed' ? 1 : g.ny, di, dk, kind === 'data' ? (j) => (j < fl ? 127 : 0) : kind === 'topFrac' ? () => 255 : () => 0);
-      const target = { nx: g.nx, ny: g.ny, nz: g.nz, res: r, origin: g.origin, [kind]: a };
-      for (const [cx, cz] of entering) this.archive.loadInto(target, newWi, newWk, cx, cz, fl);
+      // (The entering part stays unknown: drift checks ignore readings there.)
       return a;
     };
-    this.snapshots = this.snapshots.filter((sn) => sn.epoch === this.epoch);
+    // Only the newest snapshot moves along (each shift costs a pass over the
+    // window); older ones are dropped and replaced within seconds.
+    this.snapshots = this.snapshots.filter((sn) => sn.epoch === this.epoch).slice(-1);
     for (const sn of this.snapshots) {
       sn.data = shiftArr(sn.data, 'data');
       sn.observed = shiftArr(sn.observed, 'observed');
@@ -1503,6 +1556,7 @@ export class WorldModel {
   exportMap(): SerializedMap | null {
     const g = this.grid;
     if (!g) return null;
+    this.loadPending();
     const lat = this.lattice();
     return {
       version: 1,
@@ -1575,6 +1629,7 @@ export class WorldModel {
    */
   private importEverywhere(m: SerializedMap, T: ArrayLike<number> | null, opts: ImportOptions): number {
     const g = this.grid!, C = CHUNK, W = this.windowChunks, r = this.res;
+    this.loadPending();
     let n = importIntoGrid(g, this.lattice(), this.floorLayer, m, T, opts);
     // Where the imported chunks land (lattice chunk range).
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;

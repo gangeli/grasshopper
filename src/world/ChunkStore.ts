@@ -29,10 +29,42 @@ export const keyCx = (key: number) => Math.floor(key / 65536) - KEY_OFF;
 export const keyCz = (key: number) => (key % 65536) - KEY_OFF;
 
 export class ChunkStore {
-  readonly map = new Map<number, StoredChunk>();
+  private readonly chunks = new Map<number, StoredChunk>();
+  /**
+   * Saves not done yet: chunks of a grid that is no longer written to (the
+   * window moved on), stored a few per frame by step() instead of all in the
+   * frame the window moved. Anything reading the store finishes them first.
+   */
+  private pending: { g: VoxelGrid; gi0: number; gk0: number; cx: number; cz: number; floorLayer: number; t: number }[] = [];
+
+  /** All stored chunks (finishes pending saves first). */
+  get map(): Map<number, StoredChunk> {
+    this.flush();
+    return this.chunks;
+  }
 
   get size(): number {
     return this.map.size;
+  }
+
+  /** Store chunk (cx, cz) of `g` later (g must not change any more). */
+  defer(g: VoxelGrid, gi0: number, gk0: number, cx: number, cz: number, floorLayer: number, t: number): void {
+    const key = chunkKey(cx, cz);
+    this.pending = this.pending.filter((p) => chunkKey(p.cx, p.cz) !== key);
+    this.pending.push({ g, gi0, gk0, cx, cz, floorLayer, t });
+  }
+
+  /** Do up to n pending saves; true while more remain. */
+  step(n = 2): boolean {
+    for (let q = 0; q < n && this.pending.length; q++) {
+      const p = this.pending.shift()!;
+      this.saveNow(p.g, p.gi0, p.gk0, p.cx, p.cz, p.floorLayer, p.t);
+    }
+    return this.pending.length > 0;
+  }
+
+  flush(): void {
+    while (this.pending.length) this.step(this.pending.length);
   }
 
   bytes(): number {
@@ -45,8 +77,14 @@ export class ChunkStore {
     return this.map.get(chunkKey(cx, cz));
   }
 
+  has(cx: number, cz: number): boolean {
+    const key = chunkKey(cx, cz);
+    return this.chunks.has(key) || this.pending.some((p) => chunkKey(p.cx, p.cz) === key);
+  }
+
   clear(): void {
-    this.map.clear();
+    this.pending = [];
+    this.chunks.clear();
   }
 
   /**
@@ -55,38 +93,61 @@ export class ChunkStore {
    * dropped (the window was authoritative for it).
    */
   saveFrom(g: VoxelGrid, gi0: number, gk0: number, cx: number, cz: number, floorLayer: number, t: number): void {
-    const C = CHUNK, ny = g.ny, layer = g.nx * g.nz;
+    // A newer save of this chunk replaces a pending one.
+    const key = chunkKey(cx, cz);
+    if (this.pending.length) this.pending = this.pending.filter((p) => chunkKey(p.cx, p.cz) !== key);
+    this.saveNow(g, gi0, gk0, cx, cz, floorLayer, t);
+  }
+
+  private saveNow(g: VoxelGrid, gi0: number, gk0: number, cx: number, cz: number, floorLayer: number, t: number): void {
+    const C = CHUNK, ny = g.ny, layer = g.nx * g.nz, n = C * C * ny;
     const bi = cx * C - gi0, bk = cz * C - gk0;
-    const data = new Int8Array(C * C * ny), observed = new Uint8Array(C * C);
-    let under: Uint8Array | null = null, top: Uint8Array | null = null, hits: Uint16Array | null = null, info = false;
+    const key = chunkKey(cx, cz);
+    // Reuse the arrays of what was stored here before (it's replaced).
+    const prev = this.chunks.get(key);
+    const data = prev?.data.length === n ? prev.data.fill(0) : new Int8Array(n), observed = prev?.observed.length === C * C ? prev.observed.fill(0) : new Uint8Array(C * C);
+    const under = prev?.underside?.length === n ? prev.underside.fill(0) : new Uint8Array(n);
+    const top = prev?.topFrac?.length === n ? prev.topFrac.fill(255) : new Uint8Array(n).fill(255);
+    const hits = prev?.hitTime?.length === n ? prev.hitTime.fill(0) : new Uint16Array(n);
+    // Plain loops over 32-voxel rows (cheaper than a typed-array view per
+    // row), one array at a time (monomorphic, tight).
+    const i0 = Math.max(0, -bi), i1 = Math.min(C, g.nx - bi);
+    let info = false;
     for (let k = 0; k < C; k++) {
       const gk = bk + k;
-      if (gk < 0 || gk >= g.nz) continue;
-      const i0 = Math.max(0, -bi), i1 = Math.min(C, g.nx - bi);
-      if (i1 <= i0) continue;
+      if (gk < 0 || gk >= g.nz || i1 <= i0) continue;
       const rowCol = gk * g.nx + bi;
       for (let i = i0; i < i1; i++)
         if (g.observed[rowCol + i]) {
           observed[k * C + i] = 1;
           info = true;
         }
-      for (let j = 0; j < ny; j++) {
-        const src = j * layer + rowCol, dst = (j * C + k) * C;
-        data.set(g.data.subarray(src + i0, src + i1), dst + i0);
-        if (!info && j >= floorLayer) for (let i = i0; i < i1; i++) if (g.data[src + i] !== 0) (info = true);
-        for (let i = i0; i < i1; i++) {
-          const u = g.underside[src + i];
-          if (u) (under ??= new Uint8Array(C * C * ny))[dst + i] = u;
-          const f = g.topFrac[src + i];
-          if (f !== 255) (top ??= new Uint8Array(C * C * ny).fill(255))[dst + i] = f;
-          const h = g.hitTime ? g.hitTime[src + i] : 0;
-          if (h) (hits ??= new Uint16Array(C * C * ny))[dst + i] = h;
+    }
+    const copyRows = (src: Int8Array | Uint8Array | Uint16Array, dst: Int8Array | Uint8Array | Uint16Array, skip: number, fromLayer: number): boolean => {
+      let any = false;
+      for (let k = 0; k < C; k++) {
+        const gk = bk + k;
+        if (gk < 0 || gk >= g.nz || i1 <= i0) continue;
+        const rowCol = gk * g.nx + bi;
+        for (let j = 0; j < ny; j++) {
+          const s0 = j * layer + rowCol, d0 = (j * C + k) * C;
+          for (let i = i0; i < i1; i++) {
+            const v = src[s0 + i];
+            dst[d0 + i] = v;
+            if (v !== skip && j >= fromLayer) any = true;
+          }
         }
       }
+      return any;
+    };
+    if (copyRows(g.data, data, 0, floorLayer)) info = true;
+    if (!info) {
+      this.chunks.delete(key);
+      return;
     }
-    const key = chunkKey(cx, cz);
-    if (!info) this.map.delete(key);
-    else this.map.set(key, { data, observed, underside: under, topFrac: top, hitTime: hits, oy: g.origin.y, t });
+    const anyUnder = copyRows(g.underside, under, 0, 0), anyTop = copyRows(g.topFrac, top, 255, 0);
+    const anyHit = g.hitTime ? copyRows(g.hitTime, hits, 0, 0) : false;
+    this.chunks.set(key, { data, observed, underside: anyUnder ? under : null, topFrac: anyTop ? top : null, hitTime: anyHit ? hits : null, oy: g.origin.y, t });
   }
 
   /**
@@ -107,20 +168,59 @@ export class ChunkStore {
       if (i1 <= i0) continue;
       const rowCol = gk * g.nx + bi;
       if (g.observed) for (let i = i0; i < i1; i++) if (c.observed[k * C + i]) g.observed[rowCol + i] = 1;
-      if (!g.data && !g.underside && !g.topFrac) continue;
+      const gd = g.data, gu = c.underside ? g.underside : undefined, gt = c.topFrac ? g.topFrac : undefined, gh = c.hitTime ? g.hitTime : undefined;
+      if (!gd && !gu && !gt && !gh) continue;
       for (let j = floorLayer; j < ny; j++) {
         // The band just above the floor changes meaning when the floor moved: leave it unknown.
         const js = j + shift;
         if (js < floorLayer || js >= ny || (shift !== 0 && j < floorLayer + 3)) continue;
         const dst = j * layer + rowCol, src = (js * C + k) * C;
-        if (g.data) g.data.set(c.data.subarray(src + i0, src + i1), dst + i0);
-        if (c.underside && g.underside) g.underside.set(c.underside.subarray(src + i0, src + i1), dst + i0);
-        if (c.topFrac && g.topFrac) g.topFrac.set(c.topFrac.subarray(src + i0, src + i1), dst + i0);
-        if (c.hitTime && g.hitTime) g.hitTime.set(c.hitTime.subarray(src + i0, src + i1), dst + i0);
+        for (let i = i0; i < i1; i++) {
+          if (gd) gd[dst + i] = c.data[src + i];
+          if (gu) gu[dst + i] = c.underside![src + i];
+          if (gt) gt[dst + i] = c.topFrac![src + i];
+          if (gh) gh[dst + i] = c.hitTime![src + i];
+        }
       }
     }
     return true;
   }
+}
+
+/**
+ * Like ChunkStore.loadInto, but what the grid already holds wins (it is
+ * newer: observations made since the chunk entered the window).
+ */
+export function mergeChunkInto(store: ChunkStore, g: VoxelGrid, gi0: number, gk0: number, cx: number, cz: number, floorLayer: number): boolean {
+  const c = store.get(cx, cz);
+  if (!c) return false;
+  const C = CHUNK, ny = g.ny, layer = g.nx * g.nz;
+  const bi = cx * C - gi0, bk = cz * C - gk0;
+  const shift = Math.round((g.origin.y - c.oy) / g.res);
+  const i0 = Math.max(0, -bi), i1 = Math.min(C, g.nx - bi);
+  for (let k = 0; k < C; k++) {
+    const gk = bk + k;
+    if (gk < 0 || gk >= g.nz || i1 <= i0) continue;
+    const rowCol = gk * g.nx + bi;
+    for (let i = i0; i < i1; i++) {
+      if (c.observed[k * C + i]) g.observed[rowCol + i] = 1;
+      g.touchColumn(bi + i, gk);
+    }
+    for (let j = floorLayer; j < ny; j++) {
+      const js = j + shift;
+      if (js < floorLayer || js >= ny || (shift !== 0 && j < floorLayer + 3)) continue;
+      const dst = j * layer + rowCol, src = (js * C + k) * C;
+      for (let i = i0; i < i1; i++) {
+        if (g.data[dst + i] !== 0) continue;
+        g.data[dst + i] = c.data[src + i];
+        if (c.underside) g.underside[dst + i] |= c.underside[src + i];
+        if (c.topFrac && g.topFrac[dst + i] === 255) g.topFrac[dst + i] = c.topFrac[src + i];
+        if (c.hitTime && g.hitTime && g.hitTime[dst + i] === 0) g.hitTime[dst + i] = c.hitTime[src + i];
+      }
+    }
+  }
+  g.version++;
+  return true;
 }
 
 /** Where loadInto writes: a grid, or any subset of a grid's arrays. */
@@ -143,23 +243,48 @@ export interface ChunkTarget {
  */
 export function shiftInPlace(a: Int8Array | Uint8Array | Uint16Array, nx: number, nz: number, layers: number, di: number, dk: number, fill: (j: number) => number): void {
   const layer = nx * nz;
+  // Within a layer the shift is a flat offset: one copyWithin per layer,
+  // then the cells whose source fell off the window (wrapped from the
+  // neighbouring row, or beyond the layer) get the fill value.
+  const off = dk * nx + di;
+  const k0 = Math.max(0, -dk), k1 = Math.min(nz, nz - dk);
   const i0 = Math.max(0, -di), i1 = Math.min(nx, nx - di);
-  // Visit rows so that a row is read before it is overwritten.
-  const up = dk > 0 || (dk === 0 && di > 0);
   for (let j = 0; j < layers; j++) {
     const base = j * layer, f = fill(j);
-    for (let q = 0; q < nz; q++) {
-      const k = up ? q : nz - 1 - q;
-      const d = base + k * nx, ks = k + dk;
-      if (ks < 0 || ks >= nz || i1 <= i0) {
-        a.fill(f, d, d + nx);
-        continue;
-      }
-      const s = base + ks * nx;
-      a.copyWithin(d + i0, s + i0 + di, s + i1 + di);
-      if (i0 > 0) a.fill(f, d, d + i0);
-      if (i1 < nx) a.fill(f, d + i1, d + nx);
+    if (Math.abs(off) >= layer || k1 <= k0 || i1 <= i0) {
+      a.fill(f, base, base + layer);
+      continue;
     }
+    if (off > 0) a.copyWithin(base, base + off, base + layer);
+    else if (off < 0) a.copyWithin(base - off, base, base + layer + off);
+    if (k0 > 0) a.fill(f, base, base + k0 * nx);
+    if (k1 < nz) a.fill(f, base + k1 * nx, base + layer);
+    if (i0 > 0) for (let k = k0; k < k1; k++) a.fill(f, base + k * nx, base + k * nx + i0);
+    if (i1 < nx) for (let k = k0; k < k1; k++) a.fill(f, base + k * nx + i1, base + (k + 1) * nx);
+  }
+}
+
+/**
+ * shiftInPlace into another array: dst cell (i, k) = src cell (i + di, k + dk),
+ * `fill` where there's no source. One copy per layer plus the edges.
+ */
+export function shiftCopy<A extends Int8Array | Uint8Array | Uint16Array>(src: A, dst: A, nx: number, nz: number, layers: number, di: number, dk: number, fill: (j: number) => number): void {
+  const layer = nx * nz;
+  const off = dk * nx + di;
+  const k0 = Math.max(0, -dk), k1 = Math.min(nz, nz - dk);
+  const i0 = Math.max(0, -di), i1 = Math.min(nx, nx - di);
+  for (let j = 0; j < layers; j++) {
+    const base = j * layer, f = fill(j);
+    if (Math.abs(off) >= layer || k1 <= k0 || i1 <= i0) {
+      dst.fill(f, base, base + layer);
+      continue;
+    }
+    if (off >= 0) dst.set(src.subarray(base + off, base + layer), base);
+    else dst.set(src.subarray(base, base + layer + off), base - off);
+    if (k0 > 0) dst.fill(f, base, base + k0 * nx);
+    if (k1 < nz) dst.fill(f, base + k1 * nx, base + layer);
+    if (i0 > 0) for (let k = k0; k < k1; k++) dst.fill(f, base + k * nx, base + k * nx + i0);
+    if (i1 < nx) for (let k = k0; k < k1; k++) dst.fill(f, base + k * nx + i1, base + (k + 1) * nx);
   }
 }
 
