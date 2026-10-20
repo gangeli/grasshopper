@@ -9,6 +9,8 @@ import { fromSerialized, toSerialized } from '../src/world/persist/mapFormatBrid
 import { extractFeatures, FragmentLookup } from '../src/world/persist/features';
 import { FragmentIndex, relocalize, runToEnd } from '../src/world/persist/Relocalizer';
 import { MapMemory } from '../src/world/persist/MapMemory';
+import { MemoryClient } from '../src/world/persist/MemoryClient';
+import { serveMemory, type PortLike } from '../src/world/persist/MemoryWorkerCore';
 import { WorldModel } from '../src/world/WorldModel';
 import { makeHome } from '../src/sim/Home';
 import { SimSession, storedMapQuality } from '../src/sim/MultiSession';
@@ -285,6 +287,39 @@ describe('map persistence: restore, verify, undo', () => {
     expect(q.precision).toBeGreaterThan(0.9);
     expect(q.coveredArea).toBeGreaterThan(20);
   });
+
+  it('runs in a worker: snapshots by message, restore applied on the page side', async () => {
+    const home = makeHome(3);
+    const kv = new MemoryKV();
+    const A = new SimSession({ home, rooms: [0, 1], seconds: 60, seed: 31, noise: 'arcore' });
+    const memA = new MapMemory(await MapStore.open(kv));
+    await memA.load();
+    memA.attach(A.world);
+    while (A.step()) memA.tick(A.t, Infinity);
+    await memA.flush();
+    const B = new SimSession({ home, rooms: [0], seconds: 40, seed: 32, noise: 'arcore' });
+    const ch = new MessageChannel();
+    serveMemory(ch.port2 as unknown as PortLike, () => MapStore.open(kv));
+    let restored = 0, changed = 0;
+    const client = new MemoryClient(B.world, ch.port1 as unknown as PortLike, { onRestored: () => restored++, onMapChanged: () => changed++ });
+    await client.whenReady();
+    expect(client.fragments.length).toBe(1);
+    const pump = () => new Promise((r) => setTimeout(r, 1));
+    while (B.step()) {
+      client.tick(B.t, Infinity);
+      await pump();
+    }
+    for (let k = 0; k < 3000 && !restored; k++) {
+      client.tick(B.t, Infinity);
+      await pump();
+    }
+    expect(restored).toBe(1);
+    expect(changed).toBeGreaterThan(0);
+    // The page side only copied the grid and applied the result.
+    expect(client.busyMs).toBeLessThan(client.workerBusyMs + 1000);
+    ch.port1.close();
+    ch.port2.close();
+  }, 180_000);
 
   it('keeps playing when storage is broken', async () => {
     const kv = new MemoryKV();

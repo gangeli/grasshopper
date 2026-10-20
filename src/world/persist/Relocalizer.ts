@@ -22,7 +22,7 @@ import { poseDelta, wrapAngle, type Pose2 } from './pose';
  * All work is a generator that yields often, so callers can spread it over
  * frames (or run it to completion in tests).
  */
-export const SIG_CELL = 0.2;
+export const SIG_CELL = 0.3;
 const BAND_W = [0.6, 0.8, 1.0];
 const FREE_W = 0.8;
 /** Seen-empty space agreeing with seen-empty space: rewards overlapping the whole room, not just an edge. */
@@ -459,6 +459,8 @@ export function* relocalize(
   const S = frag.sig;
   let rad = 0;
   for (let q = 0; q < cols.n; q++) rad = Math.max(rad, Math.hypot(cols.x[q] - mx, cols.z[q] - mz));
+  // The coarse search looks at the live map within 4m of its centre (FFT size; refinement and verification use all of it).
+  rad = Math.min(rad, 4);
   const cell = S.cell;
   const L = Math.ceil((2 * rad) / cell) + 3;
   const N = nextPow2(Math.max(S.w, S.h) + L);
@@ -557,7 +559,7 @@ export function* relocalize(
   }
   // Distinct candidates (by pose at the live centroid).
   peaks.sort((p, q) => q.v - p.v);
-  const nCand = opts.candidates ?? 6;
+  const nCand = opts.candidates ?? 5;
   const out: Candidate[] = [];
   for (const p of peaks) {
     const pose = { yaw: p.yaw, tx: p.tx, tz: p.tz, dj: 0 };
@@ -604,7 +606,8 @@ export function* relocalize(
     const stages: [number, number, number, number, number[]][] = [
       [4, 2, 0.3, 0.1, [0]],
       [1.5, 0.5, 0.1, 0.05, [0]],
-      [0.5, 0.25, 0.05, 0.025, [-1, 0, 1]],
+      [0.5, 0.25, 0.05, 0.025, [0]],
+      [0, 1, 0, 1, [-1, 1]],
     ];
     for (const [dy, ys, dt, ts, djs] of opts.hint?.length ? stages.slice(1) : stages) {
       const r = yield* searchAround(best, dy * deg, ys * deg, dt, ts, djs);

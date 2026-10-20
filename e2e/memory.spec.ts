@@ -6,10 +6,11 @@ import { test, expect, type Page } from '@playwright/test';
  * map. Then the start page offers to forget it, and forgetting works.
  */
 type Mem = {
+  mode: string;
   status: { restores: number; saves: number; fragments: number; lastReason: string; state: string };
-  links: unknown[];
   flush(): Promise<void>;
-  store: { list(): { id: string; area: number }[] } | null;
+  forget(): Promise<boolean>;
+  list(): Promise<{ id: string; area: number }[]>;
 };
 type H = { memory?: Mem; sim?: { sim: { cam: { yaw: number; pitch: number; pos: { x: number; y: number; z: number } }; time: number } }; game?: { mappedArea(): number } };
 
@@ -41,23 +42,23 @@ test('a mapped room is saved, and restored after a reload', async ({ page }) => 
   await expect.poll(() => hopper(page), { timeout: 60_000 }).toBe(true);
   // Start from a clean store.
   await page.evaluate(async () => {
-    const m = (window.__hopper as H).memory as unknown as { forget(): Promise<boolean> };
-    await m.forget();
+    await (window.__hopper as H).memory!.forget();
   });
+  expect(await page.evaluate(() => (window.__hopper as H).memory!.mode)).toBe('worker');
   await wander(page);
   // Map for a while, then save.
   await expect.poll(() => page.evaluate(() => (window.__hopper as H).game!.mappedArea()), { timeout: 90_000, intervals: [500] }).toBeGreaterThan(4);
   await page.evaluate(async () => {
     await (window.__hopper as H).memory!.flush();
   });
-  const stored = await page.evaluate(() => (window.__hopper as H).memory!.store!.list());
+  const stored = await page.evaluate(() => (window.__hopper as H).memory!.list());
   expect(stored.length).toBe(1);
   expect(stored[0].area).toBeGreaterThan(3);
 
   // A new session: the page is reloaded (new world, nothing mapped yet).
   await page.reload();
   await expect.poll(() => hopper(page), { timeout: 60_000 }).toBe(true);
-  expect(await page.evaluate(() => (window.__hopper as H).memory!.status.fragments)).toBe(1);
+  await expect.poll(() => page.evaluate(() => (window.__hopper as H).memory!.status.fragments), { timeout: 30_000 }).toBe(1);
   await wander(page);
   await expect
     .poll(
@@ -97,7 +98,7 @@ test('the start page offers to forget remembered rooms', async ({ page }) => {
     await store.save('test', m, { area: 12 });
   });
   await page.reload();
-  await expect(page.locator('#memory-row')).toBeVisible();
+  await expect(page.locator('#memory-row')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('#memory-text')).toContainText('remembers');
   page.on('dialog', (d) => void d.accept());
   await page.locator('#btn-forget').click();

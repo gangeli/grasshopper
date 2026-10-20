@@ -42,5 +42,5 @@ for (let rep = 0; rep < 2; rep++) {
   const lB = timed('lookup B', FragmentLookup.create(mB));
   const idx = new FragmentIndex(fA, lA);
   const r = timed('relocalize', relocalize({ features: fB, lookup: lB }, idx));
-  console.log(`  → ${r.accepted} ${r.reason} fftN ${r.work.fftN} yaws ${r.work.yaws} poses ${r.work.poses} coarse ${r.work.coarseMs.toFixed(0)}ms refine ${r.work.refineMs.toFixed(0)}ms`);
+  console.log(`  → ${r.accepted} ${r.reason} sig ${idx.sig.w}x${idx.sig.h} fftN ${r.work.fftN} yaws ${r.work.yaws} poses ${r.work.poses} coarse ${r.work.coarseMs.toFixed(0)}ms refine ${r.work.refineMs.toFixed(0)}ms`);
 }

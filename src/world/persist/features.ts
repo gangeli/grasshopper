@@ -114,16 +114,20 @@ export function* extractFeaturesGen(m: ChunkedMap, maxOcc = 12000, maxFree = 600
         if (!known && !c.observed[col]) continue;
         const I = c.cx * CS + lx, K = c.cz * CS + lz;
         const x = m.origin.x + (I + 0.5) * res, z = m.origin.z + (K + 0.5) * res;
-        x0 = Math.min(x0, x);
-        z0 = Math.min(z0, z);
-        x1 = Math.max(x1, x);
-        z1 = Math.max(z1, z);
-        cols[0].push(x);
-        cols[1].push(z);
-        cols[2].push(b0);
-        cols[3].push(b1);
-        cols[4].push(b2);
-        cols[5].push(fr);
+        // Columns only touched by a few weak far-away rays don't go into the
+        // signature (they'd stretch its extent, and the FFT size, for nothing).
+        if (b0 + b1 + b2 > 0 || fr > 0 || c.observed[col]) {
+          x0 = Math.min(x0, x);
+          z0 = Math.min(z0, z);
+          x1 = Math.max(x1, x);
+          z1 = Math.max(z1, z);
+          cols[0].push(x);
+          cols[1].push(z);
+          cols[2].push(b0);
+          cols[3].push(b1);
+          cols[4].push(b2);
+          cols[5].push(fr);
+        }
         if (!known) continue;
         // At most one occupied and one free sample per column and height
         // band (the middle one), so a tall wall weighs about as much as the
