@@ -241,6 +241,34 @@ describe('tapping', () => {
     expect(Math.hypot(sim.pet.pos.x - r.target.x, sim.pet.pos.z - r.target.z)).toBeLessThan(0.3);
   }, 60_000);
 
+  it('tap the floor while Hopper stands a little off the walkable graph: it still goes', () => {
+    const sim = spawned();
+    mapAround(sim, 14);
+    run(sim, 3);
+    const nav = sim.game.refreshNav(true)!;
+    // A spot with no walkable node within 30cm but one within 80cm (as when
+    // the map shifts under Hopper's feet in a real room).
+    let off: Vec3 | null = null;
+    for (let r = 0.35; r < 0.75 && !off; r += 0.05)
+      for (let a = 0; a < 48 && !off; a++) {
+        const p = { x: sim.pet.pos.x + Math.sin(a * 0.4) * r * 2, y: 0, z: sim.pet.pos.z + Math.cos(a * 0.4) * r * 2 };
+        if (nav.nearest(p, 0.3) < 0 && nav.nearest(p, 0.8) >= 0 && !sim.room.solidAt({ ...p, y: 0.1 }, 0.1)) off = p;
+      }
+    expect(off).not.toBeNull();
+    sim.pet.placeAt(new THREE.Vector3(off!.x, 0, off!.z));
+    // Tap open, mapped floor ~1m away.
+    let target: Vec3 | null = null;
+    for (let a = 0; a < 32 && !target; a++) {
+      const x = off!.x + Math.sin(a) * 1.0, z = off!.z + Math.cos(a) * 1.0;
+      const n = nav.nearest({ x, y: 0, z }, 0.05);
+      if (n >= 0 && Math.abs(nav.ny[n]) < 0.03 && nav.wallDist[n] > 0.25) target = nav.pos(n);
+    }
+    expect(target).not.toBeNull();
+    lookAt(sim, target!);
+    const r = tapToward(sim, target!);
+    expect(r.kind).toBe('goto');
+  }, 60_000);
+
   it('tap somewhere unknown: a puzzled look and a message, no walking', () => {
     const sim = spawned();
     run(sim, 4);

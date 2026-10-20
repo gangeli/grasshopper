@@ -48,7 +48,13 @@ export type CompanionMode = 'idle' | 'follow' | 'explore' | 'goto';
  */
 export function standingNode(nav: NavGrid, p: Vec3): number {
   const n = nav.nearest(p, 0.3);
-  return n !== NAV_NONE && Math.abs(nav.ny[n] - p.y) <= 0.1 ? n : NAV_NONE;
+  if (n !== NAV_NONE && Math.abs(nav.ny[n] - p.y) <= 0.1) return n;
+  // The walkable graph shifts as the map fills in (edges trimmed, the spot
+  // Hopper was placed on not yet known as walkable): start from the closest
+  // node nearby rather than refusing every path because Hopper stands a
+  // little off the graph.
+  const m = nav.nearest(p, 0.8);
+  return m !== NAV_NONE && Math.abs(nav.ny[m] - p.y) <= 0.25 ? m : NAV_NONE;
 }
 
 /** Highest surface (above the floor) Hopper hops onto by itself while exploring. */

@@ -551,25 +551,31 @@ export class HideAndSeek {
     if (n === NAV_NONE) return this.cantGo('unknown', at);
     const s = standingNode(nav, this.pet.pos);
     let path = s === NAV_NONE ? null : nav.pathBetween(s, n);
+    let partial = false;
     if (!path && s !== NAV_NONE) {
-      // Can't get to that exact spot: the nearest spot close by that Hopper can reach.
+      // Can't get to that exact spot (the floor in between isn't mapped yet):
+      // go as close as Hopper can get, preferring the same surface height.
       const goal = nav.pos(n);
-      const { cost } = nav.search(s, NAV_NONE, 30);
-      let best = NAV_NONE, bd = 0.5;
+      const { cost, prev } = nav.search(s, NAV_NONE, 30);
+      const here = Math.hypot(this.pet.pos.x - goal.x, this.pet.pos.z - goal.z);
+      let best = NAV_NONE, bd = Infinity;
       for (let q = 0; q < nav.count; q++) {
-        if (!Number.isFinite(cost[q]) || Math.abs(nav.ny[q] - goal.y) > 0.12) continue;
-        const dd = Math.hypot(nav.g.centerX(nav.ni[q]) - goal.x, nav.g.centerZ(nav.nk[q]) - goal.z);
+        if (!Number.isFinite(cost[q])) continue;
+        const dd = Math.hypot(nav.g.centerX(nav.ni[q]) - goal.x, nav.g.centerZ(nav.nk[q]) - goal.z) + (Math.abs(nav.ny[q] - goal.y) > 0.12 ? 0.5 : 0);
         if (dd < bd) {
           bd = dd;
           best = q;
         }
       }
-      if (best !== NAV_NONE) {
+      // Only worth it if it actually gets Hopper noticeably closer.
+      if (best !== NAV_NONE && bd < here - 0.3) {
+        partial = bd > 0.5;
         n = best;
-        path = nav.pathBetween(s, n);
+        path = nav.reconstruct(prev, s, n);
       }
     }
     if (!path) return this.cantGo('noPath', at);
+    if (partial) this.say('That’s as far as I know — show me more of the floor and I’ll go further!');
     const target = nav.pos(n);
     const far = Math.hypot(target.x - this.pet.pos.x, target.z - this.pet.pos.z) > 1.5;
     this.follow(path, far ? 0.85 : 0.65, this.companion.rng.chance(0.6) ? 'sniff' : 'lookAround', null);
