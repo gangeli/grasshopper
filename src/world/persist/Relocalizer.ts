@@ -301,7 +301,9 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
       if (hit) sHit++;
       else if (k === 4) sConf++;
     }
-    if (lo.low[q] === 1 && k !== 0) {
+    // Furniture: low in the live map *and* where it lands in the stored one
+    // (the bottom of a wall the camera never saw higher up is no furniture).
+    if (lo.low[q] === 1 && k !== 0 && !F.tallAt(fx, fz)) {
       lowN++;
       if (hit) {
         lowHit++;
@@ -334,7 +336,7 @@ export function verifyPose(live: { features: MapFeatures; lookup: FragmentLookup
       if (hit) sHit++;
       else if (k === 4) sConf++;
     }
-    if (fo.low[q] === 1) {
+    if (fo.low[q] === 1 && !Lk.tallAt(lx, lz)) {
       bwdLowN++;
       if (hit) bwdLowHit++;
       else if (k === 4) bwdLowConf++;
@@ -382,11 +384,17 @@ function countClusters(cells: Map<number, number>, min: number): number {
   for (const start of cells.keys()) {
     if (seen.has(start)) continue;
     let total = 0;
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
     const stack = [start];
     seen.add(start);
     while (stack.length) {
       const c = stack.pop()!;
       total += cells.get(c)!;
+      const u = Math.floor(c / 65536), v = c % 65536;
+      u0 = Math.min(u0, u);
+      u1 = Math.max(u1, u);
+      v0 = Math.min(v0, v);
+      v1 = Math.max(v1, v);
       for (let du = -1; du <= 1; du++)
         for (let dv = -1; dv <= 1; dv++) {
           const nb = c + du * 65536 + dv;
@@ -396,7 +404,8 @@ function countClusters(cells: Map<number, number>, min: number): number {
           }
         }
     }
-    if (total >= min) n++;
+    // A piece of furniture is compact: a long thin run (> 2.6m) is a wall.
+    if (total >= min && Math.max(u1 - u0, v1 - v0) * 0.25 <= 2.6) n++;
   }
   return n;
 }

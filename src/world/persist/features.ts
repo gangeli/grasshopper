@@ -23,7 +23,7 @@ const FREE_LAYERS: [number, number] = [3, 26];
 const TALL_LAYER = 22;
 /** Height bands for voxel samples (one sample per column and band). */
 const SAMPLE_BANDS: [number, number][] = [
-  [2, 7],
+  [3, 7], // not the first 15cm: floor noise (a floor estimate a few cm off) lands there
   [7, 14],
   [14, 26],
   [26, 48],
@@ -254,6 +254,8 @@ export class FragmentLookup {
   private cls: Int8Array = new Int8Array(0);
   /** Known (non-zero) voxels per column, for "is this column known" tests. */
   private colKnown: Uint8Array = new Uint8Array(0);
+  /** Columns with an obstacle above 1.1m (structure). */
+  private colTall: Uint8Array = new Uint8Array(0);
 
   /** Build synchronously (tests, tools); see create() for the sliced version. */
   constructor(m: ChunkedMap, build = true) {
@@ -289,6 +291,7 @@ export class FragmentLookup {
     const ny = m.ny, per = CS2 * ny;
     const cls = (this.cls = new Int8Array(per * m.chunks.size));
     const known = (this.colKnown = new Uint8Array(CS2 * m.chunks.size));
+    const tall = (this.colTall = new Uint8Array(CS2 * m.chunks.size));
     let slot = 0;
     for (const c of m.chunks.values()) {
       this.slots[(c.cz - cz0) * this.cw + (c.cx - cx0)] = slot;
@@ -298,6 +301,7 @@ export class FragmentLookup {
         for (let q = 0; q < CS2; q++) {
           const v = occ[j * CS2 + q];
           if (v !== 0 && known[slot * CS2 + q] < 255) known[slot * CS2 + q]++;
+          if (v > OCC_CONF && j >= TALL_LAYER && j < 48) tall[slot * CS2 + q] = 1;
           cls[base + j * CS2 + q] = v > 45 ? 1 : v > 20 ? 2 : v < FREE_CONF ? 4 : 0;
         }
       slot++;
@@ -355,6 +359,20 @@ export class FragmentLookup {
     const s = this.slots[w * this.cw + u];
     if (s < 0) return 0;
     return this.colKnown[s * CS2 + (K & 15) * CS + (I & 15)];
+  }
+
+  /** Whether the column at (x, z), or one next to it, reaches above 1.1m (a wall, a tall cupboard). */
+  tallAt(x: number, z: number): boolean {
+    const I0 = Math.floor((x - this.ox) / this.res), K0 = Math.floor((z - this.oz) / this.res);
+    for (let dk = -1; dk <= 1; dk++)
+      for (let di = -1; di <= 1; di++) {
+        const I = I0 + di, K = K0 + dk;
+        const u = (I >> 4) - this.cx0, w = (K >> 4) - this.cz0;
+        if (u < 0 || w < 0 || u >= this.cw || w >= this.ch) continue;
+        const s = this.slots[w * this.cw + u];
+        if (s >= 0 && this.colTall[s * CS2 + (K & 15) * CS + (I & 15)]) return true;
+      }
+    return false;
   }
 }
 
