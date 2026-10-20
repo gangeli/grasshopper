@@ -9,6 +9,8 @@ import { createStack } from './game/stack';
 import { Animator } from './pet/Animator';
 import { buildPet } from './pet/PetModel';
 import { applyPetEnvironment } from './pet/lighting';
+import { Hearts } from './pet/Hearts';
+import { Petting, type PetResponse } from './game/Petting';
 import { installNavWorker } from './world/NavWorkerClient';
 
 /**
@@ -85,9 +87,9 @@ async function main() {
   setupInstall(note, installMode);
 
   // Showcase: Hopper waves on the landing page, and giggles when tapped.
-  const showcase = startShowcase(() => {
+  const showcase = startShowcase((r) => {
     voice.unlock();
-    voice.giggle();
+    voice.petReaction(r);
     document.getElementById('tapme')?.classList.add('gone');
   });
 
@@ -259,7 +261,7 @@ function cameraErrorMessage(e: unknown): string {
   return `The camera didn’t start (${(e as Error)?.message ?? e}). Try again.`;
 }
 
-function startShowcase(onTap?: () => void) {
+function startShowcase(onPet?: (r: PetResponse) => void) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
@@ -324,20 +326,49 @@ function startShowcase(onTap?: () => void) {
     bubble.style.left = `${((head.x + 1) / 2) * innerWidth}px`;
     bubble.style.top = `${((1 - head.y) / 2) * innerHeight}px`;
   };
-  // Tap Hopper (anywhere above the buttons) for a reaction.
-  const reactions = ['giggle', 'celebrate', 'wave', 'giggle', 'surprised'] as const;
-  let r = 0;
-  renderer.domElement.style.cursor = 'pointer';
-  renderer.domElement.addEventListener('pointerdown', () => {
-    anim.play(reactions[r++ % reactions.length], 0.15, true);
-    t = 0;
-    onTap?.();
+  // Pet Hopper: tap (anywhere above the buttons), or hold / stroke for more.
+  const petting = new Petting();
+  const hearts = new Hearts();
+  scene.add(hearts.group);
+  const heartAt = new THREE.Vector3();
+  let press: { t0: number; id: number } | null = null;
+  const pet = (stroke: boolean) => {
+    const res = petting.pet(performance.now() / 1000, stroke);
+    if (!res) return;
+    if (res.action === 'petted' && anim.current === 'petted') anim.play('petted', 0.2, false);
+    else anim.play(res.action, res.action === 'petted' ? 0.25 : 0.15, true);
+    // Lean toward the side the pet faces us from (it sways toward the camera).
+    anim.ctx.touchSide = rig.group.rotation.y >= 0 ? 1 : -1;
+    // Hold the reaction a little longer than the idle cycle's beat.
+    t = res.big ? -0.4 : 0;
+    rig.bones.head.getWorldPosition(heartAt);
+    heartAt.y += 0.15;
+    hearts.spawn(heartAt, res.hearts);
+    onPet?.(res);
+  };
+  // For tests: the petting state and hearts.
+  window.__hopper = { ...window.__hopper, showcase: { anim, petting, hearts } };
+  const canvas = renderer.domElement;
+  canvas.style.cursor = 'pointer';
+  canvas.addEventListener('pointerdown', (e) => {
+    press = { t0: performance.now(), id: e.pointerId };
+    pet(false);
   });
+  const release = (e: PointerEvent) => {
+    if (press && e.pointerId === press.id) press = null;
+  };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', release);
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     t += dt;
+    // Holding the press: a stroke, petting again every beat.
+    if (press && now - press.t0 > 300) pet(true);
+    petting.update(dt, now / 1000);
+    hearts.update(dt);
     if (t > 2.6 && !icon) {
       t = 0;
       i = (i + 1) % cycle.length;
@@ -358,6 +389,7 @@ function startShowcase(onTap?: () => void) {
   return {
     stop() {
       renderer.setAnimationLoop(null);
+      hearts.dispose();
       removeEventListener('resize', onResize);
       renderer.domElement.remove();
       renderer.dispose();

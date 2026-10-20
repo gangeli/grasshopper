@@ -5,9 +5,9 @@ import * as THREE from 'three';
  * Effects). Each key maps to its variant files; one is picked at random.
  */
 export const SAMPLE_BANKS: Readonly<Record<string, readonly string[]>> = {
-  giggle: ['giggle-1.mp3', 'giggle-2.mp3', 'giggle-3.mp3'],
+  giggle: ['giggle-1.mp3', 'giggle-2.mp3', 'giggle-3.mp3', 'giggle-4.mp3'],
   giggleLoud: ['giggle-loud-1.mp3', 'giggle-loud-2.mp3'],
-  greet: ['greet-1.mp3', 'greet-2.mp3', 'greet-3.mp3'],
+  greet: ['greet-1.mp3', 'greet-2.mp3', 'greet-3.mp3', 'greet-4.mp3'],
   hop: ['hop-1.mp3', 'hop-2.mp3'],
   jump: ['jump-1.mp3', 'jump-2.mp3'],
   land: ['land-1.mp3', 'land-2.mp3', 'land-3.mp3'],
@@ -15,7 +15,11 @@ export const SAMPLE_BANKS: Readonly<Record<string, readonly string[]>> = {
   fanfare: ['fanfare-1.mp3', 'fanfare-2.mp3'],
   yawn: ['yawn-1.mp3', 'yawn-2.mp3'],
   sneeze: ['sneeze-1.mp3', 'sneeze-2.mp3'],
-  purr: ['purr-1.mp3'],
+  purr: ['purr-1.mp3', 'purr-2.mp3'],
+  /** Being petted: contented coos and purr-trills. */
+  pet: ['pet-1.mp3', 'pet-2.mp3', 'pet-3.mp3', 'pet-4.mp3'],
+  /** A happy little "love" chirp (lots of petting). */
+  love: ['love-1.mp3', 'love-2.mp3', 'love-3.mp3'],
 };
 
 /**
@@ -302,7 +306,53 @@ export class Voice {
     this.chirp(t + 0.24, 1600, 900, 0.1, 0.3);
   }
 
-  /** Content purr / happy trill (for future petting interactions). */
+  /**
+   * Being petted: a soft contented coo / purr-trill. `happiness` (0..1)
+   * nudges it a little brighter and louder as Hopper gets happier.
+   */
+  pet(happiness = 0): void {
+    this.log('pet');
+    const h = Math.max(0, Math.min(1, happiness));
+    if (this.sample('pet', 0.8 + 0.2 * h, true, 0.98 + 0.06 * h, 1.04 + 0.08 * h)) return;
+    // Fallback: a rolling purr that rises into a little coo.
+    const t = this.now();
+    for (let i = 0; i < 6; i++) this.chirp(t + i * 0.07, 430 + 20 * i, 410 + 20 * i, 0.065, 0.07, true, 'triangle');
+    this.chirp(t + 0.45, 820 + 200 * h, 1150 + 250 * h, 0.22, 0.2);
+  }
+
+  /** The sound for a petting response (see game/Petting). */
+  petReaction(r: { sound: 'pet' | 'love' | 'giggle' | 'greet' | 'surprised'; happiness: number; big: boolean }): void {
+    switch (r.sound) {
+      case 'pet':
+        this.pet(r.happiness);
+        break;
+      case 'love':
+        this.love();
+        // The big happy hop: a giggle on top of the love chirp.
+        if (r.big) setTimeout(() => this.giggle(false), 450);
+        break;
+      case 'greet':
+        this.greet();
+        break;
+      case 'surprised':
+        this.surprised();
+        setTimeout(() => this.giggle(false), 600);
+        break;
+      default:
+        this.giggle(false);
+    }
+  }
+
+  /** A happy rising "love" chirp (after lots of petting). */
+  love(): void {
+    this.log('love');
+    if (this.sample('love', 0.85)) return;
+    const t = this.now();
+    this.chirp(t, 900, 1500, 0.16, 0.28);
+    this.chirp(t + 0.18, 1200, 1900, 0.2, 0.26);
+  }
+
+  /** Content purr / happy trill (idle contentment). */
   purr(): void {
     this.log('purr');
     if (this.sample('purr', 0.7)) return;

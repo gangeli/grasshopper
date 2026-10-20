@@ -19,7 +19,7 @@ type H = {
     events: { onTap?: (r: Tap) => void };
     mappedArea(): number;
   };
-  sim: { sim: { cam: { yaw: number; pitch: number; pos: V3 } }; ui: { marker: { visible: boolean } } };
+  sim: { sim: { cam: { yaw: number; pitch: number; pos: V3 } }; ui: { marker: { visible: boolean }; hearts: { active: number } } };
 };
 declare global {
   interface Window {
@@ -66,7 +66,10 @@ async function tapPet(page: Page) {
   await page.mouse.click(s.x, s.y);
   await expect.poll(() => lastTap(page)).toMatchObject({ kind: 'pet' });
   const r = (await lastTap(page))!;
-  expect(['giggle', 'celebrate', 'wave', 'surprised']).toContain(r.reaction);
+  // Petted (leaning into the touch) first; playful reactions now and then.
+  expect(['petted', 'giggle', 'celebrate', 'wave', 'surprised']).toContain(r.reaction);
+  // Little hearts float up.
+  await expect.poll(() => page.evaluate(() => (window.__hopper as unknown as H).sim.ui.hearts.active)).toBeGreaterThan(0);
 }
 
 /** A mapped, open floor spot on screen, away from the pet and clear of the HUD. */

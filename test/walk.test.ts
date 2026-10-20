@@ -285,21 +285,58 @@ describe('tapping', () => {
     expect(up.kind).toBe('unreachable');
   });
 
-  it('tap Hopper: varied reactions (giggle, wave, happy hop…) without repeats', () => {
+  it('tap Hopper: petted first (hearts), happiness builds to a happy hop, playful reactions now and then', () => {
     const sim = spawned();
     run(sim, 4);
-    const reactions: string[] = [];
+    const taps: Extract<TapResult, { kind: 'pet' }>[] = [];
     for (let i = 0; i < 12; i++) {
       lookAt(sim, sim.pet.pos);
       const r = tapToward(sim, { x: sim.pet.pos.x, y: sim.pet.pos.y + 0.15, z: sim.pet.pos.z });
       expect(r.kind).toBe('pet');
-      if (r.kind === 'pet') reactions.push(r.reaction);
-      expect(sim.anim.current).toBe(reactions[reactions.length - 1]);
+      if (r.kind !== 'pet') continue;
+      taps.push(r);
+      expect(r.hearts).toBeGreaterThanOrEqual(1);
+      expect(sim.anim.current).toBe(r.reaction);
       run(sim, 0.7);
     }
-    expect(reactions).toContain('giggle');
-    expect(new Set(reactions).size).toBeGreaterThanOrEqual(3);
-    for (let i = 1; i < reactions.length; i++) expect(reactions[i]).not.toBe(reactions[i - 1]);
+    const reactions = taps.map((r) => r.reaction);
+    // Petting is the main response, and the first one.
+    expect(reactions[0]).toBe('petted');
+    expect(taps[0].sound).toBe('pet');
+    expect(reactions.filter((a) => a === 'petted').length).toBeGreaterThanOrEqual(6);
+    // Repeated pets: more hearts, then the big celebration hop with a shower of hearts.
+    expect(taps[2].hearts).toBeGreaterThan(taps[0].hearts);
+    const big = taps.findIndex((r) => r.big);
+    expect(big).toBeGreaterThanOrEqual(3);
+    expect(big).toBeLessThanOrEqual(5);
+    expect(taps[big].reaction).toBe('celebrate');
+    expect(taps[big].hearts).toBeGreaterThanOrEqual(6);
+    // Playful reactions never come twice in a row.
+    for (let i = 1; i < reactions.length; i++) if (reactions[i] !== 'petted' && reactions[i] !== 'celebrate') expect(reactions[i]).not.toBe(reactions[i - 1]);
+  });
+
+  it('stroking Hopper (a held press) pets on a steady beat, only while on Hopper', () => {
+    const sim = spawned();
+    run(sim, 4);
+    lookAt(sim, sim.pet.pos);
+    const o = new THREE.Vector3(sim.cam.pos.x, sim.cam.pos.y, sim.cam.pos.z);
+    const target = new THREE.Vector3(sim.pet.pos.x, sim.pet.pos.y + 0.15, sim.pet.pos.z);
+    let pets = 0;
+    // ~2 s of holding, called every frame.
+    for (let f = 0; f < 60; f++) {
+      const d = target.set(sim.pet.pos.x, sim.pet.pos.y + 0.15, sim.pet.pos.z).clone().sub(o).normalize();
+      const r = sim.game.stroke(o, d);
+      if (r.kind === 'pet') {
+        pets++;
+        expect(r.stroke).toBe(true);
+        expect(r.reaction === 'petted' || r.reaction === 'celebrate').toBe(true);
+      }
+      sim.step(DT);
+    }
+    expect(pets).toBeGreaterThanOrEqual(3);
+    expect(pets).toBeLessThanOrEqual(5);
+    // Off Hopper: nothing.
+    expect(sim.game.stroke(o, new THREE.Vector3(0, 1, 0)).kind).toBe('none');
   });
 
   it('while seeking, taps keep their meaning: tapping the visible pet finds it, the floor does nothing', () => {

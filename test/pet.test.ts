@@ -4,7 +4,7 @@ import { buildPet, boneNames } from '../src/pet/PetModel';
 import { Animator, CHANNELS, type ActionName } from '../src/pet/Animator';
 import { PetController } from '../src/pet/PetController';
 
-const ALL: ActionName[] = ['idle', 'hop', 'jumpCrouch', 'jumpAir', 'land', 'hide', 'hideLow', 'peek', 'giggle', 'surprised', 'celebrate', 'wave', 'lookAround', 'sniff', 'coverEyes', 'sleep'];
+const ALL: ActionName[] = ['idle', 'hop', 'jumpCrouch', 'jumpAir', 'land', 'hide', 'hideLow', 'peek', 'giggle', 'surprised', 'celebrate', 'wave', 'lookAround', 'sniff', 'coverEyes', 'sleep', 'petted'];
 
 function worldPos(rig: ReturnType<typeof buildPet>, b: string) {
   rig.group.updateMatrixWorld(true);

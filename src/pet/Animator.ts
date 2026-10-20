@@ -49,13 +49,15 @@ export interface ActionCtx {
   jumpU: number;
   /** Peek direction: +1 = to the pet's left, -1 = right, 0 = up/over. */
   peekSide: number;
+  /** Where Hopper is being petted: +1 = on their left, -1 = right (they lean into it). */
+  touchSide: number;
   /** A per-pet random seed for idle variation. */
   seed: number;
 }
 
 export type ActionName =
   | 'idle' | 'hop' | 'jumpCrouch' | 'jumpAir' | 'land' | 'hide' | 'hideLow' | 'peek' | 'giggle'
-  | 'surprised' | 'celebrate' | 'wave' | 'lookAround' | 'sniff' | 'coverEyes' | 'sleep';
+  | 'surprised' | 'celebrate' | 'wave' | 'lookAround' | 'sniff' | 'coverEyes' | 'sleep' | 'petted';
 
 /** Channels that place the body (not the face), for blending one posture into another. */
 const BODY_CHANNELS: readonly Channel[] = CHANNELS.filter((c) => c.startsWith('body') || /^(spine|chest|neck|head|arm|elbow|tail|wing|ant|ear|foot|squash)/.test(c));
@@ -421,6 +423,48 @@ const ACTIONS: Record<ActionName, ActionFn> = {
     p.smile = 1;
     p.lookWeight = 0;
   },
+  petted(t, c, p) {
+    // Being petted: Hopper pushes their head up into your hand, tilts it
+    // toward the touch, eyes squeezed shut in happy "^^" arcs, cheeks
+    // blushing; ears and antennae go soft and floppy, the body sways in a
+    // slow contented wiggle and the tail swishes. Paws tucked at the chest.
+    stand(t, c, p);
+    const e = smoothstep(0, 0.25, t);
+    const side = c.touchSide === 0 ? 1 : Math.sign(c.touchSide);
+    const sway = Math.sin(t * 2.8);
+    const nuzzle = Math.sin(t * 5.5);
+    p.bodyPitch = 0.06 - 0.1 * e;
+    p.bodyRoll = (0.1 * side + 0.07 * sway) * e;
+    p.bodyX = 0.006 * sway * e;
+    p.bodyY = -0.006 * e + 0.002 * Math.abs(nuzzle) * e;
+    p.squash = (-0.03 + 0.025 * Math.abs(Math.sin(t * 2.8))) * e;
+    p.spineRoll = -0.04 * side * e;
+    p.chestRoll = 0.05 * Math.sin(t * 5.6) * e;
+    p.neckPitch = -0.12 * e;
+    p.neckRoll = 0.18 * side * e;
+    // Chin up into the hand, a nuzzling rub side to side.
+    p.headPitch = (-0.32 - 0.04 * nuzzle) * e;
+    p.headRoll = (0.34 * side + 0.08 * nuzzle) * e;
+    p.headYaw = 0.12 * side * e + 0.05 * Math.sin(t * 2.1);
+    p.armLPitch = p.armRPitch = -0.95 * e - 0.25 * (1 - e);
+    p.armLRaise = p.armRRaise = 0.05 + 0.1 * (1 - e);
+    p.elbowL = p.elbowR = 0.5 + 0.75 * e;
+    // Relaxed, floppy ears and antennae.
+    p.earLift = -0.5 * e + 0.06 * sway;
+    p.antLift = -0.4 * e + 0.05 * Math.sin(t * 3.3);
+    p.antSpread = 0.35 * e;
+    p.tailSide = 0.45 * Math.sin(t * 6.5) * e;
+    p.tailLift = 0.2 * e;
+    p.tailCurl = 0.25 * e;
+    p.wingSpread = 0.12 + 0.08 * e;
+    p.happy = e;
+    p.eyeOpen = 1 - 0.15 * e;
+    p.smile = 1;
+    p.blush = e;
+    p.mouthOpen = (0.1 + 0.06 * Math.abs(nuzzle)) * e;
+    p.lookWeight = 0.25;
+    p.glow = 0.6 + 0.4 * e;
+  },
   sleep(t, c, p) {
     // Nodding off: the lids get heavy and the head dips first, then the body
     // sinks into a curled-up sleep with slow, deep breaths.
@@ -561,7 +605,7 @@ const STEP_TIME = 0.14;
 const _v = new THREE.Vector3();
 
 export class Animator {
-  readonly ctx: ActionCtx = { hopPhase: 0, speed: 0, hopRate: 2.6, jumpU: 0, peekSide: 1, seed: 0 };
+  readonly ctx: ActionCtx = { hopPhase: 0, speed: 0, hopRate: 2.6, jumpU: 0, peekSide: 1, touchSide: 0, seed: 0 };
   private layers: Layer[] = [{ name: 'idle', t: 0, w: 1, target: 1, fade: 4 }];
   readonly pose: Pose = neutralPose();
   private tmp: Pose = neutralPose();
