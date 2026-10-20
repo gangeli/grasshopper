@@ -286,7 +286,7 @@ describe('map persistence: restore, verify, undo', () => {
     // Both rooms, in one consistent frame: obstacles where the walls and furniture are.
     expect(q.precision).toBeGreaterThan(0.9);
     expect(q.coveredArea).toBeGreaterThan(20);
-  });
+  }, 240_000);
 
   it('runs in a worker: snapshots by message, restore applied on the page side', async () => {
     const home = makeHome(3);

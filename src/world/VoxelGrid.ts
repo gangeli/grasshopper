@@ -69,6 +69,27 @@ export class VoxelGrid {
    * pet stand at the real height of a table instead of the voxel boundary.
    */
   readonly topFrac: Uint8Array;
+  /**
+   * Per voxel, two time codes (see `stamp`) packed as born << 16 | last:
+   * `last` = the latest observation that added occupancy evidence there,
+   * `born` = when it last became occupied (crossed OCC_THRESHOLD); 0 = never
+   * (or before the session, e.g. an imported map). Lets drift checks match
+   * what the camera sees now against structure that existed before (`born`),
+   * lets stale structure erode (`last`), and lets a loop closure move what
+   * was mapped during a drift (`last`). Null on grid copies that don't need it.
+   */
+  hitTime: Uint32Array | null = null;
+  /** Time code written by hits (whole seconds since the session started, from 1). */
+  stamp = 1;
+  /**
+   * Occupied voxels not re-observed for this many seconds (hitTime) lose
+   * their resistance to erosion: a ray through one erodes it `staleMissGain`×
+   * as fast as through free space. Doubled walls left by odometry drift, and
+   * furniture that was moved, then clear as soon as they're looked through,
+   * while structure the camera keeps seeing stays sticky. 0 = off.
+   */
+  staleAfter = 0;
+  staleMissGain = 3;
   /** See integrateRay: occupied voxels resist erosion by passing rays. */
   stickyOccupied = true;
   /** Increments whenever occupancy changes meaningfully, so derived data can be cached. */
@@ -133,6 +154,7 @@ export class VoxelGrid {
     if (v > MAX_LO) v = MAX_LO;
     if (v < MIN_LO) v = MIN_LO;
     this.data[n] = v;
+    if (delta > 0 && this.hitTime) this.stampHit(n, before, v);
     this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
   }
@@ -142,8 +164,15 @@ export class VoxelGrid {
     const n = this.idx(i, j, k);
     const before = this.data[n];
     this.data[n] = v;
+    if (v > before && this.hitTime) this.stampHit(n, before, v);
     this.touch(n);
     if (cls(before) !== cls(v)) this.version++;
+  }
+
+  private stampHit(n: number, before: number, v: number): void {
+    const h = this.hitTime!;
+    const born = before <= OCC_THRESHOLD && v > OCC_THRESHOLD ? this.stamp : h[n] >>> 16;
+    h[n] = ((born << 16) | this.stamp) >>> 0;
   }
 
   // --- Shadow-mask bookkeeping ----------------------------------------------------------
@@ -229,6 +258,8 @@ export class VoxelGrid {
     const dX = dx / len, dY = dy / len, dZ = dz / len;
     const r = this.res, o = this.origin;
     const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
+    const hits = this.staleAfter > 0 ? this.hitTime : null;
+    const staleStamp = this.stamp - this.staleAfter, staleMiss = Math.min(-1, missDelta) * this.staleMissGain;
     let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
     const stepX = dX > 0 ? 1 : dX < 0 ? -1 : 0;
     const stepY = dY > 0 ? 1 : dY < 0 ? -1 : 0;
@@ -247,7 +278,7 @@ export class VoxelGrid {
         const q = (j * nz + k) * nx + i;
         const v = data[q];
         if (v > STRONG_OCC) conflicts++;
-        let nv = v + (v > OCC_THRESHOLD ? occMiss : missDelta);
+        let nv = v + (v > OCC_THRESHOLD ? (hits !== null && (hits[q] & 0xffff) < staleStamp && v !== 127 ? staleMiss : occMiss) : missDelta);
         if (nv > MAX_LO) nv = MAX_LO;
         if (nv < MIN_LO) nv = MIN_LO;
         data[q] = nv;
@@ -280,18 +311,22 @@ export class VoxelGrid {
    * reality have drifted apart, fresh observations then win quickly instead of
    * fighting with stale, confident ones. The solid below-floor layers stay.
    */
-  ageEvidence(factor: number, fromLayer: number): void {
+  ageEvidence(factor: number, fromLayer: number, region?: { i0: number; i1: number; k0: number; k1: number }): void {
     // Keep every voxel's class (an obstacle stays an obstacle, free stays
     // free) and only shrink the margin, so fresh observations flip it
     // quickly. Scaling raw log-odds would push confident obstacles under the
     // occupancy threshold: they'd vanish, and the pet could be "seen" through
     // (or walk through) furniture that's really there.
     const layer = this.nx * this.nz;
-    for (let n = fromLayer * layer; n < this.data.length; n++) {
-      const v = this.data[n];
-      if (v > OCC_THRESHOLD) this.data[n] = OCC_THRESHOLD + 1 + Math.round((v - OCC_THRESHOLD - 1) * factor);
-      else if (v < 0) this.data[n] = Math.min(-1, Math.round(v * factor));
-    }
+    const i0 = Math.max(0, region?.i0 ?? 0), i1 = Math.min(this.nx - 1, region?.i1 ?? this.nx - 1);
+    const k0 = Math.max(0, region?.k0 ?? 0), k1 = Math.min(this.nz - 1, region?.k1 ?? this.nz - 1);
+    for (let j = fromLayer; j < this.ny; j++)
+      for (let k = k0; k <= k1; k++)
+        for (let n = j * layer + k * this.nx + i0, e = j * layer + k * this.nx + i1; n <= e; n++) {
+          const v = this.data[n];
+          if (v > OCC_THRESHOLD) this.data[n] = OCC_THRESHOLD + 1 + Math.round((v - OCC_THRESHOLD - 1) * factor);
+          else if (v < 0) this.data[n] = Math.min(-1, Math.round(v * factor));
+        }
     this.touchAll();
     this.transient.clear();
     this.version++;

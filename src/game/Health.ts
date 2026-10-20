@@ -57,6 +57,11 @@ export interface HealthOptions {
   petGrace: number;
   maxMoveSeconds: number;
   enabled: boolean;
+  /**
+   * Map resets forget only what's around the player (this radius, m) and
+   * weaken the rest of the window, instead of the whole window. 0 = whole.
+   */
+  localResetRadius: number;
 }
 
 export const DEFAULT_HEALTH: HealthOptions = {
@@ -69,6 +74,7 @@ export const DEFAULT_HEALTH: HealthOptions = {
   petGrace: 1.5,
   maxMoveSeconds: 90,
   enabled: true,
+  localResetRadius: 0,
 };
 
 export class HealthMonitor {
@@ -130,10 +136,22 @@ export class HealthMonitor {
     this.unsettledNow = sus;
   }
 
+  /** Where a local map reset applies (around the player), or undefined for the whole window. */
+  private around(): { x: number; z: number; radius: number } | undefined {
+    const v = this.lastViewPos;
+    return this.opts.localResetRadius > 0 && v ? { x: v.x, z: v.z, radius: this.opts.localResetRadius } : undefined;
+  }
+  private lastViewPos: { x: number; z: number } | null = null;
+
   /** Called every frame by the game (view already in the map frame). */
   update(dt: number, view: ViewPose | null): void {
     if (!this.opts.enabled) return;
     this.t += dt;
+    if (view && Number.isFinite(view.pos.x + view.pos.z)) {
+      const p = (this.lastViewPos ??= { x: 0, z: 0 });
+      p.x = view.pos.x;
+      p.z = view.pos.z;
+    }
     const w = this.world;
     if (!w.grid) return;
     // Cheap checks every frame; the rest ~3x/s.
@@ -174,14 +192,14 @@ export class HealthMonitor {
         // The world moved a lot and we couldn't say how: parts of the map we
         // haven't re-seen are now simply wrong (a remembered gap may be a crate).
         // Start the map afresh in the current frame and bring the pet back.
-        w.hardReset();
+        w.hardReset(this.around());
         this.softResetAt = this.t;
         this.report('mapReset', `after a tracking loss the world shifted ~${(verdict.mag * 100).toFixed(0)}cm and couldn't be realigned: map cleared, pet re-anchored`);
         this.game.mapChanged();
         this.game.reanchorPet();
         this.game.say('Whoa, everything moved! Look around a bit so I can find my way again.');
       } else {
-        w.softReset(0.15);
+        w.softReset(0.15, this.around());
         this.softResetAt = this.t;
         this.report('mapContradictory', 'after a tracking loss the map no longer matched what the camera sees: evidence aged');
         this.game.mapChanged();
@@ -204,11 +222,11 @@ export class HealthMonitor {
     if (this.conflictSince !== null && w.conflictRate > this.opts.conflictHigh && this.t - this.conflictSince > this.opts.conflictSustain && this.t - this.lastRealign > this.opts.conflictSustain) {
       const rate = (w.conflictRate * 100).toFixed(0);
       if (this.t - this.softResetAt < 20) {
-        w.hardReset();
+        w.hardReset(this.around());
         this.report('mapReset', `contradictions ${rate}% persisted after ageing: map cleared`);
         this.game.say('I got confused about your room — look around a little so I can learn it again!');
       } else {
-        w.softReset(0.3);
+        w.softReset(0.3, this.around());
         this.softResetAt = this.t;
         this.report('mapContradictory', `contradictions ${rate}% for ${this.opts.conflictSustain}s: evidence aged`);
       }

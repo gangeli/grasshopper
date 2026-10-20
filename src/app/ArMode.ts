@@ -91,6 +91,8 @@ export class ArMode {
   private lastGoodPet: THREE.Vector3 | null = null;
   private emptySince = -1;
   private anchor: XRAnchor | null = null;
+  /** A screen press in progress (XR selectstart → select): held on Hopper, it strokes them. */
+  private press: { source: XRInputSource; t0: number; petted: boolean } | null = null;
   private anchorA0: number[] | null = null;
   private lastCorrection: number[] | null = null;
   /** Diagnostics exposed for tests/debug overlay. */
@@ -231,8 +233,17 @@ export class ArMode {
       throw e;
     }
     await this.requestHitSource();
+    session.addEventListener('selectstart', (e) => {
+      this.press = { source: (e as XRInputSourceEvent).inputSource, t0: performance.now(), petted: false };
+    });
+    session.addEventListener('selectend', () => {
+      // 'select' (the tap) fires before 'selectend'; it has seen the press by now.
+      this.press = null;
+    });
     session.addEventListener('select', (e) => {
       try {
+        // A press that already stroked Hopper needs no tap on top.
+        if (this.press?.petted) return;
         this.onSelect(e as XRInputSourceEvent);
       } catch (err) {
         this.recordError('select', err);
@@ -384,6 +395,23 @@ export class ArMode {
     const dir = new THREE.Vector3(0, 0, -1).transformDirection(m);
     game.tapAt(origin, dir);
   }
+
+  /** While a press is held on Hopper (walking), each beat of the stroke pets them again. */
+  private strokeTick(frame: XRFrame) {
+    const p = this.press;
+    const { game } = this.stack;
+    if (!p || game.phase !== 'roam' || this.paused || this.placing || this.tracking.frozen || !this.refSpace) return;
+    if (performance.now() - p.t0 < 280) return;
+    const pose = frame.getPose(p.source.targetRaySpace, this.refSpace);
+    if (!pose || !isFiniteMatrix(pose.transform.matrix)) return;
+    const m = this.strokeM.fromArray(pose.transform.matrix);
+    const origin = this.strokeO.setFromMatrixPosition(m);
+    const dir = this.strokeD.set(0, 0, -1).transformDirection(m);
+    if (game.stroke(origin, dir).kind === 'pet') p.petted = true;
+  }
+  private readonly strokeM = new THREE.Matrix4();
+  private readonly strokeO = new THREE.Vector3();
+  private readonly strokeD = new THREE.Vector3();
 
   private floorHintY(): number | null {
     if (this.planeFloorY !== null) return this.planeFloorY;
@@ -547,6 +575,7 @@ export class ArMode {
         });
         if (!ok) this.gameErrors.record(this.now, 'game', this.stats.lastError);
         this.guard('pet check', () => this.checkPet());
+        this.guard('stroke', () => this.strokeTick(frame));
         this.guard('stage', () => {
           this.stage.followPet(this.stack);
           // Occluder meshing takes tens of ms on a phone: refresh every ~2s while the

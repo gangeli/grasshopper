@@ -40,7 +40,11 @@ export class SimMode {
   private ui: GameUI;
   private keys = new Set<string>();
   private lastT = 0;
-  private drag: { x: number; y: number; x0: number; y0: number; t0: number; id: number; move: boolean; travel: number } | null = null;
+  /**
+   * The current press. `stroke`: it started on Hopper while walking, so holding
+   * or dragging pets Hopper instead of turning the view; `petted` once it has.
+   */
+  private drag: { x: number; y: number; x0: number; y0: number; t0: number; id: number; move: boolean; travel: number; stroke: boolean; petted: boolean } | null = null;
   private joy: { x: number; y: number } = { x: 0, y: 0 };
   private roomGroup = new THREE.Group();
   frames = 0;
@@ -159,6 +163,7 @@ export class SimMode {
     this.stage.followPet(this.sim);
     this.stage.updateDebug(this.sim);
     if (this.stage.debug && this.frames % 30 === 0) this.stage.updateOccluder(this.sim);
+    this.strokeTick();
     this.ui.update(cam);
     this.stage.render();
   }
@@ -234,7 +239,9 @@ export class SimMode {
       this.voice.unlock();
       // Left third of a touch screen is a virtual joystick.
       const move = !this.camera && e.pointerType === 'touch' && e.clientX < window.innerWidth * 0.33;
-      this.drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), id: e.pointerId, move, travel: 0 };
+      const game = this.sim.game;
+      const stroke = !move && game.phase === 'roam' && this.onPet(e.clientX, e.clientY);
+      this.drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), id: e.pointerId, move, travel: 0, stroke, petted: false };
       canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener('pointermove', (e) => {
@@ -247,6 +254,7 @@ export class SimMode {
       }
       this.drag.x = e.clientX;
       this.drag.y = e.clientY;
+      if (this.drag.stroke) return; // stroking Hopper, not looking around (see strokeTick)
       if (this.camera?.hasOrientation) return; // the phone itself is the look control
       const c = this.sim.cam;
       c.yaw -= dx * 0.005;
@@ -263,21 +271,53 @@ export class SimMode {
     };
     canvas.addEventListener('pointerup', (e) => {
       const d = end(e);
+      // A press on Hopper that already petted them (a stroke) needs no tap on top.
+      if (d?.stroke && d.petted) return;
       // A tap (not a drag to look around, not the joystick): on Hopper, or a
       // spot for Hopper to go to.
-      if (!d || d.move || d.travel > 12 || performance.now() - d.t0 > 700) return;
+      if (!d || d.move || (!d.stroke && (d.travel > 12 || performance.now() - d.t0 > 700))) return;
       this.tapScreen(e.clientX, e.clientY);
     });
     canvas.addEventListener('pointercancel', end);
   }
 
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly ndc = new THREE.Vector2();
+
+  /** The camera ray through a screen point (CSS px). */
+  private screenRay(x: number, y: number): THREE.Ray {
+    this.ndc.set((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+    this.stage.camera.updateMatrixWorld();
+    this.raycaster.setFromCamera(this.ndc, this.stage.camera);
+    return this.raycaster.ray;
+  }
+
+  private onPet(x: number, y: number): boolean {
+    const r = this.screenRay(x, y);
+    return this.sim.game.rayOnPet(r.origin, r.direction);
+  }
+
   /** A tap at a screen point (CSS px): the game decides what it means. */
   tapScreen(x: number, y: number) {
-    const ndc = new THREE.Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
-    const ray = new THREE.Raycaster();
-    this.stage.camera.updateMatrixWorld();
-    ray.setFromCamera(ndc, this.stage.camera);
-    return this.sim.game.tap(ray.ray.origin, ray.ray.direction);
+    const r = this.screenRay(x, y);
+    return this.sim.game.tap(r.origin, r.direction);
+  }
+
+  /**
+   * Stroking: while a press that began on Hopper is held (or dragged across
+   * them), each beat of the stroke pets Hopper again.
+   */
+  private strokeTick() {
+    const d = this.drag;
+    if (!d || !d.stroke) return;
+    if (this.sim.game.phase !== 'roam') {
+      d.stroke = false;
+      return;
+    }
+    // A quick tap is handled on release; a stroke is a hold or a drag.
+    if (performance.now() - d.t0 < 280 && d.travel < 12) return;
+    const r = this.screenRay(d.x, d.y);
+    if (this.sim.game.stroke(r.origin, r.direction).kind === 'pet') d.petted = true;
   }
 
   private buildRoom(room: SimRoom) {

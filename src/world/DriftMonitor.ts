@@ -24,9 +24,32 @@ export interface DriftOptions {
   maxDriftShift: number;
   /** Seconds after a tracking loss/recovery during which big jumps are searched for. */
   eventWindow: number;
+  /**
+   * Loop closure: the camera is back where it mapped a while ago (structure
+   * not re-observed for `loopMinAge` s) and the odometry has drifted since.
+   * Searched up to loopMaxShift / loopMaxYaw; 0 shift turns it off.
+   */
+  loopMinAge: number;
+  loopMaxShift: number;
+  loopMaxYaw: number;
+  /** A first loop-closure estimate waits this long (s) for a second, agreeing one. */
+  loopPendingSeconds: number;
+  /** Resolve a hold on one clear-cut estimate (otherwise two agreeing ones, or one undoing a pose jump). */
+  holdSingle: boolean;
+  loopMinPoints: number;
+  /** Share of the readings that land on that older structure after the correction. */
+  loopMinSupport: number;
+  /** Also correct what was mapped since the old structure (see WorldModel.warpSince). */
+  loopWarp: boolean;
+  /**
+   * The tracker corrected itself (its pose jumped, PoseGate.lastJump) and
+   * the view now lines up with older structure: move what was mapped in
+   * between by its share of the jump (the tracker closed a loop we hadn't).
+   */
+  jumpWarp: boolean;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20 };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0.6, loopMaxYaw: 0.18, loopPendingSeconds: 0, holdSingle: false, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -70,7 +93,12 @@ export class DriftMonitor {
     this.inWindow = inEvent;
     this.inEvent = inEvent && !this.contradicted;
     if (this.task) return this.resume(); // the previous check is still running
-    if (this.inEvent) this.task = this.afterEvent(t);
+    // Frames are being held back as contradicting the map: find their correction first.
+    if (this.world.heldSince !== null) this.task = this.resolving(t);
+    // Every other check looks for a loop closure (also while judging a
+    // tracking loss: losses are frequent when walking around a home).
+    else if (this.opts.loopMaxShift > 0 && this.turn++ % 2 === 1) this.task = this.closing(t);
+    else if (this.inEvent) this.task = this.afterEvent(t);
     else if (inEvent) return false; // contradicted: waiting for the verdict to be taken
     else this.task = this.drifting(t);
     return this.resume();
@@ -82,6 +110,12 @@ export class DriftMonitor {
    * (the default) runs each check to completion right away.
    */
   budgetMs = Infinity;
+  /**
+   * Alternatively a fixed number of search steps per call (deterministic:
+   * benchmarks use it to pace checks like a phone would, independent of the
+   * machine's speed). Takes precedence over budgetMs when finite.
+   */
+  budgetSteps = Infinity;
   private task: Generator<void, boolean, void> | null = null;
   /** A check is in progress (call resume() each frame). */
   get busy(): boolean {
@@ -91,14 +125,16 @@ export class DriftMonitor {
   resume(): boolean {
     const task = this.task;
     if (!task) return false;
-    const until = Number.isFinite(this.budgetMs) ? performance.now() + this.budgetMs : Infinity;
+    const steps = this.budgetSteps;
+    const until = Number.isFinite(steps) ? Infinity : Number.isFinite(this.budgetMs) ? performance.now() + this.budgetMs : Infinity;
+    let n = 0;
     for (;;) {
       const r = task.next();
       if (r.done) {
         this.task = null;
         return r.value;
       }
-      if (performance.now() >= until) return false;
+      if (++n >= steps || performance.now() >= until) return false;
     }
   }
   private seenEvent = -Infinity;
@@ -206,6 +242,130 @@ export class DriftMonitor {
     if (v.length < 4) return { verdict: 'unknown', mag };
     const sorted = v.slice().sort((a, b) => a - b);
     return { verdict: sorted[sorted.length >> 1] < 0.2 ? 'unresolved' : 'fine', mag };
+  }
+
+  private turn = 0;
+  /**
+   * A loop-closure estimate waiting for a second, agreeing one. Kept across
+   * checks that see nothing usable (old structure goes in and out of view
+   * while walking), until it is too old, the frame was corrected meanwhile,
+   * or a confident check finds the map aligned.
+   */
+  private pendingLoop: { m: Est; t: number; wt: number; corr: number } | null = null;
+  /** Loop closures applied. */
+  loopClosures = 0;
+
+  /**
+   * Back in a place mapped a while ago? Match the recent frames against the
+   * structure that predates them by loopMinAge seconds (what the camera
+   * added since may be in a drifted frame); two agreeing, well-supported
+   * estimates realign everything since just before the first.
+   */
+  private pendingHold: { m: Est; t: number; since: number } | null = null;
+  /** Corrections found for held-back frames (see WorldModel.holdOnConflict). */
+  holdFixes = 0;
+
+  /**
+   * Frames are held back because they contradict the map. Match them against
+   * the structure that existed before the hold (born at least a few seconds
+   * earlier): a confident correction realigns everything since the hold
+   * began (the held frames are replayed corrected, what was mapped in
+   * between is warped); a confident "nothing to correct" lets them in.
+   */
+  private *resolving(t: number): Generator<void, boolean, void> {
+    const O = this.opts, w = this.world, since = w.heldSince!;
+    const held = Math.max(1, w.replayFramesSince(since));
+    const m = yield* w.misalignmentSearch({ snapshot: 'aged', minAge: 6, frames: Math.min(15, held), maxShift: Math.max(O.loopMaxShift, 0.6), maxYaw: O.loopMaxYaw });
+    if (w.heldSince !== since) return false; // released or resolved meanwhile
+    this.last = { t, m, fired: false };
+    if (!m) {
+      this.note('hold: nothing to match yet');
+      return false;
+    }
+    const mag = displacement(m, null);
+    // A pose jump just before the hold that this correction would undo is
+    // strong prior evidence: accept weaker support then.
+    const J = w.poseGate.lastJump;
+    const undoesJump = !!J && since - J.t < 2.5 && since >= J.t - 0.5 && Math.hypot(m.dx + J.dx, m.dz + J.dz) < Math.max(0.06, 0.3 * Math.hypot(J.dx, J.dz));
+    const support = undoesJump ? 0.25 : 0.3, ratio = undoesJump ? 1.4 : 1.6;
+    const ok = (!m.degenerate || undoesJump) && m.n >= O.loopMinPoints * (undoesJump ? 0.5 : 1) && m.best >= support * m.n && m.best >= ratio * Math.max(m.base, 0.1 * m.n) && mag >= O.minCorrection;
+    if (!ok) {
+      // The map as it stands fits after all, or nothing fits: let them in.
+      if (!m.degenerate && m.n >= O.loopMinPoints && (m.base >= 0.5 * m.n || mag < O.minCorrection)) {
+        this.pendingHold = null;
+        w.releaseHeld();
+        this.note(`hold: released (base ${m.base}/${m.n}, best ${m.best} ${(mag * 100).toFixed(0)}cm)`);
+      } else this.note(`hold: unsure (${m.degenerate ? 'degenerate ' : ''}n ${m.n} base ${m.base} best ${m.best} ${(mag * 100).toFixed(0)}cm)`);
+      return false;
+    }
+    // One clear-cut estimate is enough (frames are waiting); otherwise two that agree.
+    const clearCut = O.holdSingle && !m.degenerate && m.n >= O.loopMinPoints && m.best >= 0.5 * m.n && m.best >= 3 * Math.max(m.base, 0.1 * m.n);
+    if (undoesJump || clearCut || (this.pendingHold && this.pendingHold.since === since && displacement(m, this.pendingHold.m) <= O.agree)) {
+      w.realign(m.dx, m.dz, m.dyaw, m.pivot, since - 0.05);
+      w.heldResolved();
+      // (A jump moved the frame at once: what was mapped before it is fine.)
+      if (O.loopWarp && !undoesJump && Number.isFinite(m.oldT) && m.oldT < since - 1) w.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      this.pendingHold = null;
+      this.corrections++;
+      this.holdFixes++;
+      this.last.fired = true;
+      this.note(`HOLD RESOLVED ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} map since ${m.oldT.toFixed(0)}s`);
+      return true;
+    }
+    this.pendingHold = { m, t, since };
+    this.note(`hold candidate ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} base ${m.base}`);
+    return false;
+  }
+
+  private consumedJumpT = -Infinity;
+  /** Map warps after the tracker's own loop closures (see jumpWarp). */
+  jumpWarps = 0;
+
+  private *closing(t: number): Generator<void, boolean, void> {
+    const O = this.opts;
+    const m = yield* this.world.misalignmentSearch({ snapshot: 'aged', minAge: O.loopMinAge, maxShift: O.loopMaxShift, maxYaw: O.loopMaxYaw });
+    this.last = { t, m, fired: false };
+    const J = this.world.poseGate.lastJump;
+    if (O.jumpWarp && m && J && J.t > this.consumedJumpT && this.world.now - J.t < 10 && Math.hypot(J.dx, J.dz) >= 0.05) {
+      const aligned = !m.degenerate && m.n >= O.loopMinPoints && m.base >= O.loopMinSupport * m.n && displacement(m, null) < O.minCorrection;
+      if (aligned && Number.isFinite(m.oldT) && m.oldT < J.t - 10) {
+        this.consumedJumpT = J.t;
+        const moved = this.world.warpSince(m.oldT, J.t, { dx: J.dx, dz: J.dz, dyaw: 0, pivot: m.pivot });
+        this.jumpWarps++;
+        this.note(`tracker jump ${(Math.hypot(J.dx, J.dz) * 100).toFixed(0)}cm lines up with the map of ${m.oldT.toFixed(0)}s: warped ${moved} voxels mapped since`);
+      }
+    }
+    const P = this.pendingLoop;
+    if (P && (this.world.now - P.wt > O.loopPendingSeconds || P.corr !== this.corrections)) this.pendingLoop = null;
+    if (!m) {
+      this.note('loop: no old structure in view');
+      return false;
+    }
+    const mag = displacement(m, null);
+    const ok = !m.degenerate && m.n >= O.loopMinPoints && m.best >= O.loopMinSupport * m.n && m.best >= O.minRatio * Math.max(m.base, 0.1 * m.n) && mag >= O.minCorrection;
+    if (!ok) {
+      // The map clearly fits as it is: whatever was pending was wrong.
+      if (!m.degenerate && m.n >= O.loopMinPoints && m.base >= O.loopMinSupport * m.n && mag < O.minCorrection) this.pendingLoop = null;
+      this.note(`loop: none (${m.degenerate ? 'degenerate ' : ''}n ${m.n} base ${m.base} best ${m.best} mag ${(mag * 100).toFixed(0)}cm)`);
+      return false;
+    }
+    if (this.pendingLoop && displacement(m, this.pendingLoop.m) <= O.agree) {
+      const since = this.pendingLoop.wt - 2;
+      this.world.realign(m.dx, m.dz, m.dyaw, m.pivot, since);
+      // What was mapped between then and now drifted by a growing share of
+      // the same error: move it too, so the loop lines up all the way round.
+      if (this.opts.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) this.world.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
+      this.pendingLoop = null;
+      this.pending = null;
+      this.corrections++;
+      this.loopClosures++;
+      this.last.fired = true;
+      this.note(`LOOP CLOSED (map since ${m.oldT.toFixed(0)}s) ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n}`);
+      return true;
+    }
+    this.pendingLoop = { m, t, wt: this.world.now, corr: this.corrections };
+    this.note(`loop candidate ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} base ${m.base}`);
+    return false;
   }
 
   private *drifting(t: number): Generator<void, boolean, void> {

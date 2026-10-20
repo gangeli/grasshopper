@@ -1,0 +1,327 @@
+# Large-area mapping: benchmark and hill-climb log
+
+Goal: map whole homes (8×12 m … 15×20 m, several rooms) in one session with
+realistic hand-held motion — walking 0.5–1.2 m/s, whip pans of 1.5–4 rad/s,
+looking up/down, glancing back, coming back to rooms minutes later — with
+odometry drift, relocalisation jumps, tracking loss and blur, and keep the map
+right (no ghosts, nothing forgotten) at phone-sized CPU and memory.
+
+## Coordination notes (persistence)
+
+- Map export/import interface: `WorldModel.exportMap(): SerializedMap | null`
+  and `WorldModel.importMap(map, transform?, { mode, weight })`, format
+  documented in `src/world/MapFormat.ts` (chunked plain typed arrays).
+  First committed in **891ecb9**; kept working through the storage change
+  (the export now includes the archive outside the live window; import writes
+  into the window and the archive). `chunkSize` is a field of the format
+  (currently 32); readers should use it rather than assume a value.
+
+## The harness
+
+- `src/sim/House.ts` — multi-room homes: an outer shell split recursively into
+  rooms (sometimes with a 1.2 m corridor), interior walls with doorways
+  (lintels above), every room furnished by kind (living, kitchen, bedroom,
+  study, bath, hall), then dressed (`dressHouse`: blank walls, dark sofas,
+  glass tables, clutter, a rug, mirrors and people pacing in some rooms).
+  Each room's floor is its own plane, interior walls get vertical planes.
+- `src/sim/HouseWalk.ts` — a person touring the home at 30 Hz: nearest-room
+  tour, back to the start room, then random revisits; walking 0.5–1.2 m/s on
+  A* paths with smoothed heading; look-arounds at each stop with pans of
+  1.5–4 rad/s, quick glances back over the shoulder, looking down at the floor
+  and up at shelves, crouching. (≈20% of frames turn faster than 1.5 rad/s;
+  p95 ≈ 3.2 rad/s.)
+- `SimSensor` additions: odometry drift that grows with the path walked
+  (`odometry`: ~1%/m position drift with a slowly wandering direction, yaw
+  random walk per √m and per √rad turned, applied about the camera), the
+  tracker's own loop closures (back within 1 m of a place seen ≥30 s ago it
+  snaps its frame back to how it was then), planes detected in the drifted
+  frame, and ARCore-style densified depth (`densify`: every hole interpolated,
+  no confidence). Profile `house` = `real` + odometry + densify.
+- `src/sim/largeArea.ts` (`runLargeArea`) — runs the full game stack (pet
+  following the player, health monitor, drift checks with the app's 3 ms
+  budget, nav rebuilds) along the walk and scores the map against the truth:
+  coverage of truly walkable floor in visited rooms (nav node within 10 cm,
+  scored on the *whole* map: window + archive), obstacle precision and ghost
+  footprint (map frame = truth frame), falseFree (inside of furniture believed
+  seen empty), local precision (obstacle voxels within 3.5 m of the player,
+  taken to reality through the *current* frame: what the player sees), frame
+  error at the camera, retention (each room's coverage/precision when first
+  left vs at the end), memory, and per-frame main-thread CPU (nav builds,
+  which run in a worker on the device, reported separately).
+- Scripts: `scripts/large-area.ts` (one run; `PNG=` writes a top-down picture,
+  `TRACE=1` prints drift/loop decisions and realign before→after errors,
+  `PROF=1` per-method timings), `scripts/large-area-batch.ts` (variants in
+  parallel + comparison table), `scripts/large-area-suite.sh` (the three
+  standard homes).
+
+### How to run
+
+```
+npx tsx scripts/large-area.ts 15x20 3 600 house-hard          # one home, 10 min walk
+PNG=/tmp/h.png TRACE=1 npx tsx scripts/large-area.ts 10x12 1 300   # picture + drift decisions
+PROF=1 QUIET=1 npx tsx scripts/large-area.ts 8x12 4 300        # main-thread hot spots
+npx tsx scripts/large-area-batch.ts spec.json /tmp/out 4       # variants in parallel
+python3 scripts/large-area-runs.py /tmp/out                    # one line per run
+npx tsx scripts/la-local-diag.ts 10x12 1 300                   # what's wrong around the player
+npx tsx scripts/perf-window.ts                                 # cost of a window move
+```
+
+A batch spec is a JSON list of runs (`house`, `seed`, `seconds`, `profile`,
+`env`) or `{ "name": …, "quick": true, "scale": 2, "profile": "house-hard",
+"env": {…} }` for the six standard homes (`scale` multiplies the 5-minute
+walks). `env` passes options straight to the system under test: `WORLD`
+(WorldModel fields, e.g. `{"holdOnConflict":true}`), `DRIFT` (DriftMonitor
+options), `HEALTH`, `GATE` (PoseGate), `NOISE` (sensor profile overrides),
+`WALK` (walker), `EVERY` (metric interval, s). CPU numbers from parallel
+batches are inflated by contention; measure CPU with one run at a time.
+
+## Baseline (the system as found)
+
+Standard suite (house profile at the time: real + odometry, no densify),
+three homes, 600/600/900 s walks:
+
+| home | coverage | precision | ghost m² | falseFree | frame err (max) | worst room coverage drop | paths colliding | map MB | CPU mean/p95/max ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 10×12 | 23.6% | 58.5% | 1.6 | 0.9% | 23 (79) cm | 57% | 7.5% | 41 | 2.4 / 9.3 / 1364 |
+| 12×15 | 21.4% | 70.2% | 2.4 | 3.6% | 29 (45) cm | 36% | 11% | 42 | 2.2 / 7.9 / 1242 |
+| 15×20 | 9.1% | 41.6% | 4.4 | 19.7% | 16 (94) cm | 16% | 6.2% | 35 | 2.2 / 7.9 / 1423 |
+
+What the pictures and traces showed:
+- everything beyond ±6 m of the start point is dropped (the 15×20 home is
+  mostly empty);
+- a map reset after a tracking loss wipes the whole home;
+- odometry drift doubles walls (red in the pictures) and puts walkable floor
+  into walls;
+- main-thread spikes of 1–2 s: an unbounded path search when a walk is
+  blocked (`guardPath` → A* over the whole graph with jump links).
+
+## Where it stands (after round 8)
+
+Same three homes and walk lengths as the baseline, current system with
+defaults (`house` is now harder than the baseline's profile: densified
+depth with its interpolation errors, per-room floors):
+
+| home | profile | coverage | precision | ghost m² | falseFree | frame err (max) | map MB | CPU mean/p95/max ms |
+|---|---|---|---|---|---|---|---|---|
+| 10×12 | baseline | 23.6% | 58.5% | 1.6 | 0.9% | 23 (79) cm | 41 | 2.4 / 9.3 / 1364 |
+| 10×12 | house | 91.2% | 92.0% | 0.5 | 4.8% | 4 (18) cm | 70 | 4.5 / 16.2 / 370 |
+| 10×12 | house-hard | 89.2% | 74.9% | 1.5 | 18.1% | 15 (45) cm | 45 | 4.5 / 16.5 / 369 |
+| 12×15 | baseline | 21.4% | 70.2% | 2.4 | 3.6% | 29 (45) cm | 42 | 2.2 / 7.9 / 1242 |
+| 12×15 | house | 75.2% | 87.4% | 6.4 | 2.1% | 2 (44) cm | 75 | 5.6 / 18.6 / 107 |
+| 12×15 | house-hard | 75.3% | 73.0% | 9.5 | 19.6% | 4 (58) cm | 76 | 5.4 / 18.3 / 116 |
+| 15×20 | baseline | 9.1% | 41.6% | 4.4 | 19.7% | 16 (94) cm | 35 | 2.2 / 7.9 / 1423 |
+| 15×20 | house | 64.4% | 80.9% | 14.5 | 18.5% | 16 (29) cm | 82 | 5.8 / 19.8 / 183 |
+| 15×20 | house-hard | 40.8% | 78.2% | 8.4 | 6.0% | 23 (68) cm | 73 | 3.8 / 12.3 / 136 |
+
+(CPU: main-thread work per frame in node, sensing + game; the CPU mean
+rose with the hold probe, multi-view checks and nav upkeep for a map
+several times larger; the multi-second spikes are gone. The house-hard
+15×20 run lost half its map to one "couldn't realign → cleared" reset at
+the end — see round 8.)
+
+## Round log
+
+### Round 1 — unbounded map (window + archive), harness fidelity
+
+- Map storage: the dense grid became a *window* of 8×8 chunks (12.8 m) on a
+  lattice fixed at session start that follows the camera; chunks leaving it go
+  to a `ChunkStore` archive (only chunks with information; underside/topFrac
+  stored only when non-trivial), entering ones are restored from it.
+  Recovery snapshots are shifted in place (no allocation), the nav graph for
+  the new window is built in the background while the old one stays in use.
+- Sim fidelity: densified depth (the multi-view gate now has hallucinated
+  depth to reject, as on a phone); per-room floor planes; planes in the
+  drifted frame.
+- Bounded the blocked-path replan (`findPath(…, maxCost, maxExpand)`).
+- Measured (10×12, 300 s, house profile with densify): coverage 51% (fixed
+  grid) → 68–77% (window); the 15×20 home goes from ~10% to ~39%.
+
+### Round 2 — making the benchmark honest, then fast moves
+
+- The first walker turned instantly at path corners: to the pose gate that
+  looked like tracking jumps (28% of depth frames held back). People round
+  corners: the walker now accelerates at ≤1.5 m/s². With that fixed, holds
+  dropped to ~12% (relocalisation jumps of the `real` profile).
+- The first drift model drifted with every metre walked, even pacing inside
+  a room the tracker knows well; VIO stays locked onto features it has in
+  its local map. Drift now grows at the full rate only through new
+  territory (10% near places seen in the last 30 s, 50% near older ones).
+- Drift checks were paced by wall-clock ms in the benchmark, which made runs
+  depend on machine load; they are now paced by search steps (deterministic).
+- Window moves cost ~45 ms (node) per move: archived chunks are now written a
+  few per frame from the old (immutable) grid, re-entering chunks are merged
+  back a few per frame (newer observations win), next-window arrays are
+  allocated ahead, layers are copied in one piece, and only the newest
+  recovery snapshot moves along → ~14 ms per move.
+- Blocked-path replans could still take ~2 s on a large, detailed map
+  (jump links are computed lazily): jumps only when the walk needed them,
+  bounded expansions.
+
+Quick suite (six homes, 5 min each, `house` profile) after round 2:
+coverage 69%, precision 91%, local precision 94% (noise floor without
+odometry drift: 97%), ghosts 3.1 m², falseFree 2.7%, frame error 8 cm
+(max 16 cm), map memory 65 MB, main-thread CPU 2.3 ms/frame mean.
+A first loop-closure attempt (match the recent frames against structure
+not re-observed for 15 s) made things *worse* (frame error 8 → 42 cm): the
+moment the camera sees the right copy of a wall again it becomes "recent"
+and drops out, leaving only stale ghost copies as "old structure" — so the
+check aligned the frame to the ghosts. Fix in round 3: date structure by
+when it *became* occupied (`born`), not when it was last seen.
+
+### Round 3 — a harder simulation; dating structure by birth
+
+Made the simulation harder (profile `house-hard`, 10-minute walks): 2.5%/m
+odometry drift through new territory with a larger yaw random walk, the
+tracker closing its own loops 5× less often, more tracking losses, pans of
+2–5 rad/s and more glances back. That breaks the system:
+
+| hard sim, 6 homes × 10 min | coverage | precision | local prec. | ghost m² | falseFree | frame err (max) | resets |
+|---|---|---|---|---|---|---|---|
+| round-2 system | 65% | 64% | 75% | 6.1 | 18% | 29 (69) cm | 2.2 |
+
+The local imprecision is almost all *old* structure: around the player,
+structure observed in the last 15 s is ~90% right, structure from earlier
+visits only 50–70% — the frame has drifted against it. Resets (2.2 per
+run) are the health monitor reacting to that contradiction by ageing or
+clearing the whole window.
+
+- Per voxel the map now keeps two time codes (packed in one Uint32): when
+  it last got occupancy evidence (`last`) and when it last *became*
+  occupied (`born`); archived sparsely (only voxels with evidence).
+- The loop check matches recent frames against structure *born* before them
+  (a wall seen again keeps its birth date; a doubled copy laid down by the
+  drifted frame is newborn and ignored). With that, loop-closure
+  realignments improve the frame error (e.g. 33→6, 23→9, 30→16 cm) instead
+  of worsening it — but they fire rarely (0–3 per 10 minutes).
+- Loop warp (pose graph lite): after a loop closure, structure last observed
+  between the old structure's birth and the closure moves by its share of
+  the correction (linear in distance walked), window and archive.
+- The tracker's own loop closures (a pose jump after which the view lines up
+  with older structure) warp what was mapped in between the same way
+  (`jumpWarp`).
+- Local recoveries: health resets forget only ~4 m around the player and
+  weaken the rest of the window (`localResetRadius`).
+
+### Round 4 — don't write what you can't place (hold on conflict)
+
+The loop check races the mapper: by the time two agreeing estimates exist
+(a few seconds), the drifted frames have already laid a second copy of the
+room over the first and eroded the original walls they look through. So the
+mapper now probes every depth frame before integrating it (~300 sampled
+precise readings: does the reading lie in space the map is sure is empty, or
+does its ray pass through an occupied voxel well before it?). In normal
+operation 0–15% of readings contradict the map; after a 30 cm frame shift
+30–100% do. A frame with ≥25% contradicting readings (and ≥40 probed) starts a
+*hold*: frames are kept in the replay buffer but not integrated until
+
+- the drift monitor finds the correction (matching the held frames against
+  structure born before the hold; a pose jump just before the hold that the
+  correction undoes is accepted on weaker support) → the frame is realigned,
+  the held frames are replayed corrected, what was mapped since the matched
+  structure's birth is warped;
+- or a view clearly agrees with the map again, or 3 s pass → the held frames
+  go in as they are (then no new hold for 8 s: the map may simply be out of
+  date — furniture moved).
+
+Unit test (`test/hold.test.ts`): a silent 30 cm frame shift in a scanned
+room is held, resolved (frame error < 8 cm) and leaves no second copy.
+
+### Round 5 — hold on conflict across six homes (house-hard, 600 s)
+
+Means over the quick suite at 2× length (6 homes, 600 s, fast pans):
+
+| config | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | resets |
+|---|---|---|---|---|---|---|---|
+| hard (round-3 system) | 66.2 | 58.5 | 73.9 | 8.8 | 17.5 | 42.8 | 2.3 |
+| + hold, loop closure 0.6 m | 71.1 | 71.6 | 72.8 | 5.7 | 10.9 | 19.3 | 1.7 |
+| + tracker-jump warp | 65.3 | 62.1 | 69.8 | 8.8 | 17.4 | 35.5 | 1.7 |
+| + stale erosion 30 s | 65.0 | 42.6 | 70.8 | 12.7 | 24.9 | 34.3 | 2.0 |
+
+Hold on conflict is the clear win; warping on the tracker's own jumps and
+fast erosion of stale structure both hurt and stay off.
+
+### Round 6 — a regression, bisected
+
+A set of "obvious" tweaks (resolve a hold on a single clear-cut estimate,
+hold up to 5 s, a tighter yaw search of ±0.06 rad) took precision from 72%
+to 45%. Bisect (same suite):
+
+| config | cover% | prec% | frameErr cm | resets |
+|---|---|---|---|---|
+| all tweaks | 61.3 | 39.1 | 56.5 | 2.2 |
+| − single-estimate resolution | 60.4 | 50.0 | 35.9 | 2.5 |
+| − that, yaw ±0.12 | 71.2 | 71.4 | 31.9 | 1.5 |
+| − that, 3 s hold, no candidate persistence | **74.3** | **70.7** | **27.5** | **1.2** |
+
+Lessons: real yaw drift after a long walk exceeds 0.06 rad, and a search
+that can't express it finds a wrong translation instead; one estimate is
+not enough even when it looks clear-cut (a doubled wall gives clear-cut
+wrong answers). Kept from the round: hold resolutions that undo a pose
+jump no longer warp the map in between (a jump moves the frame at once —
+what was mapped before it is fine). Diagnostics (`la-local-diag`): around
+the player, structure seen in the last 5 s is 84% within 8 cm of the truth,
+structure last seen over a minute ago only 50% — local error is old
+structure from a drifted past, not the mapper.
+
+### Round 7 — a jump detector that cried wolf; new defaults (d584fb0)
+
+The one home where hold + loop closure hurt on the easy profile (precision
+92→77%) traced to a hold "resolution" that undid what looked like a series
+of tracker jumps. They weren't jumps: the pose gate predicts each pose from
+the previous velocity and froze that velocity after a jump, so after a
+real change of walking speed *every* following frame was flagged (30 in a
+row), each extending the frame gate and each feeding `lastJump`. Now a
+residual that repeats is a change of speed: neither it nor the first one
+counts as a jump. In the bot's 30 s mapping walk: posJumps 53 → 2, frames
+gated 68 → 27. (A "trust the tracker's own corrections" rule tried first
+never fired once the jump log was clean, and was dropped.)
+
+Wider yaw search (±0.18 rad) helps again on the hard profile. With that,
+hold on conflict and loop closure (≤0.6 m) are now **on by default**:
+
+| profile | config | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | resets |
+|---|---|---|---|---|---|---|---|---|
+| house-hard 600 s | round-3 system | 66.2 | 58.5 | 73.9 | 8.8 | 17.5 | 42.8 | 2.3 |
+| house-hard 600 s | new defaults | 75.2 | 73.3 | 75.2 | 6.1 | 18.2 | 19.8 | 1.2 |
+| house 300 s | without hold/loop | 69.4 | 91.2 | 94.4 | 3.1 | 2.7 | 8.2 | 0.2 |
+| house 300 s | new defaults | 70.1 | 91.2 | 94.4 | 3.1 | 2.9 | 8.2 | 0.2 |
+
+One unit test's setup was made explicit rather than relying on timing:
+"a pet left floating in mid-air comes down" now lifts the pet while it
+stands still (with fewer spurious jumps the bot's game runs ahead, and a
+walking pet is put back on the floor by its gait, not by the health check
+under test). The assertions are unchanged.
+
+### Round 8 — breaking it again: long walks, camera-only depth; why loops don't close
+
+New defaults against harder conditions (house-hard, fast pans, 6 homes):
+
+| run | cover% | prec% | local% | ghost m² | falseFree% | frameErr cm | path coll% | map MB | resets |
+|---|---|---|---|---|---|---|---|---|---|
+| 10 min walks | 75.2 | 73.3 | 75.2 | 6.1 | 18.2 | 19.8 | 24.8 | 67 | 1.2 |
+| 20 min walks | 73.6 | 71.6 | 72.0 | 6.8 | 20.6 | 18.2 | 34.4 | 68 | 2.3 |
+| 20 min, local resets (4 m) | 76.8 | 69.5 | 72.0 | 7.8 | 24.5 | 21.7 | 49.4 | 70 | 3.0 |
+| 20 min, local resets (6 m) | 77.1 | 67.7 | 71.7 | 7.9 | 24.1 | 23.3 | 42.9 | 68 | 2.0 |
+| 10 min, camera-only depth | 23.2 | 68.8 | 81.5 | 1.7 | 5.8 | 23.6 | 5.5 | 56 | 0.3 |
+
+- Memory is flat with walk length (window + sparse archive); precision
+  holds at 20 min. Coverage plateaus: in the two largest homes a single
+  "tracking loss, couldn't realign → map cleared" takes coverage from
+  ~65% to ~35%, and it takes minutes to come back. Local resets keep
+  coverage but cost precision and pet-path safety (49% of sampled paths
+  touch real obstacles vs 34%), so they stay off.
+- Camera-only depth (no depth API: depth estimated from the image) is the
+  break point: a quarter of the home after 10 minutes. (Its CPU numbers in
+  node include the image depth estimation and aren't comparable.)
+- Default loop closure fired 0 times in 12 long runs. `scripts/la-loop-truth.ts`
+  puts each candidate next to the true correction (simulator ground truth):
+  in the 15×20 home only 7 of 28 candidates were within 10 cm, median error
+  22 cm, and several wrong ones were consistent and well supported (three
+  in a row pointing the opposite way of the truth — matching a doubled copy
+  of a wall laid down in another era). The two-agreeing-estimates gate is
+  what keeps those out; loosening it would make things worse. Reliable
+  loop closure needs a better estimator (matching against a single,
+  de-duplicated generation of the old structure, or richer features than
+  occupancy), not a looser gate.
+
+(continued below as rounds complete)

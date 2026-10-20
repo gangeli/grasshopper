@@ -19,8 +19,15 @@ describe('Voice', () => {
     v.yawn();
     v.sneeze();
     v.purr();
-    expect(v.played).toEqual(['giggle', 'giggle', 'greet', 'hop', 'jump', 'land', 'surprised', 'fanfare', 'tick', 'yawn', 'sneeze', 'purr']);
+    v.pet(0.5);
+    v.love();
+    expect(v.played).toEqual(['giggle', 'giggle', 'greet', 'hop', 'jump', 'land', 'surprised', 'fanfare', 'tick', 'yawn', 'sneeze', 'purr', 'pet', 'love']);
     expect(v.sampleBanksLoaded).toBe(0);
+  });
+
+  it('has the petting banks', () => {
+    expect(SAMPLE_BANKS.pet.length).toBeGreaterThanOrEqual(3);
+    expect(SAMPLE_BANKS.love.length).toBeGreaterThanOrEqual(2);
   });
 
   it('every sample file referenced exists in public/sfx', () => {

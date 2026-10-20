@@ -214,6 +214,6 @@ function mapPrecision(sim: Simulation): number {
 /** Map frame → where it really is: tracking frame (inverse correction) → reality (inverse injected jump). */
 function realFromMap(sim: Simulation): THREE.Matrix4 {
   const m2t = new THREE.Matrix4().fromArray(sim.world.mapToTracking());
-  const J = new THREE.Matrix4().fromArray(sim.sensor.jump);
+  const J = new THREE.Matrix4().fromArray(sim.sensor.trackingFromTruth());
   return J.invert().multiply(m2t);
 }

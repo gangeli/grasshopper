@@ -15,6 +15,7 @@ import { measurePoseSamples } from '../pet/poseSamples';
 import { HealthMonitor, type HealthOptions } from './Health';
 import { Companion, standingNode } from './Companion';
 import { Activities, HIDE_SEEK_MIN_AREA, type ActivityDef } from './Activities';
+import { Petting, type PetSound } from './Petting';
 
 /**
  * Game flow:
@@ -46,8 +47,12 @@ export type TapResult =
   | { kind: 'none' }
   /** Tapped the hidden pet while seeking. */
   | { kind: 'found' }
-  /** Tapped the pet while walking: it reacts. */
-  | { kind: 'pet'; reaction: ActionName }
+  /**
+   * Tapped (or stroked) the pet while walking: it is petted ('petted', with
+   * hearts and a purr), now and then reacts playfully (giggle, wave, a
+   * startled squeak), and after several pets does a happy celebration hop.
+   */
+  | { kind: 'pet'; reaction: ActionName; hearts: number; happiness: number; sound: PetSound; big: boolean; stroke: boolean }
   /** Tapped a reachable spot: Hopper walks to `target` (a nav node near `at`). */
   | { kind: 'goto'; target: Vec3; at: Vec3 }
   /** Tapped somewhere Hopper can't go: unmapped ('unknown') or no path ('noPath'). */
@@ -99,7 +104,8 @@ export class HideAndSeek {
   readonly companion: Companion;
   /** The activities menu (walk, hide and seek, ...). */
   readonly activities: Activities;
-  private lastReaction: ActionName | null = null;
+  /** Petting state: happiness builds up with repeated pets. */
+  readonly petting: Petting;
   private navTimer = 0;
   private relocated = false;
   private foundTimer = 0;
@@ -123,6 +129,8 @@ export class HideAndSeek {
     this.opts = { ...DEFAULTS, ...opts };
     this.rng = new Rng(this.opts.seed);
     this.health = new HealthMonitor(this, this.world, this.opts.health);
+    // Its own random stream, so petting never reshuffles the rest of the game.
+    this.petting = new Petting(new Rng(this.opts.seed * 104729 + 3));
     const game = this;
     this.companion = new Companion(
       {
@@ -257,12 +265,25 @@ export class HideAndSeek {
     if (this.phase !== 'roam') this.setPhase('roam');
   }
 
+  /** A graph for a replaced grid, being built in the background (see refreshNav). */
+  private pendingNav: NavGrid | null = null;
+
   refreshNav(force = false): NavGrid | null {
     if (!this.world.grid) return null;
     // The world replaces its grid when it rebuilds (floor correction, reset):
     // a nav graph bound to the old grid would freeze on a stale map forever.
-    if (!this.nav || this.nav.g !== this.world.grid) this.nav = new NavGrid(this.world);
-    else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh(!force); // routine refreshes may run in the background (browser)
+    if (!this.nav || this.nav.g !== this.world.grid) {
+      // The map window moved with the player (a new grid of the same map):
+      // build the new graph in the background and keep using the old one
+      // (its positions are still right) until it's ready.
+      if (this.nav && !force && NavGrid.background) {
+        if (!this.pendingNav || this.pendingNav.g !== this.world.grid) this.pendingNav = new NavGrid(this.world, {}, true);
+        if (this.pendingNav.builtVersion < 0) this.pendingNav.refresh(true);
+        if (this.pendingNav.builtVersion < 0) return this.nav;
+        this.nav = this.pendingNav;
+      } else this.nav = new NavGrid(this.world);
+      this.pendingNav = null;
+    } else if (force || this.nav.builtVersion !== this.world.grid.version) this.nav.refresh(!force); // routine refreshes may run in the background (browser)
     return this.nav;
   }
 
@@ -428,7 +449,15 @@ export class HideAndSeek {
     // keeps Hopper from walking into it.
     const nav = this.refreshNav();
     const m = this.move;
-    const path = nav?.findPath(this.pet.pos, m.goal);
+    // Bounded: when the way is truly blocked, an unbounded search would
+    // explore the whole graph (jump links included) before giving up —
+    // seconds on a large map. A detour is rarely more than a few times the
+    // direct distance.
+    // Jump links are worked out lazily and are the costly part of a search:
+    // consider them only if the way there needed one (or the goal is up on something).
+    const direct = Math.hypot(m.goal.x - this.pet.pos.x, m.goal.z - this.pet.pos.z);
+    const needJumps = this.pet.path.some((w) => w.jump) || Math.abs(m.goal.y - this.world.floorY) > 0.06;
+    const path = nav?.findPath(this.pet.pos, m.goal, 3 * direct + 4, needJumps ? 3000 : 12000, needJumps);
     if (path && path.length) this.pet.follow(path, m.cruise, m.action, m.yaw);
     else {
       // No way through right now: wait where we are (the obstacle may move away).
@@ -461,7 +490,7 @@ export class HideAndSeek {
         this.foundIt();
         return { kind: 'found' };
       }
-      if (this.phase === 'roam') return { kind: 'pet', reaction: this.reactToPoke() };
+      if (this.phase === 'roam') return this.petIt(o, d, false) ?? { kind: 'none' };
       return { kind: 'none' };
     }
     if (this.phase !== 'roam') return { kind: 'none' };
@@ -475,24 +504,53 @@ export class HideAndSeek {
     return toC.sub(d.clone().multiplyScalar(t)).length() < 0.17;
   }
 
-  /** Hopper was poked: a varied, happy reaction (never the same one twice in a row). */
-  private reactToPoke(): ActionName {
-    const options: ActionName[] = ['giggle', 'giggle', 'celebrate', 'wave', 'surprised'];
-    let a = this.companion.rng.pick(options);
-    if (a === this.lastReaction) a = this.companion.rng.pick(options.filter((x) => x !== a));
-    this.lastReaction = a;
+  /**
+   * A press held (or dragged) over Hopper, as a ray in the tracking frame:
+   * stroking. Call it every frame while the press lasts; each beat of the
+   * stroke (~0.5 s) counts as another pet. Only while walking, and only when
+   * the ray is on Hopper; otherwise returns { kind: 'none' }.
+   */
+  stroke(rayOrigin: Vec3, rayDir: Vec3): TapResult {
+    if (this.phase !== 'roam') return { kind: 'none' };
+    const o = toV3(this.world.toMapPoint(rayOrigin)), d = toV3(this.world.toMapDir(rayDir)).normalize();
+    if (!Number.isFinite(o.x + o.y + o.z + d.x + d.y + d.z) || !this.rayHitsPet(o, d)) return { kind: 'none' };
+    const r = this.petIt(o, d, true);
+    if (!r) return { kind: 'none' };
+    this.events.onTap?.(r);
+    return r;
+  }
+
+  /** Is the tracking-frame ray on Hopper (e.g. a press that may become a stroke)? */
+  rayOnPet(rayOrigin: Vec3, rayDir: Vec3): boolean {
+    const o = toV3(this.world.toMapPoint(rayOrigin)), d = toV3(this.world.toMapDir(rayDir)).normalize();
+    return Number.isFinite(o.x + o.y + o.z + d.x + d.y + d.z) && this.rayHitsPet(o, d);
+  }
+
+  /** Hopper was petted (tap or stroke beat); null if too soon after the last one. */
+  private petIt(o: THREE.Vector3, d: THREE.Vector3, stroke: boolean): TapResult | null {
+    const res = this.petting.pet(this.clock, stroke);
+    if (!res) return null;
+    const a = res.action;
     this.move = null;
-    this.pet.perform(a);
+    // Which side of Hopper the touch landed on (they lean into it).
+    const toC = this.pet.pos.clone().add(new THREE.Vector3(0, 0.15, 0)).sub(o);
+    const hit = o.clone().add(d.clone().multiplyScalar(Math.max(0, toC.dot(d))));
+    const left = new THREE.Vector3(Math.cos(this.pet.yaw), 0, -Math.sin(this.pet.yaw));
+    const lateral = hit.sub(this.pet.pos).dot(left);
+    this.anim.ctx.touchSide = Math.abs(lateral) < 0.02 ? this.anim.ctx.touchSide || 1 : Math.sign(lateral);
+    // Petting again while already being petted: keep the pose going (no restart jolt).
+    if (a === 'petted' && this.pet.state === 'perform' && this.anim.current === 'petted') this.pet.perform(a, 0.2, false);
+    else this.pet.perform(a, a === 'petted' ? 0.25 : 0.2);
     if (a === 'surprised') {
       // Startled, then a fit of giggles.
       this.addTimer(0.6, () => {
-        if (this.phase === 'roam' && this.pet.state === 'perform') this.anim.play('giggle', 0.15, true);
+        if (this.phase === 'roam' && this.pet.state === 'perform' && this.anim.current === 'surprised') this.anim.play('giggle', 0.15, true);
       });
     }
     // Turn to the player while reacting.
     if (this.lastView) this.pet.arriveYaw = Math.atan2(this.lastView.pos.x - this.pet.pos.x, this.lastView.pos.z - this.pet.pos.z);
-    this.companion.delay(a === 'surprised' ? 2.2 : 1.8);
-    return a;
+    this.companion.delay(a === 'celebrate' ? 2.6 : a === 'surprised' ? 2.2 : a === 'petted' ? 2.0 : 1.8);
+    return { kind: 'pet', reaction: a, hearts: res.hearts, happiness: res.happiness, sound: res.sound, big: res.big, stroke };
   }
 
   /**
@@ -607,6 +665,14 @@ export class HideAndSeek {
     if (!view) return;
     this.clock += dt;
     this.lastView = view;
+    // The map window follows the player; keep Hopper inside it when it can.
+    const pp = this.pet.pos;
+    if (Number.isFinite(pp.x + pp.z)) {
+      const k = (this.world.keepInWindow ??= { x: 0, y: 0, z: 0 });
+      k.x = pp.x;
+      k.y = pp.y;
+      k.z = pp.z;
+    } else this.world.keepInWindow = null;
     this.anim.lookTarget = new THREE.Vector3(view.pos.x, view.pos.y, view.pos.z);
     this.navTimer -= dt;
     // Nav rebuilds cost ~100ms+ on a phone: refresh while roaming (the map is
@@ -634,6 +700,7 @@ export class HideAndSeek {
         }
         break;
     }
+    this.petting.update(dt, this.clock);
     this.tickTimers(dt);
     this.guardPath(dt);
     this.pet.update(dt);
