@@ -4,7 +4,7 @@ import { decodeMap, encodeMap } from '../src/world/persist/codec';
 import { MapStore, MemoryKV } from '../src/world/persist/MapStore';
 import { exportLive, importLive, liveLattice } from '../src/world/persist/adapter';
 import { applyPose, composePose, invertPose, poseDelta, poseFromMatrix, poseToMatrix } from '../src/world/persist/pose';
-import { transformMap } from '../src/world/persist/Stitcher';
+import { forgottenChunksGen, liveEvidence, transformMap } from '../src/world/persist/Stitcher';
 import { fromSerialized, toSerialized } from '../src/world/persist/mapFormatBridge';
 import { extractFeatures, FragmentLookup } from '../src/world/persist/features';
 import { FragmentIndex, relocalize, runToEnd } from '../src/world/persist/Relocalizer';
@@ -134,6 +134,32 @@ describe('map persistence: frames and resampling', () => {
     expect(Buffer.from(world.grid!.data).equals(before)).toBe(true);
   });
 
+  it('sees the moving window and its archive as one map, exactly, on the session lattice', () => {
+    // A window smaller than the room: scanning moves it and archives chunks.
+    const world = new WorldModel({ halfExtent: 1.5 });
+    scanRoom(livingRoom(), undefined, { seed: 3, world });
+    expect(world.recenters).toBeGreaterThan(0);
+    expect(world.archive.size).toBeGreaterThan(0);
+    const m = exportLive(world)!;
+    // Same contents as the world model's own export (window + archive).
+    sameMap(m, fromSerialized(world.exportMap()!));
+    const lat = liveLattice(world)!;
+    let outside = 0;
+    for (const c of m.chunks.values()) if (c.cx * CS < lat.oi || c.cx * CS >= lat.oi + lat.nx || c.cz * CS < lat.ok || c.cz * CS >= lat.ok + lat.nz) outside++;
+    expect(outside).toBeGreaterThan(0);
+    // Replace with nothing (an undo of everything), then put it back: exact.
+    expect(importLive(world, emptyMap(m.res, m.ny, m.origin))).toBe(true);
+    expect(knownVoxels(exportLive(world)!)).toBe(0);
+    expect(importLive(world, m)).toBe(true);
+    sameMap(m, exportLive(world)!);
+    // The window moves on: still the same map. (Between moves the world
+    // model brings archived chunks back in, as follow() does over frames.)
+    world.moveWindow(1, 0);
+    world.loadPending();
+    world.moveWindow(0, -1);
+    sameMap(m, exportLive(world)!);
+  });
+
   it('converts losslessly to and from the world model exchange format (MapFormat)', () => {
     const { world } = scanRoom(livingRoom(), undefined, { seed: 5 });
     const direct = exportLive(world)!;
@@ -147,6 +173,30 @@ describe('map persistence: frames and resampling', () => {
     (w2.grid!.origin as { x: number; z: number }).z = world.grid!.origin.z;
     w2.importMap(toSerialized(direct), null, { mode: 'replace' });
     sameMap(direct, exportLive(w2)!);
+  });
+
+  it('own-evidence bookkeeping survives chunks the live map dropped', () => {
+    const mk = () => emptyMap(0.05, 4, { x: 0, y: 0, z: 0 });
+    const lo = mk(), base = mk(), now = mk();
+    const l = getOrCreateChunk(lo, 0, 0), b = getOrCreateChunk(base, 0, 0);
+    // Own: an obstacle; restored: free space all around it.
+    l.occ.fill(0);
+    l.occ[5] = 60;
+    b.occ.fill(-30);
+    b.occ[5] = 60;
+    b.observed.fill(1);
+    // The world model dropped the chunk; a few new free readings arrived since.
+    const n = getOrCreateChunk(now, 0, 0);
+    for (let q = 0; q < 40; q++) n.occ[q * 7] = -4;
+    const lost = runToEnd(forgottenChunksGen(now, base));
+    expect(lost).toEqual([chunkKey(0, 0)]);
+    // Without the rule, restored free space would come back as obstacles.
+    const naive = liveEvidence(now, base, lo);
+    expect(Array.from(naive.chunks.get(chunkKey(0, 0))!.occ).filter((v) => v >= 20).length).toBeGreaterThan(100);
+    const kept = { ...base, chunks: new Map(base.chunks) };
+    for (const k of lost) kept.chunks.delete(k);
+    const e = liveEvidence(now, kept, lo);
+    expect(Array.from(e.chunks.get(chunkKey(0, 0))!.occ).filter((v) => v >= 20).length).toBe(1);
   });
 
   it('a transform and its inverse bring a map back (nearest-voxel resampling)', () => {

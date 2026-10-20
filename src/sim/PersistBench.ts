@@ -4,8 +4,13 @@ import { MapStore, MemoryKV } from '../world/persist/MapStore';
 import { composePose, invertPose, poseDelta, type Pose2 } from '../world/persist/pose';
 import { makeHome, rearrange, type Home } from './Home';
 import { dressRoom } from './Realism';
+import { exportLive, liveLattice } from '../world/persist/adapter';
+import type { ChunkedMap } from '../world/persist/ChunkedMap';
 import { SimSession, storedMapQuality, type StoredMapQuality } from './MultiSession';
 import type { NoiseName, NoiseProfile } from './SimSensor';
+
+/** Bench diagnostics (env PERSIST_DIAG): live map quality over time, memory log, stored map quality per session. */
+const DIAG = !!(globalThis as { process?: { env: Record<string, string | undefined> } }).process?.env.PERSIST_DIAG;
 
 /**
  * Multi-session benchmark: a sequence of mapping sessions in one home, each
@@ -141,6 +146,7 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     const memory = new MapMemory(store, {
       log: (m) => {
         recent.push(`    [${session?.t.toFixed(1)}s] ${m}`);
+        if (DIAG) log(recent[recent.length - 1]);
         if (recent.length > 30) recent.shift();
       },
       onRestored: (info) => {
@@ -177,13 +183,59 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     session = new SimSession({ home, room: home.room, rooms, seconds: o.seconds ?? 60, seed: o.seed * 1000 + s, noise: o.noise, cameraDepth: o.cameraDepth, halfExtent: o.halfExtent });
     memory.attach(session.world);
     const budget = o.budgetMs ?? 8;
-    while (session.step()) memory.tick(session.t, o.stepBudget ? Infinity : budget, o.stepBudget ?? Infinity);
+    const diag = DIAG;
+    let nextDiag = 5;
+    const liveQ = () => {
+      const m = exportLive(session!.world);
+      return m ? storedMapQuality(m, home.room, session!.truth).precision.toFixed(3) : '-';
+    };
+    while (session.step()) {
+      memory.tick(session.t, o.stepBudget ? Infinity : budget, o.stepBudget ?? Infinity);
+      if (diag && session.t >= nextDiag) {
+        nextDiag += 5;
+        const r = session.world.recoveries;
+        const mm = memory as unknown as { evidence: { map: ChunkedMap } | null; tracker: { liveOnly: ChunkedMap; base: ChunkedMap } | null };
+        const q = (m: ChunkedMap | undefined) => (m ? storedMapQuality(m, home.room, session!.truth).precision.toFixed(3) : '-');
+        if (mm.tracker) {
+          // How the live map moved away from the bookkeeping base: forgotten voxels (known → 0), by place.
+          const now = exportLive(session.world)!, b = mm.tracker.base, L = liveLattice(session.world)!;
+          let forgot = 0, forgotOut = 0, gained = 0, changed = 0;
+          for (const [k, c] of b.chunks) {
+            const gch = now.chunks.get(k);
+            const out = c.cx * 16 < L.oi || c.cx * 16 >= L.oi + L.nx || c.cz * 16 < L.ok || c.cz * 16 >= L.ok + L.nz;
+            for (let qq = 0; qq < c.occ.length; qq++) {
+              const bv = c.occ[qq], gv = gch ? gch.occ[qq] : 0;
+              if (bv !== 0 && gv === 0) {
+                forgot++;
+                if (out) forgotOut++;
+              } else if (bv !== gv) changed++;
+            }
+          }
+          for (const [k, c] of now.chunks) if (!b.chunks.has(k)) for (let qq = 0; qq < c.occ.length; qq++) if (c.occ[qq]) gained++;
+          log(`    [${session.t.toFixed(0)}s] vs base: forgot ${forgot} (outside window ${forgotOut}), changed ${changed}, new chunks ${gained}`);
+        }
+        log(`    [${session.t.toFixed(0)}s] evidence ${q(mm.evidence?.map)} liveOnly ${q(mm.tracker?.liveOnly)} base ${q(mm.tracker?.base)}`);
+        log(`    [${session.t.toFixed(0)}s] live prec ${liveQ()} moves ${session.world.recenters} warps ${session.world.warps} epoch ${session.world.epoch} rec ${r.hard}/${r.soft}/${r.relevel}/${r.realign} links ${memory.links.length}`);
+      }
+    }
     // Leaving: finish what's running, save.
     const ts = performance.now();
     await memory.flush();
     const saveMs = performance.now() - ts;
     // Register the frame of a fragment this session created.
     if (store.list().some((f) => f.id === memory.sessionId)) fragTruth.set(memory.sessionId, session.truth);
+    if (DIAG) {
+      // Where a bad stored map comes from: the session's own map, or the save?
+      const live = exportLive(session.world);
+      const parts: string[] = [];
+      if (live) parts.push(`live prec ${storedMapQuality(live, home.room, session.truth).precision.toFixed(3)}`);
+      for (const f of store.list()) {
+        const ft = fragTruth.get(f.id);
+        const m = ft ? await store.load(f.id) : null;
+        if (m && ft) parts.push(`${f.id.slice(-4)} ${storedMapQuality(m, home.room, ft).precision.toFixed(3)}`);
+      }
+      log(`  diag after session ${s}: ${parts.join(', ')}`);
+    }
     for (const r of rooms) visited.add(r);
     const firstGood = restores.find((r) => !r.wrong);
     reports.push({
@@ -202,7 +254,7 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
       maxStep: memory.maxStep,
     });
     log(
-      `session ${s}: rooms ${rooms.join('+')} ${known ? 'known' : 'new'} → ${firstGood ? `restored at ${firstGood.t.toFixed(0)}s` : 'no restore'}${restores.some((r) => r.wrong) ? ' WRONG RESTORE' : ''}; fragments ${store.list().length}, ${(store.totalBytes / 1024).toFixed(0)}KB, save ${saveMs.toFixed(0)}ms load ${loadMs.toFixed(0)}ms busy ${memory.busyMs.toFixed(0)}ms (max tick ${memory.maxTickMs.toFixed(1)}ms, max step ${memory.maxStep.ms.toFixed(1)}ms in ${memory.maxStep.job}) ${memory.status.lastReason}`,
+      `session ${s}: rooms ${rooms.join('+')} ${known ? 'known' : 'new'} → ${firstGood ? `restored at ${firstGood.t.toFixed(0)}s` : 'no restore'}${restores.some((r) => r.wrong) ? ' WRONG RESTORE' : ''}; fragments ${store.list().length}, ${(store.totalBytes / 1024).toFixed(0)}KB, save ${saveMs.toFixed(0)}ms load ${loadMs.toFixed(0)}ms busy ${memory.busyMs.toFixed(0)}ms (max tick ${memory.maxTickMs.toFixed(1)}ms, max step ${memory.maxStep.ms.toFixed(1)}ms in ${memory.maxStep.job})${session.world.recenters ? `, window moves ${session.world.recenters}` : ''} ${memory.status.lastReason}`,
     );
   }
   // Final map quality per stored fragment.

@@ -7,7 +7,7 @@ import { runToEnd, type Work } from './gen';
 import { MapStore, type FragmentMeta } from './MapStore';
 import { composePose, invertPose, isFinitePose, poseDelta, type Pose2 } from './pose';
 import { FragmentIndex, relocalize, verifyPose, type RelocOptions, type RelocResult, type VerifyMetrics } from './Relocalizer';
-import { combinePriorGen, fuseEvidenceGen, liveEvidenceGen, transformMapGen } from './Stitcher';
+import { combinePriorGen, forgottenChunksGen, fuseEvidenceGen, liveEvidenceGen, transformMapGen } from './Stitcher';
 
 /**
  * Remembering rooms across sessions.
@@ -59,6 +59,8 @@ export interface MemoryOptions {
   confirmChecks: number;
   /** Bad checks (in a row) that undo a restore. */
   undoAfter: number;
+  /** Own evidence must agree this well with a stored map (at save time) to be folded into it. */
+  saveMinInlier: number;
   /** Observed floor (m²) before a session is worth saving on its own. */
   minSaveArea: number;
   /** Observed floor (m²) before searching. */
@@ -77,6 +79,7 @@ export const DEFAULT_MEMORY: MemoryOptions = {
   confirmAfter: 15,
   confirmChecks: 3,
   undoAfter: 2,
+  saveMinInlier: 0.85,
   minSaveArea: 4,
   minSearchArea: 1.0,
   perAttempt: 3,
@@ -436,7 +439,23 @@ export class MapMemory {
     const g = yield* this.source!.exportGen();
     if (!g) return null;
     const tr = this.tracker;
-    const e = tr ? yield* liveEvidenceGen(g, tr.base, tr.liveOnly) : g;
+    let base = tr?.base ?? null;
+    if (tr) {
+      // Chunks the world model dropped (not a reported rewrite): there,
+      // "now − base" would invert the restored maps. Count what the live map
+      // holds there now as the session's own, and re-base + re-apply the
+      // restored maps (fill-only) on the next tick.
+      const lost = yield* forgottenChunksGen(g, tr.base);
+      if (tr !== this.tracker) return null;
+      if (lost.length) {
+        base = { ...tr.base, chunks: new Map(tr.base.chunks) };
+        for (const k of lost) base.chunks.delete(k);
+        this.log(`live map dropped ${lost.length} chunks: re-basing, re-applying restored maps`);
+        this.needRebase = true;
+        this.reapplyAfter = true;
+      }
+    }
+    const e = tr && base ? yield* liveEvidenceGen(g, base, tr.liveOnly) : g;
     // The bookkeeping may have been re-based meanwhile (then this is stale).
     if (tr !== this.tracker) return null;
     this.evidence = { t: this.now, map: e };
@@ -465,11 +484,11 @@ export class MapMemory {
     return f.index;
   }
 
-  /** A fragment transformed into the live grid's frame and lattice (clipped to the grid). */
+  /** A fragment transformed into the live map's frame and lattice (window and archive alike). */
   private *priorGen(f: Frag, pose: Pose2): Work<ChunkedMap | null> {
     const lat = this.source!.lattice();
     if (!lat) return null;
-    return yield* transformMapGen(f.map, invertPose(pose), lat, { i0: 0, k0: 0, i1: lat.nx, k1: lat.nz });
+    return yield* transformMapGen(f.map, invertPose(pose), lat);
   }
 
   // --- Jobs ----------------------------------------------------------------------------
@@ -701,7 +720,28 @@ export class MapMemory {
       if (f) writes.push({ id, map: f.map, area: f.meta.area, sessions: f.meta.sessions });
     }
     this.restoreStored.clear();
-    const confirmed = this.links.filter((l) => l.confirmed);
+    let confirmed = this.links.filter((l) => l.confirmed);
+    if (confirmed.length) {
+      // Last line of defence for the stored maps: fold the session in only
+      // if its own evidence still agrees with them *now* (a live map damaged
+      // since the last check — e.g. chunks the world model dropped — must
+      // not be written into a good stored map).
+      const live = yield* this.liveSearchData(e);
+      const agreeing: Link[] = [];
+      for (const l of confirmed) {
+        const f = this.fragments.get(l.fragment);
+        if (!f) continue;
+        const m = verifyPose(live, yield* this.fragIndex(f), l.fusePose ?? l.pose);
+        if (m.inlier >= this.opts.saveMinInlier) agreeing.push(l);
+        else this.log(`${l.fragment}: own evidence disagrees now (inlier ${m.inlier.toFixed(2)}): not folded in this time`);
+      }
+      if (!agreeing.length) {
+        if (writes.length) for (const wr of writes) wr.body = yield* encodeBody(wr.map);
+        if (writes.length) this.writing = this.write(writes, []).finally(() => (this.writing = null));
+        return;
+      }
+      confirmed = agreeing;
+    }
     if (confirmed.length) {
       const P = confirmed[0];
       const pf = this.fragments.get(P.fragment)!;

@@ -192,6 +192,31 @@ export function* fuseEvidenceGen(m: ChunkedMap, e: ChunkedMap, per = 6): Work<Ch
   return out;
 }
 
+/**
+ * Chunks the live map has (mostly) forgotten since `base`: at least `minKnown`
+ * voxels known in base, and `frac` of them unknown (0) now. The world model
+ * doesn't zero voxels during normal mapping (rays and hits change them
+ * gradually; its own resets are reported through its counters), so this
+ * means data was dropped — e.g. archived chunks lost when the window moved
+ * twice in quick succession.
+ */
+export function* forgottenChunksGen(now: ChunkedMap, base: ChunkedMap, minKnown = 200, frac = 0.6, per = 8): Work<number[]> {
+  const y = every(per);
+  const out: number[] = [];
+  for (const [key, b] of base.chunks) {
+    if (y()) yield;
+    const g = now.chunks.get(key);
+    let known = 0, lost = 0;
+    for (let q = 0; q < b.occ.length; q++) {
+      if (b.occ[q] === 0) continue;
+      known++;
+      if (!g || g.occ[q] === 0) lost++;
+    }
+    if (known >= minKnown && lost >= frac * known) out.push(key);
+  }
+  return out;
+}
+
 export function liveEvidence(now: ChunkedMap, base: ChunkedMap, liveOnly: ChunkedMap): ChunkedMap {
   return runToEnd(liveEvidenceGen(now, base, liveOnly));
 }
@@ -200,19 +225,40 @@ export function liveEvidence(now: ChunkedMap, base: ChunkedMap, liveOnly: Chunke
  * The session's own evidence: liveOnly + (now − base), voxel by voxel, where
  * `base` is the live grid right after the last restore and `liveOnly` the
  * session's own evidence at that moment.
+ *
+ * Columns the live map has forgotten entirely (known in `base`, nothing at
+ * all now — the world model dropped them, e.g. an archived chunk lost when
+ * its window moved) keep `liveOnly`: "now − base" there would turn every
+ * restored free voxel into an obstacle and every restored obstacle into
+ * free space.
  */
 export function* liveEvidenceGen(now: ChunkedMap, base: ChunkedMap, liveOnly: ChunkedMap, per = 6): Work<ChunkedMap> {
   const y = every(per);
   const out = emptyMap(now.res, now.ny, now.origin);
   const ny = now.ny;
+  const forgot = new Uint8Array(CS2);
   for (const key of keysOf(now, base, liveOnly)) {
     if (y()) yield;
     const g = now.chunks.get(key), b = base.chunks.get(key), lo = liveOnly.chunks.get(key);
     const ref = g ?? b ?? lo!;
     const c = newChunk(ref.cx, ref.cz, ny);
     let any = false;
+    // Forgotten columns: base knew something, now holds nothing.
+    let anyForgot = false;
+    if (b) {
+      for (let q = 0; q < CS2; q++) forgot[q] = g?.observed[q] ? 0 : 1;
+      if (g)
+        for (let q = 0; q < CS2 * ny; q++) if (g.occ[q] !== 0) forgot[q % CS2] = 0;
+      for (let q = 0; q < CS2; q++) {
+        if (!forgot[q]) continue;
+        let known = b.observed[q] !== 0;
+        for (let j = 0; j < ny && !known; j++) if (b.occ[j * CS2 + q] !== 0) known = true;
+        forgot[q] = known ? 1 : 0;
+        if (known) anyForgot = true;
+      }
+    }
     for (let q = 0; q < CS2 * ny; q++) {
-      const v = clampLO((lo ? lo.occ[q] : 0) + (g ? g.occ[q] : 0) - (b ? b.occ[q] : 0));
+      const v = anyForgot && forgot[q % CS2] ? (lo ? lo.occ[q] : 0) : clampLO((lo ? lo.occ[q] : 0) + (g ? g.occ[q] : 0) - (b ? b.occ[q] : 0));
       c.occ[q] = v;
       if (v) any = true;
     }

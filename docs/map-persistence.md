@@ -238,8 +238,8 @@ persistence layer still needs from the interface:
    from the frame loop. `exportMap()` copies everything at once (~50 ms for a 12 m grid
    on a laptop). Wanted: `exportMap({ since: version })` returning only chunks changed
    since a version (dirty-chunk tracking), or an export that can be resumed over frames.
-   Until then snapshots copy the window grid in slices (and so don't include archived
-   chunks once the grid becomes a moving window).
+   Until then snapshots copy the window grid in slices and read the archive
+   (`world.archive`, ChunkStore) chunk by chunk, so they cover the whole live map.
 3. **Per-chunk last-observed time / session count** would let stored evidence decay where
    it hasn't been seen for many sessions (stale furniture) instead of keeping it forever.
 4. **Grid-rewrite notifications**: today MapMemory infers relevel / realign / aging /
@@ -248,6 +248,20 @@ persistence layer still needs from the interface:
 5. Restored evidence is capped at log-odds 44 (below STRONG_OCC) so it never counts as a
    "contradiction" in the drift/health checks; `importMap`'s `weight` scales differently —
    fine to keep, but the cap should be preserved if imports move to `importMap`.
+6. **A public lattice accessor**: the window's lattice (session origin + window offset)
+   is private (`lattice()`); the adapter reads it through the index escape hatch.
+   Wanted: a read-only `window: { originX, originZ, oi, ok }` (or `lattice()` public).
+7. **Exact replace in the archive** keeps hit times only for chunks the import doesn't
+   change (the adapter compares and skips those); rewritten archive chunks lose their
+   hit times, so a later loop-closure warp won't move those voxels. A ChunkStore call
+   that replaces data but keeps hit times where occupancy stays positive would fix it.
+8. **Bug (world model)**: a chunk that enters the window and leaves it again before its
+   pending archive load was merged (`loadPending`) is archived from the window, where it
+   is empty, and so deleted from the archive — its data is lost. Happens with two window
+   moves within a few frames (fast walk, tracking jump). The adapter calls
+   `loadPending()` before every export/import, which avoids it on those paths only
+   (a stop-gap on this side; the fix belongs in `moveWindow` and is with the world
+   model's owner — the call stays useful for imports either way, see adapter.ts).
 
 ### Round 8 — B1–B3: worker budget, wrong restores found and closed
 
@@ -316,3 +330,23 @@ placement is re-refined at every verification and the latest one is used for fus
   S0c: 1 restore of 30 sessions (correct), **0 wrong** — refusing is the right answer in a
   home of identical bare rooms.
 * Standard bench after these (B4): 64% relocalized (B3: 66%), 0 wrong, error 1.6 / 3.2 cm.
+
+### Round 11 — camera-only depth (C1: motion-stereo depth, no depth sensor)
+
+Same bench with depth from the simulated camera (sparser, noisier, slower to fill):
+**53% relocalized, 0 wrong** (B4: 64%). The misses are sessions whose map never reaches
+the overlap / furniture minimums in 60 s; nothing needed loosening.
+
+### Round 12 — big drift (J1: 3× more relocalization jumps, 2.5× bigger, more tracking loss)
+
+**62% relocalized, 0 wrong**, alignment error p90 12.8 cm (B4: 3.2 cm). The tail comes
+from sessions whose own map is bent by a jump the drift monitor didn't fully undo: the
+rigid placement fits the larger part. Undo never fired on a correct restore.
+
+### Round 13 — storage faults (F1: 1.2 MB quota, 40% chance per session of a corrupted record)
+
+First run: a full store made every later save fail (quota errors) — the map stopped
+learning. → `MapStore.makeRoom`: on QuotaExceededError drop backup generations, then the
+smallest other fragments, and retry (up to 4×); the newest save always wins. Corrupted
+records fall back to the backup generation or are skipped. **50% relocalized, 0 wrong,
+no crashes**, every session's faults handled.

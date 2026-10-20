@@ -1,6 +1,6 @@
 import type { WorldModel } from '../WorldModel';
 import type { ChunkedMap } from './ChunkedMap';
-import { exportLiveGen, gridId, importLive, liveLattice, liveObservedColumns, sameStamp, worldStamp, type LiveStamp } from './adapter';
+import { exportLiveGen, importLive, liveId, liveLattice, liveObservedColumns, sameStamp, worldStamp, type LiveStamp } from './adapter';
 import type { MemoryHooks, MemoryOptions, MemoryStatus } from './MapMemory';
 import type { FragmentMeta } from './MapStore';
 import type { HostMessage, PortLike, WorkerMessage } from './MemoryWorkerCore';
@@ -62,7 +62,7 @@ export class MemoryClient {
         break;
       case 'import': {
         const t0 = performance.now();
-        const ok = gridId(this.world.grid) === m.expectGrid && importLive(this.world, m.map);
+        const ok = liveId(this.world) === m.expectGrid && importLive(this.world, m.map);
         if (ok) this.hooks.onMapChanged?.();
         this.busyMs += performance.now() - t0;
         this.send({ type: 'imported', id: m.id, ok, stamp: worldStamp(this.world) });
