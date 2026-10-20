@@ -390,7 +390,7 @@ function countClusters(cells: Map<number, number>, min: number): number {
 
 /** Wall samples facing the weakest direction needed for walls alone to pin the pose. */
 export const MIN_WALL_WEAK = 40;
-export const DEFAULT_ACCEPT = { minOverlap: 300, minInlier: 0.8, minExplained: 0.5, maxAmbiguity: 0.7 };
+export const DEFAULT_ACCEPT = { minOverlap: 300, minInlier: 0.9, minExplained: 0.5, maxAmbiguity: 0.4 };
 
 /** Is this verified candidate (with this runner-up) strong, unambiguous evidence? */
 export function judge(best: Candidate | null, ambiguity: number, o: RelocOptions = {}): { ok: boolean; reason: string } {

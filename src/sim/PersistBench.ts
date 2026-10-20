@@ -32,6 +32,8 @@ export interface BenchOptions {
   twoRoomChance?: number;
   /** Background work per 10Hz step (ms). */
   budgetMs?: number;
+  /** Instead of a time budget: this many work slices per 10Hz step (deterministic runs). */
+  stepBudget?: number;
   memory?: Partial<MemoryOptions>;
   cameraDepth?: boolean;
   /** Live grid half extent (m). */
@@ -76,6 +78,9 @@ export interface BenchReport {
   wrongRestores: number;
   wrongKept: number;
   restores: number;
+  /** Stored fragments stitched offline, and how many of those were wrong. */
+  stitches: number;
+  wrongStitches: number;
   meanErrCm: number;
   meanErrDeg: number;
   fragments: number;
@@ -93,6 +98,7 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
   /** room → fragment frame, per fragment id. */
   const fragTruth = new Map<string, Pose2>();
   const visited = new Set<number>();
+  const stitches: { wrong: boolean; errCm: number }[] = [];
   const reports: SessionReport[] = [];
   const log = o.log ?? (() => undefined);
   for (let s = 0; s < o.sessions; s++) {
@@ -113,7 +119,12 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     const store = await MapStore.open(kv);
     const restores: RestoreEvent[] = [];
     let session: SimSession | null = null;
+    const recent: string[] = [];
     const memory = new MapMemory(store, {
+      log: (m) => {
+        recent.push(`    [${session?.t.toFixed(1)}s] ${m}`);
+        if (recent.length > 30) recent.shift();
+      },
       onRestored: (info) => {
         const ft = fragTruth.get(info.fragment);
         if (!ft || !session) return;
@@ -127,6 +138,15 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
         const ev = { session: s, t: session.t, fragment: info.fragment, errCm: d.dist * 100, errDeg: (d.dyaw * 180) / Math.PI, wrong: d.dist > 0.2 || d.dyaw > 0.06, undone: false };
         restores.push(ev);
         log(`  session ${s} t=${session.t.toFixed(0)}s restored ${info.fragment}: err ${ev.errCm.toFixed(1)}cm ${ev.errDeg.toFixed(2)}°${ev.wrong ? '  <<< WRONG' : ''}`);
+        if (ev.wrong) for (const l of recent) log(l);
+      },
+      onStitched: (info) => {
+        const tb = fragTruth.get(info.base), to = fragTruth.get(info.other);
+        if (!tb || !to) return;
+        const d = poseDelta(info.pose, composePose(tb, invertPose(to)));
+        const wrong = d.dist > 0.2 || d.dyaw > 0.06;
+        stitches.push({ wrong, errCm: d.dist * 100 });
+        log(`  session ${s} stitched stored ${info.other} into ${info.base}: err ${(d.dist * 100).toFixed(1)}cm${wrong ? '  <<< WRONG' : ''}`);
       },
       onUndone: (info) => {
         const ev = [...restores].reverse().find((r) => r.fragment === info.fragment && !r.undone);
@@ -139,7 +159,7 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     session = new SimSession({ home, room: home.room, rooms, seconds: o.seconds ?? 60, seed: o.seed * 1000 + s, noise: o.noise, cameraDepth: o.cameraDepth, halfExtent: o.halfExtent });
     memory.attach(session.world);
     const budget = o.budgetMs ?? 8;
-    while (session.step()) memory.tick(session.t, budget);
+    while (session.step()) memory.tick(session.t, o.stepBudget ? Infinity : budget, o.stepBudget ?? Infinity);
     // Leaving: finish what's running, save.
     const ts = performance.now();
     await memory.flush();
@@ -187,6 +207,8 @@ export async function runBench(o: BenchOptions): Promise<BenchReport> {
     wrongRestores: all.filter((r) => r.wrong).length,
     wrongKept: all.filter((r) => r.wrong && !r.undone).length,
     restores: all.length,
+    stitches: stitches.length,
+    wrongStitches: stitches.filter((x) => x.wrong).length,
     meanErrCm: good.length ? good.reduce((a, r) => a + r.errCm, 0) / good.length : NaN,
     meanErrDeg: good.length ? good.reduce((a, r) => a + r.errDeg, 0) / good.length : NaN,
     fragments: store.list().length,

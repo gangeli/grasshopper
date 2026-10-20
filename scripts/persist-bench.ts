@@ -31,6 +31,7 @@ for (let seed = s0; seed <= (s1 ?? s0); seed++) {
     newRoomChance: Number(opt('newRoom', '0.35')),
     twoRoomChance: Number(opt('twoRoom', '0.4')),
     budgetMs: Number(opt('budget', '8')),
+    stepBudget: opt('steps') ? Number(opt('steps')) : undefined,
     halfExtent: opt('extent') ? Number(opt('extent')) : undefined,
     log: quiet ? undefined : (s) => console.log(s),
   };
@@ -57,6 +58,8 @@ for (let seed = s0; seed <= (s1 ?? s0); seed++) {
         wrong: r.wrongRestores,
         wrongKept: r.wrongKept,
         restores: r.restores,
+        stitches: r.stitches,
+        wrongStitches: r.wrongStitches,
         ttr: known.filter((x) => x.restoredAt !== null).map((x) => x.restoredAt),
         err: r.sessions.flatMap((x) => x.restores.filter((e) => !e.wrong).map((e) => e.errCm)),
         deg: r.sessions.flatMap((x) => x.restores.filter((e) => !e.wrong).map((e) => e.errDeg)),

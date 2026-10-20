@@ -31,7 +31,7 @@ def judge(m, amb, P):
             return False, 'walls weak'
     return True, 'ok'
 
-P = dict(minOverlap=300, minInlier=0.8, minExplained=0.5, maxAmb=0.7, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12)
+P = dict(minOverlap=300, minInlier=0.9, minExplained=0.5, maxAmb=0.4, furnMinN=100, maxFurn=0.35, minWallWeak=40, minObjects=3, maxLowConf=0.1, maxBwdLowConf=0.12)
 for a in sys.argv[1:]:
     if '=' in a:
         k, v = a.split('=')

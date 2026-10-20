@@ -30,6 +30,7 @@ err = [e for h in homes for e in h['err']]
 deg = [e for h in homes for e in h['deg']]
 q = [x for h in homes for x in h['quality']]
 print(f"homes {len(homes)}  relocalized {ok}/{known} sessions ({100 * ok / max(1, known):.0f}%)  WRONG restores {wrong} (kept {kept}) of {restores}  undos {sum(h['undos'] for h in homes)}")
+print(f"offline stitches {sum(h.get('stitches', 0) for h in homes)} (WRONG {sum(h.get('wrongStitches', 0) for h in homes)})")
 print(f"time to relocalize: mean {mean(ttr):.1f}s median {pct(ttr, 0.5):.1f}s p90 {pct(ttr, 0.9):.1f}s")
 print(f"alignment error: mean {mean(err):.1f}cm / {mean(deg):.2f}°, p90 {pct(err, 0.9):.1f}cm, max {max(err) if err else float('nan'):.1f}cm")
 print(f"fragments per home {mean([h['fragments'] for h in homes]):.1f}, storage {mean([h['bytes'] for h in homes]) / 1024:.0f}KB, coverage (largest fragment) {100 * mean([h['coverage'] for h in homes]):.0f}%")

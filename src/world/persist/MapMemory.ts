@@ -38,12 +38,16 @@ export interface MemoryHooks {
   /** The live grid's contents were replaced (rebuild nav / occluder). */
   onMapChanged?(): void;
   onSaved?(info: { fragment: string; bytes: number; ms: number }): void;
+  /** Two stored fragments were stitched: `other` (gone) placed into `base` by `pose` (other → base). */
+  onStitched?(info: { base: string; other: string; pose: Pose2 }): void;
   log?(msg: string): void;
 }
 
 export interface MemoryOptions {
   /** Seconds between relocalization attempts. */
   attemptEvery: number;
+  /** Seconds between tries at stitching two stored fragments (when nothing else is due). */
+  consolidateEvery: number;
   /** Seconds between re-verifications of a restore. */
   verifyEvery: number;
   /** Seconds between saves. */
@@ -66,6 +70,7 @@ export interface MemoryOptions {
 
 export const DEFAULT_MEMORY: MemoryOptions = {
   attemptEvery: 4,
+  consolidateEvery: 20,
   verifyEvery: 5,
   saveEvery: 30,
   agree: 2,
@@ -213,7 +218,8 @@ export class MapMemory {
   }
 
   /** Run background work for up to `budgetMs` (call every frame). */
-  tick(now: number, budgetMs = 3): void {
+  tick(now: number, budgetMs = 3, maxSteps = Infinity): void {
+    let steps = 0;
     const t0 = performance.now();
     this.now = now;
     try {
@@ -230,7 +236,7 @@ export class MapMemory {
           this.job = null;
           break;
         }
-        if (performance.now() - t0 >= budgetMs || src.waiting) break;
+        if (performance.now() - t0 >= budgetMs || src.waiting || ++steps >= maxSteps) break;
       }
     } catch (e) {
       // Never let persistence break the game: drop the job and carry on.
@@ -280,7 +286,64 @@ export class MapMemory {
       this.jobName = 'save';
       return this.saveJob();
     }
+    if (this.store && now >= this.nextConsolidate && !this.writing) {
+      this.nextConsolidate = now + this.opts.consolidateEvery;
+      const pair = this.nextPair();
+      if (pair) {
+        this.jobName = 'consolidate';
+        return this.consolidateJob(pair[0], pair[1]);
+      }
+    }
     return null;
+  }
+
+  // --- Offline stitching ------------------------------------------------------------
+  private nextConsolidate = 0;
+  private compared = new Set<string>();
+
+  /** Two stored fragments (neither in use this session) not compared yet in their current versions. */
+  private nextPair(): [Frag, Frag] | null {
+    const idle = [...this.fragments.values()].filter((f) => f.meta.id !== this.sessionId && !this.absorbed.has(f.meta.id) && !this.links.some((l) => l.fragment === f.meta.id));
+    for (let a = 0; a < idle.length; a++)
+      for (let b = a + 1; b < idle.length; b++) {
+        const key = `${idle[a].meta.id}:${idle[a].meta.gen}|${idle[b].meta.id}:${idle[b].meta.gen}`;
+        if (this.compared.has(key)) continue;
+        this.compared.add(key);
+        return [idle[a], idle[b]];
+      }
+    return null;
+  }
+
+  /**
+   * Two stored fragments of the same place (sessions that never recognised
+   * it) become one. Stricter than a live restore — no live check follows:
+   * the search must agree from both sides, with a clear margin, and the
+   * walls (or several pieces of furniture) must pin the placement.
+   */
+  private *consolidateJob(X: Frag, Y: Frag): Job {
+    const ix = yield* this.fragIndex(X), iy = yield* this.fragIndex(Y);
+    const r1: RelocResult = yield* relocalize({ features: ix.features, lookup: ix.lookup }, iy, this.opts.reloc);
+    const m = r1.best?.metrics;
+    if (!r1.accepted || !r1.best || !m || r1.ambiguity > 0.5 || (m.wallWeak < 80 && m.lowObjects < 3)) return;
+    const back = invertPose(r1.best.pose);
+    const r2: RelocResult = yield* relocalize({ features: iy.features, lookup: iy.lookup }, ix, { ...this.opts.reloc, hint: [back, ...r1.candidates.slice(1).map(invertPose)] });
+    if (!r2.accepted || !r2.best) return;
+    const d = poseDelta(r2.best.pose, back);
+    if (d.dist > 0.1 || d.dyaw > 0.035) return;
+    // Keep the bigger fragment's frame; fold the other one in.
+    const [base, other, T] = Y.meta.area >= X.meta.area ? [Y, X, r1.best.pose] : [X, Y, back];
+    const map = yield* fuseEvidenceGen(base.map, yield* transformMapGen(other.map, T, base.map));
+    const area = observedColumns(map) * map.res * map.res;
+    const body = yield* encodeBody(map);
+    this.log(`stitched stored ${other.meta.id} into ${base.meta.id}`);
+    this.hooks.onStitched?.({ base: base.meta.id, other: other.meta.id, pose: T });
+    this.absorbed.add(other.meta.id);
+    base.map = map;
+    base.index = null;
+    this.fragments.delete(other.meta.id);
+    this.status.fragments = this.fragments.size;
+    const sessions = base.meta.sessions + other.meta.sessions;
+    this.writing = this.write([{ id: base.meta.id, map, area, sessions, created: Math.min(base.meta.created, other.meta.created), body }], [other.meta.id]).finally(() => (this.writing = null));
   }
 
   // --- Live evidence bookkeeping --------------------------------------------------
@@ -436,6 +499,16 @@ export class MapMemory {
         this.status.lastReason = `${id}: placement was undone earlier`;
         continue;
       }
+      // Rooms already restored this session must agree with this one where
+      // the two stored maps overlap (two maps claiming the same space with
+      // different contents can't both be right).
+      const clash = yield* this.clashWithLinks(f, index, best.pose);
+      if (clash) {
+        this.status.lastReason = `${id}: ${clash}`;
+        this.log(`${id}: no (${clash})`);
+        this.hyps.delete(id);
+        continue;
+      }
       const h = this.hyps.get(id);
       const occ = live.features.occTotal + live.features.freeTotal;
       const rivals = r.candidates.filter((p) => poseDelta(p, best.pose, at).dist > 0.3 || poseDelta(p, best.pose, at).dyaw > 0.09).slice(0, 4);
@@ -466,6 +539,22 @@ export class MapMemory {
       }
       yield;
     }
+  }
+
+  /** Why placing fragment f at `pose` (live → f) contradicts a restored fragment, or null. */
+  private *clashWithLinks(f: Frag, index: FragmentIndex, pose: Pose2): Work<string | null> {
+    for (const l of this.links) {
+      const pf = this.fragments.get(l.fragment);
+      if (!pf || pf === f) continue;
+      const pIndex = yield* this.fragIndex(pf);
+      const T = composePose(l.pose, invertPose(pose)); // f → live → P
+      const m = verifyPose({ features: index.features, lookup: index.lookup }, pIndex, T);
+      yield;
+      if (m.fwdKnown < 150) continue; // they don't overlap: neighbouring rooms
+      const furnN = m.lowN + m.bwdLowN, furnBad = (m.lowConf + m.bwdLowConf) / Math.max(1, furnN);
+      if (m.inlier < 0.75 || (furnN >= 100 && furnBad > 0.35)) return `contradicts restored ${l.fragment} (inlier ${m.inlier.toFixed(2)})`;
+    }
+    return null;
   }
 
   /** Restore fragment f into the live grid at `pose` (live → fragment); `e` = the session's own evidence. */

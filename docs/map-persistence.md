@@ -180,3 +180,95 @@ See below (newest last).
   restored within 40 s, **0 wrong**.
 * Response: walls-only matches (fewer than 2 pieces of furniture agreeing) need a third
   agreeing look.
+
+### Round 6 — the multi-session benchmark, first run (B0)
+
+8 homes (2×2 rooms, dressed: blank walls, dark sofas, glass, mirrors, clutter, a person
+walking through), 8 sessions of 60 s each, 'real' noise, furniture moved before 30% of
+sessions, 35% of sessions start in a room never mapped, 40% walk through two rooms. Each
+session gets 8 ms of memory work per 100 ms (main-thread slicing).
+
+| metric | B0 |
+|---|---|
+| sessions in a known room that relocalized | 4 / 44 (9%) |
+| wrong restores | 0 |
+| time to relocalize | 43 s mean |
+| alignment error | 1.0 cm / 0.21° |
+| fragments per home after 8 sessions | 7.9 |
+| stored size | 1.8 MB |
+| precision / wall precision of stored maps | 0.957 / 0.992 |
+
+Safe but nearly useless. Two causes: CPU (a search took ~1 s of desktop CPU, i.e. more
+than 10 s of sliced work; sessions ran out of time), and partial overlaps (the "explained"
+share counted live observations outside the stored map as unexplained).
+
+### Round 7 — cost, worker, partial overlaps
+
+* MapMemory now runs in a **Web Worker** in the app (`MemoryWorkerCore` / `MemoryClient`):
+  the page only copies the grid when asked (via `exportMap`) and applies results; the
+  worker does everything else including IndexedDB. In-page slicing remains the fallback.
+* Search cost 860 → 375 ms (desktop): 30 cm signature cells (same accuracy and ranking in
+  320 trial attempts), the live map cropped to 4 m around its centre for the FFT (128² →
+  64²), 5 candidates, leaner refinement (the layer search only at the end).
+* Back-off: a fragment that keeps saying no is searched every 4, 8, … 32 s unless the live
+  map grew by 30% (+1 m²) since.
+* "Explained" counts only live observations that land where the stored map has seen
+  something.
+* Restored maps are re-applied (fill-only) after the world model rewrites its grid (floor
+  relevel, drift realignment); not after it ages the map (that's its reaction to
+  contradictions, and the verification decides).
+* **Offline stitching**: when idle, two stored fragments (neither in use) are compared;
+  they are merged only if the search agrees from both sides, the margin is clear
+  (ambiguity ≤ 0.5) and walls (or ≥ 3 pieces of furniture) pin it.
+* Re-pointed to the world model's `exportMap()` (MapFormat.ts, 32-column tiles) through a
+  lossless bridge; imports still write the grid directly (see "Interface notes").
+
+## Interface notes (WorldModel.exportMap / importMap, MapFormat.ts)
+
+Persistence works on its own `ChunkedMap` (16-column chunks, floor-relative layers);
+`persist/mapFormatBridge.ts` converts to and from `SerializedMap` losslessly (tested both
+ways, including `importMap(…, {mode: 'replace'})` into a fresh world). What the
+persistence layer still needs from the interface:
+
+1. **Exact replace** (incl. "unknown"): an undo must turn restored voxels back into
+   unknown (0); `importMap` 'replace' skips zero values, so imports still write the grid
+   directly (`adapter.importLive`). Wanted: `mode: 'exact'` (chunks present are written
+   verbatim, zeros included) or a `clearChunks(keys)` call.
+2. **Cheap, sliceable snapshots**: MapMemory snapshots the live map every few seconds
+   from the frame loop. `exportMap()` copies everything at once (~50 ms for a 12 m grid
+   on a laptop). Wanted: `exportMap({ since: version })` returning only chunks changed
+   since a version (dirty-chunk tracking), or an export that can be resumed over frames.
+   Until then snapshots copy the window grid in slices (and so don't include archived
+   chunks once the grid becomes a moving window).
+3. **Per-chunk last-observed time / session count** would let stored evidence decay where
+   it hasn't been seen for many sessions (stale furniture) instead of keeping it forever.
+4. **Grid-rewrite notifications**: today MapMemory infers relevel / realign / aging /
+   rescan from `epoch` and `recoveries` counters; an explicit event (with the kind) would
+   be more robust.
+5. Restored evidence is capped at log-odds 44 (below STRONG_OCC) so it never counts as a
+   "contradiction" in the drift/health checks; `importMap`'s `weight` scales differently —
+   fine to keep, but the cap should be preserved if imports move to `importMap`.
+
+### Round 8 — B1–B3: worker budget, wrong restores found and closed
+
+Bench with 25 ms of work per 100 ms (a worker on a phone ≈ one core at ~¼ of desktop
+speed), later a deterministic 100 slices per step:
+
+| | B1 (worker budget) | B2 (+ cross-check of restores) | B3 (+ inlier ≥ 0.9, rival ≤ 0.4) |
+|---|---|---|---|
+| known-room sessions relocalized | 29/44 (66%) | 31/44 (70%) | 29/44 (66%) |
+| wrong restores (kept at session end) | 2 (1) | 2 (1) | **0** |
+| offline stitches (wrong) | 5 (0) | 6 (0) | 6 (0) |
+| time to relocalize | 34 s | 34 s | 32 s |
+| error mean / p90 | 2.1 / 4.2 cm | 1.9 / 3.6 cm | 2.1 / 3.5 cm |
+| fragments per home | 5.2 | 4.9 | 4.9 |
+
+Wrong restores seen and what closed them:
+* A second stored fragment (another room of the same shape) restored on top of the room
+  already restored → **a new restore must agree with every restore already made** where
+  the two stored maps overlap.
+* A 180° flip in a nearly symmetric room with furniture moved (undone by verification
+  after a few seconds) and a never-seen room placed onto a known room of the same size
+  (inlier 0.90, rival at 0.42–0.57) → acceptance tightened to inlier ≥ 0.9 and rival
+  ≤ 0.4. On the 320 recorded trial attempts this costs 2 of 34 session-level restores and
+  removes the remaining single-attempt false accept.

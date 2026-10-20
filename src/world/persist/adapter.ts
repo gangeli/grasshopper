@@ -4,8 +4,8 @@ import { fromSerialized } from './mapFormatBridge';
 
 /**
  * Bridge between the live WorldModel and the persistence layer's ChunkedMap.
- * Snapshots go through WorldModel.exportMap() (MapFormat.ts) and
- * mapFormatBridge. Imports still write the grid directly: importLive must
+ * Snapshots copy the grid in slices (exportMap() via mapFormatBridge
+ * is the one-shot alternative, see exportLiveGen). Imports still write the grid directly: importLive must
  * *replace* the live contents exactly (an undo has to turn restored voxels
  * back into "unknown"), and importMap's 'replace' mode never writes unknown
  * (0) values — see the report / MapFormat notes.
@@ -129,9 +129,14 @@ export function liveObservedColumns(world: WorldModel): number {
 
 /** exportLive in slices (a couple of chunk rows per step). */
 export function* exportLiveGen(world: WorldModel, rowsPerStep = 2): Generator<void, ChunkedMap | null, void> {
-  // Through the world model's own export (MapFormat): one step for the copy,
-  // the conversion is cheap (same lattice, no resampling).
-  if (typeof world.exportMap === 'function') {
+  // Snapshots are taken often, from the page's frame loop: copy the grid a
+  // couple of chunk rows per step. world.exportMap() (MapFormat, lossless via
+  // mapFormatBridge) gives the same map but in one go (~50ms for a 12m grid on
+  // a laptop, several frames' worth on a phone); it is used when slicing is
+  // asked off (rowsPerStep <= 0) — see the interface notes in
+  // docs/map-persistence.md (an incremental / dirty-chunk export would let
+  // snapshots go through it too, and cover areas outside the live window).
+  if (rowsPerStep <= 0 && typeof world.exportMap === 'function') {
     const m = world.exportMap();
     if (!m) return null;
     yield;
