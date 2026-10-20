@@ -5,6 +5,7 @@ import { MapStore, MemoryKV } from '../src/world/persist/MapStore';
 import { exportLive, importLive, liveLattice } from '../src/world/persist/adapter';
 import { applyPose, composePose, invertPose, poseDelta, poseFromMatrix, poseToMatrix } from '../src/world/persist/pose';
 import { transformMap } from '../src/world/persist/Stitcher';
+import { fromSerialized, toSerialized } from '../src/world/persist/mapFormatBridge';
 import { extractFeatures, FragmentLookup } from '../src/world/persist/features';
 import { FragmentIndex, relocalize, runToEnd } from '../src/world/persist/Relocalizer';
 import { MapMemory } from '../src/world/persist/MapMemory';
@@ -129,6 +130,21 @@ describe('map persistence: frames and resampling', () => {
     world.grid!.data.fill(0, 2 * world.grid!.nx * world.grid!.nz);
     expect(importLive(world, m)).toBe(true);
     expect(Buffer.from(world.grid!.data).equals(before)).toBe(true);
+  });
+
+  it('converts losslessly to and from the world model exchange format (MapFormat)', () => {
+    const { world } = scanRoom(livingRoom(), undefined, { seed: 5 });
+    const direct = exportLive(world)!;
+    const viaFormat = fromSerialized(world.exportMap()!);
+    sameMap(direct, viaFormat);
+    // And back: a fresh world imports it ('replace') into the same contents.
+    const w2 = new WorldModel();
+    w2.setFloor(world.floorY, { x: 0, y: 0, z: 0 });
+    // Same lattice: copy the grid origin.
+    (w2.grid!.origin as { x: number; z: number }).x = world.grid!.origin.x;
+    (w2.grid!.origin as { x: number; z: number }).z = world.grid!.origin.z;
+    w2.importMap(toSerialized(direct), null, { mode: 'replace' });
+    sameMap(direct, exportLive(w2)!);
   });
 
   it('a transform and its inverse bring a map back (nearest-voxel resampling)', () => {

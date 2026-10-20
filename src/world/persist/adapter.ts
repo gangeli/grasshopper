@@ -1,11 +1,14 @@
 import { FLOOR_LAYERS_BELOW, type WorldModel } from '../WorldModel';
 import { CS, CS2, chunkKey, emptyMap, newChunk, type ChunkedMap, type MapChunk } from './ChunkedMap';
+import { fromSerialized } from './mapFormatBridge';
 
 /**
- * Bridge between the live WorldModel (today: one dense VoxelGrid) and the
- * persistence layer's ChunkedMap. This is the only file in persist/ that
- * knows the grid's internals; when the world model offers
- * exportMap()/importMap() this file becomes a thin wrapper around them.
+ * Bridge between the live WorldModel and the persistence layer's ChunkedMap.
+ * Snapshots go through WorldModel.exportMap() (MapFormat.ts) and
+ * mapFormatBridge. Imports still write the grid directly: importLive must
+ * *replace* the live contents exactly (an undo has to turn restored voxels
+ * back into "unknown"), and importMap's 'replace' mode never writes unknown
+ * (0) values — see the report / MapFormat notes.
  *
  * exportLive: the grid's above-floor layers, on the grid's own lattice
  * (origin = grid origin, y = floor height), so export/import is exact.
@@ -126,6 +129,14 @@ export function liveObservedColumns(world: WorldModel): number {
 
 /** exportLive in slices (a couple of chunk rows per step). */
 export function* exportLiveGen(world: WorldModel, rowsPerStep = 2): Generator<void, ChunkedMap | null, void> {
+  // Through the world model's own export (MapFormat): one step for the copy,
+  // the conversion is cheap (same lattice, no resampling).
+  if (typeof world.exportMap === 'function') {
+    const m = world.exportMap();
+    if (!m) return null;
+    yield;
+    return fromSerialized(m);
+  }
   const g = world.grid;
   if (!g) return null;
   const lat = liveLattice(world)!;
