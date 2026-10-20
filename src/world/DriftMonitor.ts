@@ -45,7 +45,7 @@ export interface DriftOptions {
   jumpWarp: boolean;
 }
 
-export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0, loopMaxYaw: 0.12, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false };
+export const DEFAULT_DRIFT: DriftOptions = { interval: 1, minPoints: 500, minSupport: 0.5, minRatio: 2, agree: 0.1, minCorrection: 0.04, maxDriftShift: 0.2, eventWindow: 20, loopMinAge: 15, loopMaxShift: 0, loopMaxYaw: 0.06, loopMinPoints: 300, loopMinSupport: 0.4, loopWarp: true, jumpWarp: false };
 
 type Est = NonNullable<ReturnType<WorldModel['estimateMisalignment']>>;
 
@@ -251,7 +251,7 @@ export class DriftMonitor {
    * added since may be in a drifted frame); two agreeing, well-supported
    * estimates realign everything since just before the first.
    */
-  private pendingHold: { m: Est; t: number } | null = null;
+  private pendingHold: { m: Est; t: number; since: number } | null = null;
   /** Corrections found for held-back frames (see WorldModel.holdOnConflict). */
   holdFixes = 0;
 
@@ -265,7 +265,7 @@ export class DriftMonitor {
   private *resolving(t: number): Generator<void, boolean, void> {
     const O = this.opts, w = this.world, since = w.heldSince!;
     const held = Math.max(1, w.replayFramesSince(since));
-    const m = yield* w.misalignmentSearch({ snapshot: 'aged', minAge: 6, frames: Math.min(15, held), maxShift: Math.max(O.loopMaxShift, 0.6), maxYaw: Math.max(O.loopMaxYaw, 0.12) });
+    const m = yield* w.misalignmentSearch({ snapshot: 'aged', minAge: 6, frames: Math.min(15, held), maxShift: Math.max(O.loopMaxShift, 0.6), maxYaw: O.loopMaxYaw });
     if (w.heldSince !== since) return false; // released or resolved meanwhile
     this.last = { t, m, fired: false };
     if (!m) {
@@ -288,7 +288,9 @@ export class DriftMonitor {
       } else this.note(`hold: unsure (${m.degenerate ? 'degenerate ' : ''}n ${m.n} base ${m.base} best ${m.best} ${(mag * 100).toFixed(0)}cm)`);
       return false;
     }
-    if (undoesJump || (this.pendingHold && displacement(m, this.pendingHold.m) <= O.agree)) {
+    // One clear-cut estimate is enough (frames are waiting); otherwise two that agree.
+    const clearCut = !m.degenerate && m.n >= O.loopMinPoints && m.best >= 0.5 * m.n && m.best >= 3 * Math.max(m.base, 0.1 * m.n);
+    if (undoesJump || clearCut || (this.pendingHold && this.pendingHold.since === since && displacement(m, this.pendingHold.m) <= O.agree)) {
       w.realign(m.dx, m.dz, m.dyaw, m.pivot, since - 0.05);
       w.heldResolved();
       if (O.loopWarp && Number.isFinite(m.oldT) && m.oldT < since - 1) w.warpSince(m.oldT, since, { dx: m.dx, dz: m.dz, dyaw: m.dyaw, pivot: m.pivot });
@@ -299,7 +301,7 @@ export class DriftMonitor {
       this.note(`HOLD RESOLVED ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} map since ${m.oldT.toFixed(0)}s`);
       return true;
     }
-    this.pendingHold = { m, t };
+    this.pendingHold = { m, t, since };
     this.note(`hold candidate ${(mag * 100).toFixed(0)}cm (${m.dx.toFixed(2)},${m.dz.toFixed(2)},${m.dyaw.toFixed(3)}) ${m.best}/${m.n} base ${m.base}`);
     return false;
   }

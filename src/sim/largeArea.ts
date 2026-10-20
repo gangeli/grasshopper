@@ -124,7 +124,7 @@ export interface LargeAreaReport {
   rooms: RoomRetention[];
   cpu: { sense: Stat; game: Stat; frame: Stat; nav: Stat; frameOver16: number };
   final: LargeAreaSample & { pathsColliding: number; pathsTested: number; pathMaxPen: number; nodesColliding: number };
-  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; realigns: { t: number; before: number; after: number; what: string }[] };
+  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; realigns: { t: number; before: number; after: number; what: string }[] };
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
@@ -337,7 +337,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     rooms,
     cpu: { sense: stat(senseT), game: stat(gameT), frame: fs, nav: stat(navTimes), frameOver16: frameT.filter((x) => x > 16).length },
     final: { ...fin, pathsColliding: em.pathsColliding, pathsTested: em.pathsTested, pathMaxPen: em.pathMaxPenetration, nodesColliding: em.nodesColliding },
-    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, loopsClosed: game.health.drift.loopClosures, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
+    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
     arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,
@@ -590,7 +590,7 @@ export function fmtReport(r: LargeAreaReport): string {
     `local (around the player, through the current frame): precision ${pc(r.samples.slice(1).reduce((a, s) => a + s.localPrecision, 0) / Math.max(1, r.samples.length - 1))}, ghost ${(r.samples.slice(1).reduce((a, s) => a + s.localGhostM2, 0) / Math.max(1, r.samples.length - 1)).toFixed(2)}m² (session means)`,
     `retention: mean coverage drop ${pc(r.retention.coverageDrop)} (worst ${pc(r.retention.worstCoverageDrop)}), precision drop ${pc(r.retention.precisionDrop)}`,
     `memory: map ${f.memMB.toFixed(0)}MB, typed arrays ${r.arrayBuffersPeakMB.toFixed(0)}MB peak, heap ${r.heapMB.toFixed(0)}MB | cpu mean/p95/max: sense ${ms(r.cpu.sense)} game ${ms(r.cpu.game)} frame ${ms(r.cpu.frame)} (>16ms: ${r.cpu.frameOver16}) nav(worker) ${ms(r.cpu.nav)} x${r.cpu.nav.n}`,
-    `events: losses ${r.events.trackingLosses}, tracker loop closures ${r.events.loopClosures}, depth frames ${r.events.depthFrames} (gated ${r.events.depthRejected}: ${JSON.stringify(r.events.gate)}), multi-view kept ${(r.events.mvKept / Math.max(1, r.events.mvKept + r.events.mvDropped) * 100).toFixed(0)}%, window moves ${r.events.recenters}, loops closed ${r.events.loopsClosed}, realigns ${r.events.realigns.map((q) => `${q.t.toFixed(0)}s ${(q.before * 100).toFixed(0)}→${(q.after * 100).toFixed(0)}cm`).join(' ')}, health ${JSON.stringify(r.events.health)}`,
+    `events: losses ${r.events.trackingLosses}, tracker loop closures ${r.events.loopClosures}, depth frames ${r.events.depthFrames} (gated ${r.events.depthRejected}: ${JSON.stringify(r.events.gate)}), multi-view kept ${(r.events.mvKept / Math.max(1, r.events.mvKept + r.events.mvDropped) * 100).toFixed(0)}%, window moves ${r.events.recenters}, held frames ${r.events.holds.frames} (holds resolved ${r.events.holds.resolved}, released ${r.events.holds.released}), loops closed ${r.events.loopsClosed}, realigns ${r.events.realigns.map((q) => `${q.t.toFixed(0)}s ${(q.before * 100).toFixed(0)}→${(q.after * 100).toFixed(0)}cm`).join(' ')}, health ${JSON.stringify(r.events.health)}`,
   ];
   return lines.join('\n');
 }

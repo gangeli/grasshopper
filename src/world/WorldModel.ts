@@ -576,7 +576,7 @@ export class WorldModel {
   holdOnConflict = false;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */
   holdConflictRate = 0.25;
-  holdMaxSeconds = 3;
+  holdMaxSeconds = 5;
   /** Time of the first held frame, while frames are held. */
   heldSince: number | null = null;
   heldFrames = 0;
@@ -741,9 +741,15 @@ export class WorldModel {
 
   /** Arrays for the next window, allocated ahead of a move (one per call). */
   private spare: { data?: Int8Array; observed?: Uint8Array; underside?: Uint8Array; topFrac?: Uint8Array; hitTime?: Uint32Array } = {};
+  /**
+   * Keep a spare set of window arrays ready so a window move doesn't
+   * allocate (~25 MB held permanently for a few ms saved per move). Off by
+   * default: memory matters more on a phone.
+   */
+  preallocateWindow = false;
   private prepareSpare(): void {
     const g = this.grid;
-    if (!g) return;
+    if (!g || !this.preallocateWindow) return;
     const n = g.data.length, s = this.spare;
     if (!s.data) s.data = new Int8Array(n);
     else if (!s.hitTime) s.hitTime = new Uint32Array(n);
