@@ -78,6 +78,7 @@
   #landing .alt { margin-top: 14px; background: none; color: #8f98b5; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; padding: 4px 8px; font-family: inherit; }
   #landing .install { margin-top: 12px; padding: 7px 14px; border-radius: 999px; font: 600 13px/1 inherit; font-family: inherit;
     background: rgba(255,255,255,.08); color: #dfe4f2; border: 1px solid rgba(255,255,255,.14); }
+  #landing .linkish { background: none; color: inherit; font: inherit; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
   #landing small { margin-top: 10px; color: #a3abc4; text-align: center; max-width: 400px; font-size: 13px; line-height: 1.45; }
   .primary { background: var(--mint); color: #0d2a20; padding: 14px 22px; border-radius: 999px; font-weight: 700; box-shadow: var(--shadow); }
   .primary:disabled { background: #9db5ab; color: #33463f; cursor: default; }
@@ -153,6 +154,7 @@
   <button id="btn-cam" class="cta" style="display:none">Start with camera</button>
   <button id="btn-sim" class="alt">or play in a virtual room</button>
   <small id="support-note"></small>
+  <small id="memory-row" style="display:none"><span id="memory-text"></span> · <button id="btn-forget" class="linkish">forget</button></small>
   <button id="btn-install" class="install" style="display:none">＋ Install Hopper as an app</button>
 </div>
 <script type="module" src="./src/main.ts"></script>

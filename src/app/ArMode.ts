@@ -13,6 +13,7 @@ import { NavGrid } from '../world/NavGrid';
 import { VoxelGrid } from '../world/VoxelGrid';
 import { NavWorkerClient } from '../world/NavWorkerClient';
 import { HIDE_SEEK_MIN_AREA } from '../game/Activities';
+import type { AppMemory } from './Memory';
 import {
   ErrorBudget,
   TrackingMonitor,
@@ -127,6 +128,8 @@ export class ArMode {
     trackingEvents: 0,
   };
   onExit: ((reason?: string) => void) | null = null;
+  /** Remembered rooms (set once storage is open; see app/Memory). */
+  memory: AppMemory | null = null;
   /** Session recorder (?record=1): depth + poses for offline evaluation. */
   readonly recorder = new URLSearchParams(location.search).get('record') === '1' ? new Recorder() : null;
 
@@ -555,6 +558,8 @@ export class ArMode {
         if (this.frameNo % 30 === 0) this.guard('meshes', () => this.ingestMeshes(frame));
         if (this.frameNo % 4 === 0) this.guard('depth', () => this.ingestDepth(frame));
         this.guard('anchor', () => this.updateAnchor(frame));
+        // Recognising remembered rooms / saving: a few ms of background work.
+        if (this.memory) this.guard('memory', () => this.memory!.tick(this.now));
       }
     } else {
       this.lastHit = null;
