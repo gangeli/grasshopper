@@ -52,7 +52,7 @@ export function warpGrid(g: VoxelGrid, code0: number, code1: number, alpha: (cod
         const n = base + k * nx + i;
         const v = g.data[n];
         if (v <= 0 || v === 127) continue;
-        const h = hit[n];
+        const h = hit[n] & 0xffff;
         if (h < code0 || h > code1) continue;
         const [cs, sn, tx, tz] = corrFor(h);
         const x = ox + (i + 0.5) * r - px, z = oz + (k + 0.5) * r - pz;
@@ -64,7 +64,7 @@ export function warpGrid(g: VoxelGrid, code0: number, code1: number, alpha: (cod
       }
   }
   const m = src.length;
-  const vals = new Int8Array(m), hits = new Uint16Array(m), tops = new Uint8Array(m), unders = new Uint8Array(m);
+  const vals = new Int8Array(m), hits = new Uint32Array(m), tops = new Uint8Array(m), unders = new Uint8Array(m);
   for (let q = 0; q < m; q++) {
     const n = src[q];
     vals[q] = g.data[n];

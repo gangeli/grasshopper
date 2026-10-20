@@ -40,6 +40,9 @@ describe('map window', () => {
     expect(at(w, 2.025, 0.525, 2.025)).toBe(100);
     expect(at(w, -3.025, 1.025, 1.025)).toBe(-30);
     expect(w.grid!.isObserved(w.grid!.cellX(2.025), w.grid!.cellZ(2.025))).toBe(true);
+    // ...with their observation times.
+    const h = w.grid!;
+    expect(h.hitTime![h.idx(h.cellX(2.025), h.cellY(0.525), h.cellZ(2.025))]).toBe((1 << 16) | 1);
   });
 
   it('keeps the solid sub-floor and unknown space when entering new areas', () => {
@@ -83,5 +86,31 @@ describe('map window', () => {
       shiftInPlace(got, nx, nz, ny, di, dk, () => -5);
       expect(Array.from(got)).toEqual(Array.from(want));
     }
+  });
+
+  it('keeps a companion point (the pet) inside the window when it can', () => {
+    const w = new WorldModel();
+    w.setFloor(0, { x: 0, y: 0, z: 0 });
+    // The pet lags 4m behind the player walking along +x.
+    for (let x = 0; x <= 20; x += 0.25) {
+      w.keepInWindow = { x: x - 4, y: 0, z: 0 };
+      w.follow({ x, y: 1.4, z: 0 });
+      const g = w.grid!;
+      expect(g.cellX(x - 4)).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('a local map reset forgets only the surroundings and weakens the rest', () => {
+    const w = new WorldModel();
+    w.setFloor(0, { x: 0, y: 0, z: 0 });
+    const g = w.grid!;
+    const near = g.idx(g.cellX(1.025), g.cellY(0.525), g.cellZ(0.025)), far = g.idx(g.cellX(5.525), g.cellY(0.525), g.cellZ(0.025));
+    g.data[near] = 100;
+    g.data[far] = 100;
+    w.hardReset({ x: 0, z: 0, radius: 3 });
+    expect(w.grid).toBe(g);
+    expect(g.data[near]).toBe(0);
+    expect(g.data[far]).toBeGreaterThan(20);
+    expect(g.data[far]).toBeLessThan(100);
   });
 });

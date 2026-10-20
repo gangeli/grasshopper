@@ -23,7 +23,7 @@ describe('map warp (loop closure)', () => {
     expect(at(2.225, 0.025)).toBe(80);
     expect(at(3.025, 0.025)).toBe(0);
     expect(at(3.125, 0.025)).toBe(80);
-    expect(w.grid!.hitTime![w.grid!.idx(w.grid!.cellX(2.225), w.grid!.cellY(0.525), w.grid!.cellZ(0.025))]).toBe(51);
+    expect(w.grid!.hitTime![w.grid!.idx(w.grid!.cellX(2.225), w.grid!.cellY(0.525), w.grid!.cellZ(0.025))] & 0xffff).toBe(51);
   });
 
   it('warps archived chunks too', () => {

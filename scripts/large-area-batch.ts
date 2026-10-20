@@ -47,7 +47,7 @@ await new Promise<void>((done) => {
 });
 const order = new Map(runs.map((r, i) => [r.name, i]));
 results.sort((a, b) => order.get(a.name)! - order.get(b.name)!);
-const hdr = ['run', 'cover%', 'prec%', 'locPrc', 'locGh', 'ghost', 'fFree%', 'fErr', 'fErrMx', 'retDrp', 'worst', 'pathC%', 'memMB', 'cpu', 'p95', 'max', 'resets'];
+const hdr = ['run', 'cover%', 'prec%', 'locPrc', 'locGh', 'locPC%', 'ghost', 'fFree%', 'fErr', 'fErrMx', 'retDrp', 'worst', 'pathC%', 'memMB', 'cpu', 'p95', 'max', 'resets'];
 console.log(hdr.map((h, i) => (i ? h.padStart(7) : h.padEnd(22))).join(' '));
 const agg = new Map<string, number[][]>();
 for (const r of results) {
@@ -59,7 +59,8 @@ for (const r of results) {
   const ss = j.samples.filter((x: { t: number }) => x.t > 0);
   const locP = ss.reduce((a: number, x: { localPrecision: number }) => a + x.localPrecision, 0) / Math.max(1, ss.length);
   const locG = ss.reduce((a: number, x: { localGhostM2: number }) => a + x.localGhostM2, 0) / Math.max(1, ss.length);
-  const row = [f.coverage * 100, f.precision * 100, locP * 100, locG, f.ghostM2, f.falseFree * 100, f.frameErr * 100, feMax * 100, j.retention.coverageDrop * 100, j.retention.worstCoverageDrop * 100, (f.pathsColliding / Math.max(1, f.pathsTested)) * 100, f.memMB, j.cpu.frame.mean, j.cpu.frame.p95, j.cpu.frame.max, resets];
+  const locPC = ss.reduce((a: number, x: { localPathColl?: number }) => a + (x.localPathColl ?? 0), 0) / Math.max(1, ss.length);
+  const row = [f.coverage * 100, f.precision * 100, locP * 100, locG, locPC * 100, f.ghostM2, f.falseFree * 100, f.frameErr * 100, feMax * 100, j.retention.coverageDrop * 100, j.retention.worstCoverageDrop * 100, (f.pathsColliding / Math.max(1, f.pathsTested)) * 100, f.memMB, j.cpu.frame.mean, j.cpu.frame.p95, j.cpu.frame.max, resets];
   console.log([r.name.padEnd(22), ...row.map((v) => v.toFixed(1).padStart(7))].join(' '));
   const base = r.name.split(':')[0];
   if (!agg.has(base)) agg.set(base, []);

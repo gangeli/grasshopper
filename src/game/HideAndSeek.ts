@@ -628,6 +628,14 @@ export class HideAndSeek {
     if (!view) return;
     this.clock += dt;
     this.lastView = view;
+    // The map window follows the player; keep Hopper inside it when it can.
+    const pp = this.pet.pos;
+    if (Number.isFinite(pp.x + pp.z)) {
+      const k = (this.world.keepInWindow ??= { x: 0, y: 0, z: 0 });
+      k.x = pp.x;
+      k.y = pp.y;
+      k.z = pp.z;
+    } else this.world.keepInWindow = null;
     this.anim.lookTarget = new THREE.Vector3(view.pos.x, view.pos.y, view.pos.z);
     this.navTimer -= dt;
     // Nav rebuilds cost ~100ms+ on a phone: refresh while roaming (the map is

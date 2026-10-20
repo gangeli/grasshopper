@@ -9,7 +9,8 @@ import { OCC_THRESHOLD } from '../world/VoxelGrid';
 import { WorldModel } from '../world/WorldModel';
 import { generateHouse, type House } from './House';
 import { houseWalk, type WalkOptions } from './HouseWalk';
-import { evaluateMap } from './MapMetrics';
+import { evaluateMap, pathPenetration } from './MapMetrics';
+import { Rng } from '../core/rng';
 import { CameraDepthSource, senseFrame } from './scan';
 import { cameraBasis, SimSensor, type NoiseName, type NoiseProfile, type SimCamera } from './SimSensor';
 import type { SimRoom } from './SimRoom';
@@ -83,6 +84,11 @@ export interface LargeAreaSample {
   localPrecOld: number;
   localPrecRecent: number;
   localOldShare: number;
+  /**
+   * Hopper's paths near the player, walked in reality through the current
+   * frame: share that run into real furniture (>2cm), sampled every 6s.
+   */
+  localPathColl: number;
   /** Max frame error over the last interval. */
   frameErrMax: number;
   memMB: number;
@@ -182,7 +188,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   const roomFirst = new Map<number, { cov: number; prec: number; t: number }>();
   let lastRoom = -1, lost = false, losses = 0, depthFrames = 0, depthRejected = 0;
   let frameErrMax = 0, walked = 0, spawned = false;
-  let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0;
+  let localSum = 0, ghostSum = 0, localN = 0, oldGood = 0, oldOcc = 0, recGood = 0, recOcc = 0, pathTested = 0, pathHit = 0;
+  const pathRng = new Rng(seed * 13 + 1);
   const dt = 1 / 30;
   // Every map-frame correction, scored against the truth (frame error before → after).
   const realigns: { t: number; before: number; after: number; what: string }[] = [];
@@ -253,6 +260,11 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       gameT.push(t2 - t1 - navInFrame);
       frameT.push(t2 - t0 - navInFrame);
       if (f % 30 === 0) frameErrMax = Math.max(frameErrMax, frameError(world, sensor, step.cam));
+      if (f % 180 === 90 && world.grid && game.nav && game.nav.g === world.grid && game.nav.count > 50) {
+        const lc = localPathCollisions(world, game.nav, sensor, room, step.cam, 12, pathRng);
+        pathTested += lc.tested;
+        pathHit += lc.colliding;
+      }
       if (f % 60 === 0 && world.grid) {
         const lp = localPrecision(world, sensor, room, step.cam);
         if (lp.occ > 20) {
@@ -277,7 +289,8 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
         s.localPrecOld = oldOcc ? oldGood / oldOcc : 1;
         s.localPrecRecent = recOcc ? recGood / recOcc : 1;
         s.localOldShare = oldOcc + recOcc ? oldOcc / (oldOcc + recOcc) : 0;
-        localSum = ghostSum = localN = oldGood = oldOcc = recGood = recOcc = 0;
+        s.localPathColl = pathTested ? pathHit / pathTested : 0;
+        localSum = ghostSum = localN = oldGood = oldOcc = recGood = recOcc = pathTested = pathHit = 0;
         samples.push(s);
         log(fmtSample(s));
       }
@@ -396,7 +409,7 @@ export function localPrecision(world: WorldModel, sensor: SimSensor, room: SimRo
         const y = g.centerY(j);
         const rx = M[0] * x + M[4] * y + M[8] * z + M[12], ry = M[1] * x + M[5] * y + M[9] * z + M[13], rz = M[2] * x + M[6] * y + M[10] * z + M[14];
         occ++;
-        const isOld = !!g.hitTime && g.hitTime[g.idx(i, j, k)] < oldStamp;
+        const isOld = !!g.hitTime && (g.hitTime[g.idx(i, j, k)] & 0xffff) < oldStamp;
         if (isOld) oldOcc++;
         if (near(rx, ry, rz, 0.08)) {
           good++;
@@ -406,6 +419,35 @@ export function localPrecision(world: WorldModel, sensor: SimSensor, room: SimRo
       if (ghost) ghostCols++;
     }
   return { precision: occ ? good / occ : 1, ghostM2: ghostCols * (g.res * 2) ** 2, occ, good, oldOcc, oldGood };
+}
+
+/** Random nav paths between nodes within 3m of the player, checked against reality through the current frame. */
+function localPathCollisions(world: WorldModel, nav: NavGrid, sensor: SimSensor, room: SimRoom, cam: SimCamera, n: number, rng: Rng): { tested: number; colliding: number } {
+  const T = sensor.trackingFromTruth();
+  const Ti = [T[0], T[4], T[8], 0, T[1], T[5], T[9], 0, T[2], T[6], T[10], 0, 0, 0, 0, 1];
+  Ti[12] = -(Ti[0] * T[12] + Ti[4] * T[13] + Ti[8] * T[14]);
+  Ti[13] = -(Ti[1] * T[12] + Ti[5] * T[13] + Ti[9] * T[14]);
+  Ti[14] = -(Ti[2] * T[12] + Ti[6] * T[13] + Ti[10] * T[14]);
+  const M = mulCM(Ti, world.mapToTracking());
+  const p = cam.pos;
+  const cm = world.toMapPoint({ x: T[0] * p.x + T[8] * p.z + T[12], y: 1, z: T[2] * p.x + T[10] * p.z + T[14] });
+  const near: number[] = [];
+  for (let a = 0; a < nav.count; a += 3) {
+    const q = nav.pos(a);
+    if (Math.hypot(q.x - cm.x, q.z - cm.z) < 3) near.push(a);
+  }
+  if (near.length < 20) return { tested: 0, colliding: 0 };
+  let tested = 0, colliding = 0;
+  for (let q = 0; q < n * 3 && tested < n; q++) {
+    const a = near[rng.int(0, near.length - 1)], b = near[rng.int(0, near.length - 1)];
+    if (a === b) continue;
+    const path = nav.pathBetween(a, b, 8, 4000, false);
+    if (!path || path.length < 2) continue;
+    tested++;
+    const real = path.map((w) => ({ ...w, x: M[0] * w.x + M[4] * w.y + M[8] * w.z + M[12], y: M[1] * w.x + M[5] * w.y + M[9] * w.z + M[13], z: M[2] * w.x + M[6] * w.y + M[10] * w.z + M[14] }));
+    if (pathPenetration(room, real) > 0.02) colliding++;
+  }
+  return { tested, colliding };
 }
 
 function mulCM(A: ArrayLike<number>, B: ArrayLike<number>): number[] {
@@ -511,6 +553,7 @@ function sample(live: WorldModel, world: WorldModel, nav: NavGrid, house: House,
     localPrecOld: 0,
     localPrecRecent: 0,
     localOldShare: 0,
+    localPathColl: 0,
     frameErrMax: 0,
     memMB: live.memoryBytes().total / 1e6,
     navNodes: nav.count,
@@ -521,7 +564,7 @@ function sample(live: WorldModel, world: WorldModel, nav: NavGrid, house: House,
 
 export function fmtSample(s: LargeAreaSample): string {
   const pc = (x: number) => (x * 100).toFixed(0).padStart(3) + '%';
-  return `t ${s.t.toFixed(0).padStart(4)}s walked ${s.walked.toFixed(0).padStart(4)}m rooms ${String(s.roomsVisited).padStart(2)} | cover ${pc(s.coverage)} (all ${pc(s.coverageAll)}) prec ${pc(s.precision)} ghost ${s.ghostM2.toFixed(2).padStart(5)}m² falseFree ${pc(s.falseFree)} | frameErr ${(s.frameErr * 100).toFixed(0).padStart(3)}cm (max ${(s.frameErrMax * 100).toFixed(0).padStart(3)}) local prec ${pc(s.localPrecision)} (old ${pc(s.localPrecOld)} x${pc(s.localOldShare)}, new ${pc(s.localPrecRecent)}) ghost ${s.localGhostM2.toFixed(2)}m² | mem ${s.memMB.toFixed(0).padStart(3)}MB nodes ${s.navNodes} | ${s.recoveries}`;
+  return `t ${s.t.toFixed(0).padStart(4)}s walked ${s.walked.toFixed(0).padStart(4)}m rooms ${String(s.roomsVisited).padStart(2)} | cover ${pc(s.coverage)} (all ${pc(s.coverageAll)}) prec ${pc(s.precision)} ghost ${s.ghostM2.toFixed(2).padStart(5)}m² falseFree ${pc(s.falseFree)} | frameErr ${(s.frameErr * 100).toFixed(0).padStart(3)}cm (max ${(s.frameErrMax * 100).toFixed(0).padStart(3)}) local paths coll ${pc(s.localPathColl)} prec ${pc(s.localPrecision)} (old ${pc(s.localPrecOld)} x${pc(s.localOldShare)}, new ${pc(s.localPrecRecent)}) ghost ${s.localGhostM2.toFixed(2)}m² | mem ${s.memMB.toFixed(0).padStart(3)}MB nodes ${s.navNodes} | ${s.recoveries}`;
 }
 
 export function fmtReport(r: LargeAreaReport): string {
