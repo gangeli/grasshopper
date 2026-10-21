@@ -54,6 +54,12 @@ export interface NavParams {
    * (VoxelGrid.colFree) isn't walkable: old free space sits where an older,
    * possibly drifted frame put it (the inside of a sofa "seen empty" from a
    * minute ago). Columns back from the archive count as old. 0 = off.
+   * Default 120 s within 30 cm of structure (freeMaxAgeNear): ten homes,
+   * house-hard, pet paths near the player into real furniture 5.9 → 3.3%
+   * (paired −2.6 ± 0.7 points), nav nodes inside furniture 0.9 → 0.6%, for
+   * 11% less walkable floor within 3 m of the player (next to structure
+   * not seen empty for two minutes). Everywhere instead of near structure:
+   * about the same gain for 2–3× the floor (see docs/large-area-round4.md).
    */
   freeMaxAge: number;
   /** ...only where structure is this close (m; 0 = everywhere): open floor can't put the pet inside furniture. */
@@ -76,8 +82,8 @@ export const DEFAULT_NAV: NavParams = {
   footSolid: false,
   staleMargin: 0,
   staleSeconds: 30,
-  freeMaxAge: 0,
-  freeMaxAgeNear: 0,
+  freeMaxAge: 120,
+  freeMaxAgeNear: 0.3,
 };
 
 export interface Waypoint {
