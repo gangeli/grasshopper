@@ -629,12 +629,13 @@ export class WorldModel {
           if (!d || !nb || nb.state !== 'live' || nb.dormant) continue;
           neighbours++;
           const tol = Math.max(0.05, 0.4 * mv), tolYaw = Math.max(0.01, 0.4 * Math.abs(dyaw));
-          const like = (ex: number, ez: number, ey: number) => Math.hypot(ex - dx, ez - dz) < tol && Math.abs(ey - dyaw) < tolYaw;
-          if (nb.lastMove && this.now - nb.lastMove.t < this.anchorAloneSeconds && like(nb.lastMove.dx, nb.lastMove.dz, nb.lastMove.dyaw)) agree = true;
-          else if (nb.last) {
-            const Dn = mul4(nb.last, invertRigid4(nb.ref));
-            if (like(nb.last[12] - nb.ref[12], nb.last[14] - nb.ref[14], Math.atan2(Dn[8], Dn[0]))) agree = true;
-          }
+          // The neighbour's move (a rigid transform of the tracking frame) applied at this anchor: does it put it where it went?
+          const like = (Dn: number[]) => {
+            const x = Dn[0] * R[12] + Dn[4] * R[13] + Dn[8] * R[14] + Dn[12], z = Dn[2] * R[12] + Dn[6] * R[13] + Dn[10] * R[14] + Dn[14];
+            return Math.hypot(x - P[12], z - P[14]) < tol && Math.abs(Math.atan2(Dn[8], Dn[0]) - dyaw) < tolYaw;
+          };
+          if (nb.lastMove && this.now - nb.lastMove.t < this.anchorAloneSeconds && like(nb.lastMove.D)) agree = true;
+          else if (nb.last && like(mul4(nb.last, invertRigid4(nb.ref)))) agree = true;
         }
         if (neighbours > 0 && !agree) {
           sm.aloneSince ??= this.now;
@@ -651,7 +652,7 @@ export class WorldModel {
           continue;
         }
         sm.aloneSince = null;
-        sm.lastMove = { t: this.now, dx, dz, dyaw };
+        sm.lastMove = { t: this.now, D };
       }
       // Tracking-frame motion of what is near the anchor: x' = R(x − a) + a + d.
       const c = Math.cos(dyaw), sn = Math.sin(dyaw);
@@ -2991,6 +2992,6 @@ export interface SubmapAnchor {
   dormant?: boolean;
   /** Latest pose read; last move applied (tracking frame); moving alone since (see anchorConsensus). */
   last?: number[];
-  lastMove?: { t: number; dx: number; dz: number; dyaw: number };
+  lastMove?: { t: number; D: number[] };
   aloneSince?: number | null;
 }

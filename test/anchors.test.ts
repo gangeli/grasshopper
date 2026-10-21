@@ -101,6 +101,28 @@ describe('submaps glued to anchors', () => {
     expect(occ(w, 2.025, 0.225)).toBe(80);
   });
 
+  it('anchors far apart that turn together about a far point agree (moves compared as rigid transforms)', () => {
+    const src = new StubAnchors();
+    const w = world(src);
+    for (let t = 0; t < 15; t++) frame(w, t, 0, 0, t === 5 ? { x: 1.025, z: 0.025 } : undefined);
+    for (let t = 15; t < 30; t++) frame(w, t, 3, 0);
+    // The tracker frame turned 0.2 rad about the origin: anchor 1 (at 0,0) only turns, anchor 2 (at 3,0) also shifts ~60 cm.
+    const a = 0.2, c = Math.cos(a), sn = Math.sin(a);
+    const T = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, 0, 0, 0, 1];
+    const mulT = (p: number[]) => {
+      const o = new Array(16).fill(0);
+      for (let cc = 0; cc < 4; cc++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[cc * 4 + r] += T[k * 4 + r] * p[cc * 4 + k];
+      return o;
+    };
+    src.poses.set(1, mulT(src.poses.get(1) as number[]));
+    src.poses.set(2, mulT(src.poses.get(2) as number[]));
+    for (let t = 30; t < 33; t++) frame(w, t, 3, 0);
+    expect(w.anchorsDistrusted).toBe(0);
+    expect(w.submapWarps).toBeGreaterThan(0);
+    // (1.025, 0.025) turned by 0.2 rad about the origin: (c·x + s·z, −s·x + c·z).
+    expect(occ(w, c * 1.025 + sn * 0.025, -sn * 1.025 + c * 0.025)).toBe(80);
+  });
+
   it('turns about the anchor: structure near it barely moves, far structure swings', () => {
     const src = new StubAnchors();
     const w = world(src);
