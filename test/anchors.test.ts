@@ -64,7 +64,8 @@ describe('submaps glued to anchors', () => {
     for (let t = 15; t < 30; t++) frame(w, t, 1, 0, t === 20 ? { x: 2.025, z: 0.025 } : undefined);
     expect(w.submaps.length).toBe(2);
     expect(occ(w, 1.025, 0.025)).toBe(80);
-    // The tracker corrects itself: submap 1's anchor moves 30 cm in z.
+    // The tracker corrects itself: submap 1's anchor moves 30 cm in z (alone: no consensus check here).
+    w.anchorConsensus = false;
     src.shift(1, 0, 0.3);
     frame(w, 30, 1, 0);
     expect(w.submapWarps).toBe(1);
@@ -75,6 +76,29 @@ describe('submaps glued to anchors', () => {
     src.shift(2, 0.01, 0);
     frame(w, 31, 1, 0);
     expect(w.submapWarps).toBe(1);
+  });
+
+  it('an anchor that jumps alone is not followed, and dropped if it stays alone; anchors that move together are', () => {
+    const src = new StubAnchors();
+    const w = world(src);
+    for (let t = 0; t < 15; t++) frame(w, t, 0, 0, t === 5 ? { x: 1.025, z: 0.025 } : undefined);
+    for (let t = 15; t < 30; t++) frame(w, t, 1, 0, t === 20 ? { x: 2.025, z: 0.025 } : undefined);
+    for (let t = 30; t < 45; t++) frame(w, t, 2, 0, t === 35 ? { x: 3.025, z: 0.025 } : undefined);
+    // Anchor 2 jumps 15 cm on its own: nothing moves, and after a few seconds alone it is dropped.
+    src.shift(2, 0.15, 0);
+    for (let t = 45; t < 51; t++) frame(w, t, 2, 0);
+    expect(w.submapWarps).toBe(0);
+    expect(occ(w, 2.025, 0.025)).toBe(80);
+    expect(w.submaps[1].state).toBe('lost');
+    expect(w.anchorsDistrusted).toBe(1);
+    // Anchors 1 and 3 move together (a loop closure): their submaps move, and the
+    // distrusted one in between follows its neighbours.
+    src.shift(1, 0, 0.2);
+    src.shift(3, 0, 0.2);
+    for (let t = 51; t < 54; t++) frame(w, t, 2, 0);
+    expect(occ(w, 1.025, 0.225)).toBe(80);
+    expect(occ(w, 3.025, 0.225)).toBe(80);
+    expect(occ(w, 2.025, 0.225)).toBe(80);
   });
 
   it('turns about the anchor: structure near it barely moves, far structure swings', () => {

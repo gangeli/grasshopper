@@ -510,6 +510,11 @@ export class WorldModel {
   anchorMinMove = 0.03;
   anchorMinTurn = 0.012;
   anchorMaxMove = 3;
+  /** Anchor moves need a neighbour in time that moved alike (see stepAnchors); alone this long (s), the anchor is dropped. */
+  anchorConsensus = true;
+  anchorAloneSeconds = 4;
+  /** Anchors dropped for moving alone (diagnostics). */
+  anchorsDistrusted = 0;
   /** Submaps without a live anchor follow the nearest one in time that has one. */
   anchorProxy = true;
   /** Express anchor motion through the current registration only (realignments since don't move the submap). */
@@ -599,6 +604,7 @@ export class WorldModel {
         continue;
       }
       sm.state = 'live';
+      sm.last = P;
       const R = sm.ref;
       const dx = P[12] - R[12], dz = P[14] - R[14];
       // Yaw of the change (trackers correct about gravity).
@@ -609,6 +615,43 @@ export class WorldModel {
       if (mv > this.anchorMaxMove) {
         sm.ref = P;
         continue;
+      }
+      // A tracker correction moves the anchors around a place together; an
+      // anchor that jumps alone is more likely wrong than right. Wait for a
+      // neighbour in time to move alike (or to have just moved alike); alone
+      // for long, the anchor isn't trusted (its submap then follows its
+      // neighbours, see anchorProxy).
+      if (this.anchorConsensus && !sm.dormant) {
+        const i = this.submaps.indexOf(sm);
+        let neighbours = 0, agree = false;
+        for (let d = -2; d <= 2 && !agree; d++) {
+          const nb = this.submaps[i + d];
+          if (!d || !nb || nb.state !== 'live' || nb.dormant) continue;
+          neighbours++;
+          const tol = Math.max(0.05, 0.4 * mv), tolYaw = Math.max(0.01, 0.4 * Math.abs(dyaw));
+          const like = (ex: number, ez: number, ey: number) => Math.hypot(ex - dx, ez - dz) < tol && Math.abs(ey - dyaw) < tolYaw;
+          if (nb.lastMove && this.now - nb.lastMove.t < this.anchorAloneSeconds && like(nb.lastMove.dx, nb.lastMove.dz, nb.lastMove.dyaw)) agree = true;
+          else if (nb.last) {
+            const Dn = mul4(nb.last, invertRigid4(nb.ref));
+            if (like(nb.last[12] - nb.ref[12], nb.last[14] - nb.ref[14], Math.atan2(Dn[8], Dn[0]))) agree = true;
+          }
+        }
+        if (neighbours > 0 && !agree) {
+          sm.aloneSince ??= this.now;
+          if (this.now - sm.aloneSince > this.anchorAloneSeconds) {
+            this.anchorsDistrusted++;
+            sm.state = 'lost';
+            try {
+              src.release(sm.h);
+            } catch {
+              // ignore
+            }
+            sm.h = null;
+          }
+          continue;
+        }
+        sm.aloneSince = null;
+        sm.lastMove = { t: this.now, dx, dz, dyaw };
       }
       // Tracking-frame motion of what is near the anchor: x' = R(x − a) + a + d.
       const c = Math.cos(dyaw), sn = Math.sin(dyaw);
@@ -712,11 +755,11 @@ export class WorldModel {
 
   /** Move the submaps whose anchors moved (one pass; a submap queued twice waits for the next). */
   private startAnchorWarp(): void {
-    const batch = new Map<SubmapAnchor, { c: Affine2; codeMax: number }>();
+    const batch = new Map<SubmapAnchor, { c: Affine2; codeMax: number; cut: number }>();
     const rest: typeof this.anchorQueue = [];
     for (const e of this.anchorQueue) {
       if (batch.has(e.s)) rest.push(e);
-      else batch.set(e.s, { c: e.c, codeMax: Math.min(e.codeMax, e.s.code1) });
+      else batch.set(e.s, { c: e.c, codeMax: Math.min(e.codeMax, e.s.code1), cut: e.codeMax });
     }
     this.anchorQueue = rest;
     let code0 = 65535, code1 = 0;
@@ -727,7 +770,7 @@ export class WorldModel {
         if (!b) continue;
         for (let d = -3; d <= 3; d++) {
           const nb = this.submaps[i + d];
-          if (nb && (nb.state === 'failed' || nb.state === 'lost')) (code0 = Math.min(code0, nb.code0)), (code1 = Math.max(code1, Math.min(nb.code1, b.codeMax)));
+          if (nb && (nb.state === 'failed' || nb.state === 'lost')) (code0 = Math.min(code0, nb.code0)), (code1 = Math.max(code1, Math.min(nb.code1, b.cut)));
         }
       }
     if (code1 < code0) {
@@ -755,7 +798,7 @@ export class WorldModel {
           const nb = subs[q];
           if (!nb || nb.state === 'failed' || nb.state === 'lost') continue;
           const e = batch.get(nb);
-          return e && this.anchorProxy ? e.c : null;
+          return e && this.anchorProxy && code <= e.cut ? e.c : null;
         }
       return null;
     };
@@ -2946,4 +2989,8 @@ export interface SubmapAnchor {
   moving?: boolean;
   /** What it laid down is in the dormant map (WorldModel.detachMap). */
   dormant?: boolean;
+  /** Latest pose read; last move applied (tracking frame); moving alone since (see anchorConsensus). */
+  last?: number[];
+  lastMove?: { t: number; dx: number; dz: number; dyaw: number };
+  aloneSince?: number | null;
 }
