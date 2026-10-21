@@ -172,7 +172,7 @@ export class NavWorkerClient {
       topFrac: take(g.topFrac, 'topFrac'),
       shadow,
       transient: Float64Array.from(tr),
-      stale: (nav.p.staleMargin > 0 || nav.p.freeMaxAge > 0) && g.hitTime ? staleColumns(g, nav.world.floorLayer, nav.p.staleSeconds, nav.p.freeMaxAge) : null,
+      stale: (nav.p.staleMargin > 0 || nav.p.freeMaxAge > 0) && g.hitTime ? staleColumns(g, nav.world.floorLayer, nav.p.staleMargin > 0 ? nav.p.staleSeconds : 0, nav.p.freeMaxAge) : null,
       world: { floorLayer: nav.world.floorLayer, floorY: nav.world.floorY, depthPoints: nav.world.depthPoints },
       params: { ...nav.p },
     };

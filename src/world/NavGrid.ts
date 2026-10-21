@@ -709,7 +709,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     const n0 = candI.length;
     const keep = new Uint8Array(n0);
     // (A grid copy in the worker has no hit times: the client sends the columns.)
-    const stale = p.staleMargin > 0 || p.freeMaxAge > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleSeconds, p.freeMaxAge) : null) : null;
+    const stale = p.staleMargin > 0 || p.freeMaxAge > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleMargin > 0 ? p.staleSeconds : 0, p.freeMaxAge) : null) : null;
     const rs = stale ? Math.round(p.staleMargin / r) : 0;
     const wd = new Float32Array(n0);
     for (let q = 0; q < n0; q++) {
@@ -884,7 +884,7 @@ function inferLowFree(g: VoxelGrid, T: Uint8Array, floorLayer: number, maxCells:
 
 /**
  * Per column: bit 1 = occupied voxels at body height (up to 25cm) whose
- * evidence is older than `seconds` (VoxelGrid.hitTime); bit 2 (with
+ * evidence is older than `seconds` (VoxelGrid.hitTime; 0 = skip); bit 2 (with
  * freeMaxAge > 0) = its low band was last seen empty longer ago than that
  * (VoxelGrid.colFree; 0 = never, not old).
  */
@@ -895,9 +895,10 @@ export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number, 
     for (let c = 0; c < layer; c++) if (cf[c] !== 0 && cf[c] < fb) out[c] = 2;
   }
   const top = Math.min(g.ny - 1, floorLayer + Math.round(0.25 / g.res));
-  for (let j = floorLayer; j <= top; j++) {
+  // (seconds 0: stale structure not wanted, only old free space.)
+  for (let j = floorLayer; j <= top && seconds > 0; j++) {
     const base = j * layer;
-    for (let c = 0; c < layer; c++) if (g.data[base + c] > OCC_THRESHOLD && (ht[base + c] & 0xffff) < before) out[c] = 1;
+    for (let c = 0; c < layer; c++) if (g.data[base + c] > OCC_THRESHOLD && (ht[base + c] & 0xffff) < before) out[c] |= 1;
   }
   return out;
 }
