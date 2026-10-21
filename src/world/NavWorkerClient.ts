@@ -1,4 +1,4 @@
-import { NavGrid, staleColumns, type NavArrays, type NavParams, type NavWorldInfo } from './NavGrid';
+import { freeRuleOn, NavGrid, staleColumnsFor, type NavArrays, type NavParams, type NavWorldInfo } from './NavGrid';
 import type { VoxelGrid } from './VoxelGrid';
 
 /**
@@ -172,7 +172,7 @@ export class NavWorkerClient {
       topFrac: take(g.topFrac, 'topFrac'),
       shadow,
       transient: Float64Array.from(tr),
-      stale: (nav.p.staleMargin > 0 || nav.p.freeMaxAge > 0) && g.hitTime ? staleColumns(g, nav.world.floorLayer, nav.p.staleMargin > 0 ? nav.p.staleSeconds : 0, nav.p.freeMaxAge) : null,
+      stale: (nav.p.staleMargin > 0 || freeRuleOn(nav.p)) && g.hitTime ? staleColumnsFor(g, nav.world, nav.p) : null,
       world: { floorLayer: nav.world.floorLayer, floorY: nav.world.floorY, depthPoints: nav.world.depthPoints },
       params: { ...nav.p },
     };

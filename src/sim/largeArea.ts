@@ -172,7 +172,7 @@ export interface LargeAreaReport {
   rooms: RoomRetention[];
   cpu: { sense: Stat; game: Stat; frame: Stat; nav: Stat; frameOver16: number };
   final: LargeAreaSample & { pathsColliding: number; pathsTested: number; pathMaxPen: number; nodesColliding: number };
-  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; anchors: Record<string, number> | null; realigns: { t: number; before: number; after: number; what: string }[] };
+  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; anchors: Record<string, number> | null; realigns: { t: number; before: number; after: number; what: string }[]; localReg?: { tries: number; applied: number; why: Record<string, number>; regs: Record<string, number | string | boolean>[] } };
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
@@ -228,6 +228,17 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     });
   let petAnchor: { id: number; a0: number[] | null; last: number[] | null } | null = null;
   o.setup?.(world, stack, sensor);
+  // ORACLE_FOLLOW=1: the tracker's own loop closures handed to local registration exactly (sim truth; the ceiling of localRegFollowJumps).
+  if (process.env.ORACLE_FOLLOW) {
+    const prev = sensor.onLoop;
+    sensor.onLoop = (e) => {
+      prev?.(e);
+      // tracking before → after for fixed real points: L = after · before⁻¹ (column-major), through the map registration.
+      const L = mulCM(e.after, rigidInverse(e.before));
+      const M = mulCM(world.trackingToMap(), mulCM(L, world.mapToTracking()));
+      world.localRegFollow([M[0], M[8], M[12], M[14]]);
+    };
+  }
   const camera = o.depthFrom === 'camera' ? new CameraDepthSource(room, sensor, { seed, every: 1 }) : null;
   const path = houseWalk(house, seed, { seconds, ...o.walk });
   const depthEvery = o.depthEvery ?? 3;
@@ -262,6 +273,52 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
   const dt = 1 / 30;
   // Every map-frame correction, scored against the truth (frame error before → after).
   const realigns: { t: number; before: number; after: number; what: string }[] = [];
+  // Local re-registrations (WorldModel.localReg), scored against the truth:
+  // where the matched old structure really belongs in the current frame
+  // (map → truth when it was laid down, then truth → map now) vs. where the
+  // estimate moves it, 1.5 m around the camera.
+  const m2tByCode = new Map<number, number[]>();
+  const regs: Record<string, number | string | boolean>[] = [];
+  // An accepted move: the local map (precision, falseFree) before it, scored again once it is applied.
+  const pend: { reg: { idx: number; lp: number; ff: number } | null } = { reg: null };
+  world.onLocalReg = (e) => {
+    const Mt = m2tByCode.get(Math.round(e.refCode));
+    if (!Mt) return;
+    const A = mulCM(rigidInverse(mapToTruth(world, sensor)), Mt);
+    let err = 0, need = 0, got = 0;
+    for (const [ox, oz] of [[1.5, 0], [-1.5, 0], [0, 1.5], [0, -1.5]]) {
+      const x = e.pivot.x + ox, z = e.pivot.z + oz;
+      const tr = xf(A, { x, y: 1, z });
+      const ex = e.C[0] * x + e.C[1] * z + e.C[2], ez = -e.C[1] * x + e.C[0] * z + e.C[3];
+      err = Math.max(err, Math.hypot(ex - tr.x, ez - tr.z));
+      need = Math.max(need, Math.hypot(tr.x - x, tr.z - z));
+      got = Math.max(got, Math.hypot(ex - x, ez - z));
+    }
+    // Old structure (the reference footprint) on real structure through the current frame, before and after the move.
+    const M = mapToTruth(world, sensor), ref = e.ref;
+    const onReal = (x: number, z: number) => {
+      const p = xf(M, { x, y: 1, z });
+      for (const b of room.boxes) if (b.max.y > 0.1 && b.min.y < 1.9 && p.x > b.min.x - 0.08 && p.x < b.max.x + 0.08 && p.z > b.min.z - 0.08 && p.z < b.max.z + 0.08) return true;
+      return false;
+    };
+    let rw = 0, pre = 0, post = 0;
+    for (let b = 0; b < ref.h; b++)
+      for (let a = 0; a < ref.w; a++) {
+        const c = ref.cnt[b * ref.w + a];
+        if (!c) continue;
+        const x = ref.ox + (a + 0.5) * ref.res, z = ref.oz + (b + 0.5) * ref.res;
+        if ((x - e.pivot.x) ** 2 + (z - e.pivot.z) ** 2 > 9) continue;
+        rw += c;
+        if (onReal(x, z)) pre += c;
+        if (onReal(e.C[0] * x + e.C[1] * z + e.C[2], -e.C[1] * x + e.C[0] * z + e.C[3])) post += c;
+      }
+    if (e.accepted && curCam) {
+      const lp = localPrecision(world, sensor, room, curCam), ff = localFalseFree(world, sensor, room, curCam);
+      pend.reg = { idx: regs.length, lp: lp.precision, ff: ff.shell ? ff.bad / ff.shell : 0 };
+    }
+    regs.push({ t: e.t, ok: e.accepted, why: e.why, err, need, got, inl: e.inliers, inl0: e.inliers0, pre: rw ? pre / rw : 1, post: rw ? post / rw : 1, best: e.best, second: e.second, see0: e.see0, see1: e.see1, m0: e.matched0, m: e.matched, n: e.n, dims: e.dims, rw });
+    if (process.env.TRACE === 'reg') log(`  reg ${e.t.toFixed(1)}s ${e.why} need ${(need * 100).toFixed(0)}cm got ${(got * 100).toFixed(0)}cm err ${(err * 100).toFixed(0)}cm on-real ${(Number(regs[regs.length - 1].pre) * 100).toFixed(0)}→${(Number(regs[regs.length - 1].post) * 100).toFixed(0)}% see ${(e.see0 * 1000).toFixed(1)}→${(e.see1 * 1000).toFixed(1)}‰ inl ${e.inliers0}/${e.matched0}→${e.inliers}/${e.matched} n ${e.n} dims ${e.dims} age ${(world.timeCode(world.now) - e.refCode).toFixed(0)}s`);
+  };
   let curCam: SimCamera | null = null;
   const origRealign = world.realign.bind(world);
   world.realign = (dx, dz, dyaw, pivot, since) => {
@@ -311,6 +368,16 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       room.time = step.t;
       if (f > 0) walked += Math.hypot(step.cam.pos.x - path[f - 1].cam.pos.x, step.cam.pos.z - path[f - 1].cam.pos.z);
       sensor.moveTo(step.cam, step.t, dt);
+      const pr = pend.reg;
+      if (pr && !world.warpBusy) {
+        const lp = localPrecision(world, sensor, room, step.cam), ff = localFalseFree(world, sensor, room, step.cam);
+        Object.assign(regs[pr.idx], { lp0: pr.lp, lp1: lp.precision, ff0: pr.ff, ff1: ff.shell ? ff.bad / ff.shell : 0 });
+        pend.reg = null;
+      }
+      if (world.grid) {
+        const code = world.timeCode(step.t);
+        if (!m2tByCode.has(code)) m2tByCode.set(code, mapToTruth(world, sensor));
+      }
       anchors?.step(step.t, dt);
       if (petAnchor && anchors) {
         // ArMode.updateAnchor: C = A0 · A(t)⁻¹ corrects the whole map frame.
@@ -518,7 +585,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     rooms,
     cpu: { sense: stat(senseT), game: stat(gameT), frame: fs, nav: stat(navTimes), frameOver16: frameT.filter((x) => x > 16).length },
     final: { ...fin, pathsColliding: em.pathsColliding, pathsTested: em.pathsTested, pathMaxPen: em.pathMaxPenetration, nodesColliding: em.nodesColliding },
-    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, anchors: anchors ? { ...anchors.stats, live: anchors.live, submaps: world.submaps.length, submapWarps: world.submapWarps, anchorMoves: world.anchorMoves } : null, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
+    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, anchors: anchors ? { ...anchors.stats, live: anchors.live, submaps: world.submaps.length, submapWarps: world.submapWarps, anchorMoves: world.anchorMoves } : null, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, localReg: world.localReg ? { tries: world.localRegTries, applied: world.localRegApplied, why: { ...world.localRegWhy }, regs } : undefined, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
     arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,

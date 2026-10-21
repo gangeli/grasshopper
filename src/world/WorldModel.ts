@@ -7,6 +7,7 @@ import { ChunkStore, keyCx, keyCz, mergeChunkInto, shiftCopy, shiftInPlace, type
 import type { Correction } from './warp';
 import { angDiff, frameHeading, PlaceMemory, type PlaceMatch } from './PlaceMemory';
 import type { SerializedChunk } from './MapFormat';
+import { coarse2d, icp2d, mergeCoarse, nearestField, refLines, type CoarseResult, type RefImage } from './LocalReg';
 
 /**
  * Everything the pet knows about the physical room. It fuses the sensor
@@ -906,11 +907,14 @@ export class WorldModel {
       this.grid.freeBandTop = this.floorLayer + Math.round(0.45 / this.res);
       this.grid.fadeBelowNew = this.fadeBelowNew;
       this.grid.fadeFloorJ = this.floorLayer;
+      if (!this.grid.freeTime && (this.localReg || this.staleFreeMinAge > 0 || this.warpFree)) this.grid.freeTime = new Uint16Array(this.grid.data.length);
       if (++this.frameCount % 30 === 0) this.grid.pruneTransient();
       // Frames waiting to be re-integrated (sliced replays, a re-attach): a few per frame.
       this.stepReplayQueue(3);
       // A warp in progress: a few window layers / archive chunks per frame.
       this.stepWarp(2);
+      // The old map near the player kept registered to the view.
+      if (this.localReg && !this.replaying && !emulatedPose) this.stepLocalReg(t);
       // Submaps following their anchors.
       if (this.anchorSource && !this.replaying && !emulatedPose) this.stepAnchors(raw, t);
     }
@@ -1210,6 +1214,8 @@ export class WorldModel {
   /** ...when the reading lands in a voxel at most this free; what is left of the free belief (×). */
   staleFreeTrigger = -8;
   staleFreeKeep = 0.5;
+  /** Only free space last seen at least this long ago (s) is weakened (per-voxel free times; 0: any). */
+  staleFreeMinAge = 0;
   /** See ingestDepthImage: hold back frames that contradict the map (on by default). */
   holdOnConflict = true;
   /** Share of probed readings behind confident surfaces that makes a frame "contradicting". */
@@ -1649,10 +1655,31 @@ export class WorldModel {
     this.warpPhase = 'window';
     // Pass 1a: the window.
     const gh = g.hitTime;
+    // Free space moves too when free times are kept (warpFree): by when it was last seen empty.
+    const ft = this.warpFree ? g.freeTime : null;
+    const fSrc: number[] = [], fDst: number[] = [], fVal: number[] = [], fT: number[] = [];
+    const fMark = ft ? (this.localRegMark && this.localRegMark.length === g.data.length ? this.localRegMark : (this.localRegMark = new Uint8Array(g.data.length))) : null;
     for (let j = fl; j < ny; j++, yield)
       for (let k = 0; k < g.nz; k++)
         for (let i = 0; i < g.nx; i++) {
           const q = j * layer + k * g.nx + i;
+          if (ft && g.data[q] < 0) {
+            const when = ft[q];
+            if (when < code0 || when > code1 || when === 0) continue;
+            const e = corrFor(when);
+            if (!e) continue;
+            const x = g.centerX(i), z = g.centerZ(k);
+            const I2 = g.cellX(e[0] * x + e[1] * z + e[2]), K2 = g.cellZ(-e[1] * x + e[0] * z + e[3]);
+            if ((I2 === i && K2 === k) || I2 < 0 || K2 < 0 || I2 >= g.nx || K2 >= g.nz) continue;
+            fSrc.push(q);
+            fDst.push(j * layer + K2 * g.nx + I2);
+            fVal.push(g.data[q]);
+            fT.push(when);
+            g.data[q] = 0;
+            ft[q] = 0;
+            fMark![q] = 2;
+            continue;
+          }
           if (visit(this.wi + i, j, this.wk + k, g.data[q], gh[q], g.topFrac[q], g.underside[q], gx ? gx[q] : 0, gz ? gz[q] : 0)) {
             g.data[q] = 0;
             gh[q] = 0;
@@ -1752,6 +1779,32 @@ export class WorldModel {
       if (tops[q] !== 255) (ch.topFrac ??= new Uint8Array(n).fill(255))[li] = tops[q];
       if (unders[q]) (ch.underside ??= new Uint8Array(n))[li] |= unders[q];
     }
+    // Pass 2b: free movers, after the structure: never over structure, into the unknown only where something moved away.
+    if (ft && fMark) {
+      for (let q = 0; q < fSrc.length; q++) {
+        if (q % 20000 === 19999) yield;
+        const t = fDst[q], dv = g.data[t];
+        if (dv > 0) continue;
+        if (dv === 0 && fMark[t] !== 2) continue;
+        if (dv < 0 && dv <= fVal[q]) continue;
+        g.data[t] = fVal[q];
+        ft[t] = fT[q];
+      }
+      for (let q = 0; q < fSrc.length; q++) fMark[fSrc[q]] = 0;
+      if (fSrc.length && g.colFree) {
+        const cols = new Set<number>();
+        for (let q = 0; q < fSrc.length; q++) cols.add(fSrc[q] % layer), cols.add(fDst[q] % layer);
+        for (const col of cols) {
+          let best = 0;
+          for (let j = fl; j < g.freeBandTop; j++) {
+            const q = j * layer + col;
+            if (g.data[q] < 0) best = Math.max(best, ft[q] || 1);
+          }
+          g.colFree[col] = best;
+        }
+      }
+      if (fSrc.length) (g.touchAll(), g.version++);
+    }
     this.warpPhase = 'sparse';
     // Back to sparse hit times.
     for (const { ch, hit } of dense.values()) {
@@ -1768,12 +1821,451 @@ export class WorldModel {
   }
   /** The part of a warp in progress (diagnostics). */
   warpPhase = '';
+  /** Warps move free space too, by when it was last seen empty (per-voxel free times, window only). */
+  warpFree = false;
   /** Warp by when structure was laid down (birth) rather than when it was last seen. */
   warpByBirth = true;
   /** Moving structure forgets the free space between where it was and where it goes (see warpPass). */
   warpClearSwept = false;
   /** Loop-closure warps applied (diagnostics). */
   warps = 0;
+
+  // --- Local re-registration (see LocalReg.ts) -----------------------------------------
+  /**
+   * Keep the old map near the player registered to the current view: every
+   * `localRegEvery` s, the footprint of the latest depth readings is matched
+   * (plan view, small search) against old structure within
+   * `localRegRadius`, and old structure and old free space there are moved
+   * onto the view. Off by default.
+   */
+  localReg = false;
+  localRegEvery = 2;
+  /** Structure / free space not seen for this long (s) counts as old (may move). */
+  localRegMinAge = 4;
+  localRegRadius = 4;
+  /** Depth frames of the last this many seconds are the view. */
+  localRegFresh = 1;
+  localRegMaxShift = 0.3;
+  localRegMaxYaw = 0.1;
+  /** Moves smaller than this (m, at 1.5 m from the camera) aren't applied. */
+  localRegMinMove = 0.02;
+  /** Wait this long after a tracking loss (s): the drift monitor judges jumps then. */
+  localRegEventWait = 4;
+  /** Estimation steps per depth frame. */
+  localRegSteps = 2;
+  /** Acceptance: points, inliers, inlier share, gain over doing nothing. */
+  localRegMinPoints = 80;
+  localRegMinInliers = 20;
+  localRegMinShare = 0;
+  localRegGain = 0;
+  /** False: estimate only (diagnostics). */
+  localRegApply = true;
+  /** Coarse search before the ICP (shifts ±localRegMaxShift, these yaws); a second peak this close to the best (×) rejects. */
+  localRegCoarse = false;
+  localRegYaws = [-0.04, -0.02, 0, 0.02, 0.04];
+  localRegCoarseStep = 0.03;
+  localRegUnique = 0.85;
+  /** Only what was last seen within this many seconds of the matched old structure moves (0: everything old). */
+  localRegSpan = 15;
+  /** Old free space in the moved part: moves with the structure, stays, or is forgotten (unknown). */
+  localRegFree: 'move' | 'stay' | 'forget' = 'move';
+  /**
+   * The view must see through old structure (share of ray samples inside it,
+   * ≥ minSee: the old map is in the way) and the move must clear most of it
+   * (≤ seeGain × before): a move that only slides the view onto other old
+   * structure doesn't.
+   */
+  localRegMinSee = 0.004;
+  localRegSeeGain = 0.9;
+  /** Registrations tried / applied / rejected by reason (diagnostics). */
+  localRegTries = 0;
+  localRegApplied = 0;
+  localRegWhy: Record<string, number> = {};
+  /** Each estimate (diagnostics: the sim scores it against the truth). */
+  onLocalReg?: (e: { t: number; pivot: Vec3; C: Affine2; accepted: boolean; why: string; inliers: number; inliers0: number; matched: number; n: number; dims: number; cutoff: number; refCode: number; best: number; second: number; ref: RefImage; see0: number; see1: number; matched0: number }) => void;
+  onLocalRegData?: (ref: RefImage, pts: Float32Array, pivot: { x: number; z: number }) => void;
+  /** Follow the tracker's own pose corrections with what was moved in the last localRegJumpMemory s. */
+  localRegFollowJumps = false;
+  localRegJumpMemory = 120;
+  localRegJumps = 0;
+  private localRegMoves: { c: Vec3; R: number; lo: number; hi: number; t: number }[] = [];
+  private localRegJumpSeen: PoseGate['lastJump'] = null;
+  private localRegT = -Infinity;
+  private localRegTask: Generator<void, void, void> | null = null;
+  private localRegMark: Uint8Array | null = null;
+
+  private stepLocalReg(t: number): void {
+    const g = this.grid;
+    if (!g || !g.hitTime) return;
+    if (!g.freeTime) g.freeTime = new Uint16Array(g.data.length);
+    // The tracker corrected its pose (a jump the pose gate saw: its own loop
+    // closure): what was moved onto the drifted view moves with it.
+    const J = this.poseGate.lastJump;
+    // (Acted on a few frames later: a "jump" the next frames explain as a change of speed is withdrawn.)
+    if (J && J !== this.localRegJumpSeen && t - J.t >= 0.3) {
+      this.localRegJumpSeen = J;
+      if (this.localRegFollowJumps && Math.hypot(J.dx, J.dz) >= 0.03 && Math.abs(J.t - this.lastTrackingEvent) > 1) {
+        if (this.localRegFollow([1, 0, J.dx, J.dz], t)) return;
+      }
+    }
+    if (this.localRegTask) {
+      for (let q = 0; q < this.localRegSteps; q++)
+        if (this.localRegTask.next().done) {
+          this.localRegTask = null;
+          break;
+        }
+      return;
+    }
+    if (t - this.localRegT < this.localRegEvery && t >= this.localRegT) return;
+    if (this.warpTask || this.dormant || this.replayQueue.length || t - this.lastTrackingEvent < this.localRegEventWait) return;
+    this.localRegT = t;
+    this.localRegTask = this.localRegEstimate(t);
+  }
+
+  /** Move old voxels near `c` by C now (what an accepted registration does, unsliced; tests). */
+  localRegMove(c: Vec3, R: number, lo: number, hi: number, C: Affine2): number {
+    const g = this.grid;
+    if (!g || !g.hitTime) return 0;
+    g.freeTime ??= new Uint16Array(g.data.length);
+    this.finishWarp();
+    const rc = Math.ceil(R / g.res), ci = g.cellX(c.x), ck = g.cellZ(c.z);
+    const it = this.localWarpPass(Math.max(0, ci - rc), Math.min(g.nx - 1, ci + rc), Math.max(0, ck - rc), Math.min(g.nz - 1, ck + rc), c, R, lo, hi, C);
+    for (;;) {
+      const r = it.next();
+      if (r.done) return r.value;
+    }
+  }
+
+  /**
+   * The tracker moved its frame by C (map frame, x/z): move what local
+   * registration moved onto the view in the last localRegJumpMemory s along
+   * (it was put where the old, drifted frame saw it). Returns whether a move started.
+   */
+  localRegFollow(C: Affine2, t = this.now): boolean {
+    const recent = this.localRegMoves.filter((mv) => t - mv.t <= this.localRegJumpMemory);
+    this.localRegMoves = recent;
+    if (!recent.length || !this.grid) return false;
+    this.localRegTask = null;
+    this.finishWarp();
+    const g = this.grid;
+    let i0 = g.nx, i1 = -1, k0 = g.nz, k1 = -1, lo = Infinity, hi = 0;
+    for (const mv of recent) {
+      const rc = Math.ceil(mv.R / g.res), ci = g.cellX(mv.c.x), ck = g.cellZ(mv.c.z);
+      i0 = Math.min(i0, ci - rc);
+      i1 = Math.max(i1, ci + rc);
+      k0 = Math.min(k0, ck - rc);
+      k1 = Math.max(k1, ck + rc);
+      lo = Math.min(lo, mv.lo);
+      hi = Math.max(hi, mv.hi);
+    }
+    i0 = Math.max(0, i0);
+    k0 = Math.max(0, k0);
+    i1 = Math.min(g.nx - 1, i1);
+    k1 = Math.min(g.nz - 1, k1);
+    if (i1 < i0 || k1 < k0) return false;
+    const zones = recent.map((mv) => ({ x: mv.c.x, z: mv.c.z, R2: mv.R * mv.R, lo: mv.lo, hi: mv.hi }));
+    this.warpTask = this.localWarpPass(i0, i1, k0, k1, recent[0].c, 0, lo, hi, C, zones);
+    for (const mv of recent) mv.c = { x: C[0] * mv.c.x + C[1] * mv.c.z + C[2], y: mv.c.y, z: -C[1] * mv.c.x + C[0] * mv.c.z + C[3] };
+    this.localRegJumps++;
+    this.stepWarp(1);
+    return true;
+  }
+
+  private localRegReject(why: string): void {
+    this.localRegWhy[why] = (this.localRegWhy[why] ?? 0) + 1;
+  }
+
+  private *localRegEstimate(t: number): Generator<void, void, void> {
+    const g0 = this.grid!;
+    const epoch = this.epoch, fv = this.frameVersion;
+    const last = this.replay[this.replay.length - 1];
+    if (!last || t - last.t > 0.5) return this.localRegReject('no view');
+    const eye = { ...last.eye };
+    this.localRegTries++;
+    const stale = () => this.grid !== g0 || this.epoch !== epoch || this.frameVersion !== fv || this.warpTask !== null;
+    // Chunks still coming back into the window would refill moved space with unmoved data.
+    while (this.pendingLoads.length) {
+      this.loadPending(2);
+      yield;
+      if (stale()) return this.localRegReject('moved');
+    }
+    const g = g0, r = g.res, R = this.localRegRadius, rc = Math.ceil(R / r);
+    const ci = g.cellX(eye.x), ck = g.cellZ(eye.z);
+    const i0 = Math.max(0, ci - rc), i1 = Math.min(g.nx - 1, ci + rc), k0 = Math.max(0, ck - rc), k1 = Math.min(g.nz - 1, ck + rc);
+    if (i1 <= i0 || k1 <= k0) return this.localRegReject('outside');
+    const w = i1 - i0 + 1, h = k1 - k0 + 1, layer = g.nx * g.nz;
+    const cutoff = g.stamp - Math.max(1, Math.round(this.localRegMinAge));
+    const fl = this.floorLayer, j0 = fl + 2, j1 = Math.min(g.ny - 1, fl + Math.round(1.9 / r));
+    const cnt = new Float32Array(w * h);
+    // Per cell: the latest last-seen time of its movable (not re-seen) structure, 0 = none.
+    const lastOld = new Uint16Array(w * h);
+    const data = g.data, hit = g.hitTime!;
+    let refCodes = 0, refN = 0;
+    for (let j = j0; j <= j1; j++) {
+      for (let k = k0; k <= k1; k++) {
+        const row = j * layer + k * g.nx, o = (k - k0) * w - i0;
+        for (let i = i0; i <= i1; i++) {
+          const v = data[row + i];
+          if (v > OCC_THRESHOLD && v !== 127) {
+            // Structure laid down before the cutoff, re-seen since or not: where the
+            // old map is (re-seen voxels are where the view puts them; a copy
+            // left behind by drift isn't re-seen and keeps only its old time).
+            const code = hit[row + i] >>> 16;
+            if (code <= cutoff && code > 0) {
+              cnt[o + i]++;
+              const last = hit[row + i] & 0xffff;
+              if (last <= cutoff && last > lastOld[o + i]) lastOld[o + i] = last;
+              refCodes += code;
+              refN++;
+            }
+          }
+        }
+      }
+      if ((j - j0) % 6 === 5) {
+        yield;
+        if (stale()) return this.localRegReject('moved');
+      }
+    }
+    if (refN < 50) return this.localRegReject('no old structure');
+    // The view: plan-view footprint of the latest readings at body height, one point per cell.
+    const bins = new Map<number, [number, number, number]>();
+    const y0 = this.floorY + 0.1, y1 = this.floorY + 1.9, R2 = R * R;
+    for (let f = this.replay.length - 1; f >= 0; f--) {
+      const fr = this.replay[f];
+      if (t - fr.t > this.localRegFresh) break;
+      const P = fr.pts, ex = fr.eye.x, ez = fr.eye.z;
+      for (let q = 0; q < P.length; q += 3) {
+        const y = P[q + 1];
+        if (y < y0 || y > y1) continue;
+        const x = P[q], z = P[q + 2];
+        const d2 = (x - ex) * (x - ex) + (z - ez) * (z - ez);
+        if (d2 < 0.09 || d2 > 12.25) continue;
+        if ((x - eye.x) * (x - eye.x) + (z - eye.z) * (z - eye.z) > R2) continue;
+        const a = g.cellX(x) - i0, b = g.cellZ(z) - k0;
+        if (a < 0 || b < 0 || a >= w || b >= h) continue;
+        const key = b * w + a;
+        const e = bins.get(key);
+        if (e) (e[0] += x), (e[1] += z), e[2]++;
+        else bins.set(key, [x, z, 1]);
+      }
+    }
+    const pts = new Float32Array(bins.size * 2);
+    let np = 0;
+    for (const [x, z, c] of bins.values()) (pts[np++] = x / c), (pts[np++] = z / c);
+    if (bins.size < this.localRegMinPoints) return this.localRegReject('few points');
+    // Rays of the view (a sample): old structure it sees through is where the old map is wrong.
+    const rays: number[] = [];
+    for (let f = this.replay.length - 1; f >= 0; f--) {
+      const fr = this.replay[f];
+      if (t - fr.t > this.localRegFresh) break;
+      const P = fr.pts;
+      for (let q = (f * 7) % 11 * 3; q < P.length; q += 33) {
+        const y = P[q + 1];
+        if (y < y0 || y > y1) continue;
+        rays.push(fr.eye.x, fr.eye.y, fr.eye.z, P[q], y, P[q + 2]);
+      }
+    }
+    /** Ray samples (≥ 15 cm short of the reading) inside old structure, with the view taken into the old map by T. */
+    const seeThrough = (T: Affine2) => {
+      let bad = 0, n = 0;
+      const [c, sn, ax, az] = T;
+      for (let q = 0; q < rays.length; q += 6) {
+        const ex = rays[q], ey = rays[q + 1], ez = rays[q + 2], px = rays[q + 3], py = rays[q + 4], pz = rays[q + 5];
+        const L = Math.hypot(px - ex, py - ey, pz - ez);
+        for (let d = 0.3; d < L - 0.15; d += r) {
+          const u = d / L, x = ex + (px - ex) * u, y = ey + (py - ey) * u, z = ez + (pz - ez) * u;
+          const X = c * x + sn * z + ax, Z = -sn * x + c * z + az;
+          const i = g.cellX(X), j = g.cellY(y), k = g.cellZ(Z);
+          if (!g.inBounds(i, j, k)) continue;
+          n++;
+          const v = data[g.idx(i, j, k)];
+          if (v > OCC_THRESHOLD && v !== 127) {
+            const b = hit[g.idx(i, j, k)] >>> 16;
+            if (b > 0 && b <= cutoff) bad++;
+          }
+        }
+      }
+      return n ? bad / n : 0;
+    };
+    yield;
+    if (stale()) return this.localRegReject('moved');
+    const ref: RefImage = { w, h, res: r, ox: g.origin.x + i0 * r, oz: g.origin.z + k0 * r, cnt };
+    const near = nearestField(ref, 8);
+    yield;
+    if (stale()) return this.localRegReject('moved');
+    const pivot = { x: eye.x, z: eye.z };
+    this.onLocalRegData?.(ref, pts, pivot);
+    // Coarse overlap search first (one yaw per step), then ICP from the best.
+    let co: CoarseResult | null = null;
+    if (this.localRegCoarse) {
+      const yaws = this.localRegYaws;
+      for (const yw of yaws) {
+        const c1 = coarse2d(pts, ref, near, pivot, this.localRegMaxShift, this.localRegCoarseStep, [yw]);
+        co = mergeCoarse(co, c1, yw === 0);
+        yield;
+        if (stale()) return this.localRegReject('moved');
+      }
+    }
+    const est = icp2d(pts, ref, near, refLines(ref), pivot, undefined, co ?? undefined);
+    const C = est.C as Affine2;
+    const see0 = seeThrough([1, 0, 0, 0]), see1 = seeThrough(est.T as Affine2);
+    // How far it moves things 1.5 m from the camera.
+    let move = 0;
+    for (const [ox, oz] of [[1.5, 0], [-1.5, 0], [0, 1.5], [0, -1.5]]) {
+      const x = eye.x + ox, z = eye.z + oz;
+      move = Math.max(move, Math.hypot(C[0] * x + C[1] * z + C[2] - x, -C[1] * x + C[0] * z + C[3] - z));
+    }
+    const shift = Math.hypot(C[0] * eye.x + C[1] * eye.z + C[2] - eye.x, -C[1] * eye.x + C[0] * eye.z + C[3] - eye.z);
+    const yaw = Math.abs(Math.atan2(C[1], C[0]));
+    let why = '';
+    if (!est.dims) why = 'unconstrained';
+    else if (est.inliers < this.localRegMinInliers) why = 'few inliers';
+    else if (est.inliers < this.localRegMinShare * est.matched) why = 'poor fit';
+    else if (est.inliers < this.localRegGain * est.inliers0) why = 'no gain';
+    else if (shift > this.localRegMaxShift || yaw > this.localRegMaxYaw) why = 'too far';
+    else if (move < this.localRegMinMove) why = 'small';
+    else if (co && co.second > this.localRegUnique * co.best) why = 'ambiguous';
+    else if (see0 < this.localRegMinSee) why = 'not seen through';
+    else if (see1 > this.localRegSeeGain * see0) why = 'still seen through';
+    this.onLocalReg?.({ t, pivot: eye, C, accepted: !why, why: why || 'ok', inliers: est.inliers, inliers0: est.inliers0, matched: est.matched, n: est.n, dims: est.dims, cutoff, refCode: refCodes / refN, best: co?.best ?? 0, second: co?.second ?? 0, ref, see0, see1, matched0: est.matched0 });
+    if (why) return this.localRegReject(why);
+    if (stale()) return this.localRegReject('moved');
+    if (!this.localRegApply) return this.localRegReject('dry run');
+    this.localRegApplied++;
+    // What moves: old structure and free space from when the matched structure was last seen (± localRegSpan s).
+    const codes = est.cells.map((c) => lastOld[c]).filter((c) => c > 0).sort((a, b) => a - b);
+    let lo = 1, hi = cutoff;
+    if (this.localRegSpan > 0) {
+      if (codes.length < 10) return this.localRegReject('no old match');
+      lo = Math.max(1, codes[Math.floor(codes.length * 0.1)] - this.localRegSpan);
+      hi = Math.min(cutoff, codes[Math.floor(codes.length * 0.9)] + this.localRegSpan);
+    }
+    this.warpTask = this.localWarpPass(i0, i1, k0, k1, eye, R, lo, hi, C);
+    // Moved structure lands around where the camera now is (centre moved with it).
+    this.localRegMoves.push({ c: { x: C[0] * eye.x + C[1] * eye.z + C[2], y: eye.y, z: -C[1] * eye.x + C[0] * eye.z + C[3] }, R: R + 0.3, lo, hi, t });
+    if (this.localRegMoves.length > 40) this.localRegMoves.shift();
+    this.stepWarp(1);
+  }
+
+  /**
+   * Move old voxels (occupied: last hit at or before `cutoff`; free: last
+   * carved then) within R of `c` by C, in the window. What was seen since
+   * stays and wins where moved voxels land on it; occupied beats free among
+   * the moved ones. Steps of a few layers.
+   */
+  private *localWarpPass(i0: number, i1: number, k0: number, k1: number, c: Vec3, R: number, lo: number, cutoff: number, C: Affine2, zones: { x: number; z: number; R2: number; lo: number; hi: number }[] | null = null): Generator<void, number, void> {
+    const g = this.grid!;
+    const hit = g.hitTime!, free = g.freeTime!, data = g.data, gx = g.subX, gz = g.subZ;
+    const r = g.res, layer = g.nx * g.nz, fl = this.floorLayer, ny = g.ny, R2 = R * R;
+    const [cs, sn, ax, az] = C;
+    const freeMode = this.localRegFree;
+    const forgot: number[] = [];
+    const src: number[] = [], dst: number[] = [], vals: number[] = [], hits: number[] = [], frees: number[] = [], tops: number[] = [], unders: number[] = [], sub: number[] = [];
+    this.warpPhase = 'local';
+    // Marks (window-sized, cleared after): 2 = vacated by a mover, 1 = written by one.
+    const mark = this.localRegMark && this.localRegMark.length === data.length ? this.localRegMark : (this.localRegMark = new Uint8Array(data.length));
+    for (let j = fl; j < ny; j++) {
+      for (let k = k0; k <= k1; k++) {
+        const z = g.centerZ(k);
+        for (let i = i0; i <= i1; i++) {
+          const q = j * layer + k * g.nx + i;
+          const v = data[q];
+          if (v === 0 || v === 127) continue;
+          const when = v > 0 ? hit[q] & 0xffff : free[q];
+          if (when > cutoff || when < lo) continue;
+          if (zones) {
+            // Any of several moved places (each voxel moves once).
+            const x = g.centerX(i);
+            let inside = false;
+            for (const zn of zones) if (when >= zn.lo && when <= zn.hi && (x - zn.x) * (x - zn.x) + (z - zn.z) * (z - zn.z) <= zn.R2) inside = true;
+            if (!inside) continue;
+          }
+          if (v < 0 && freeMode !== 'move') {
+            if (freeMode === 'forget') {
+              const x = g.centerX(i);
+              if ((x - c.x) * (x - c.x) + (z - c.z) * (z - c.z) <= R2) (data[q] = 0), (free[q] = 0), (mark[q] = 2), forgot.push(q);
+            }
+            continue;
+          }
+          let x = g.centerX(i), zz = z;
+          if (!zones && (x - c.x) * (x - c.x) + (z - c.z) * (z - c.z) > R2) continue;
+          if (gx && gz) (x += (gx[q] / 128) * r), (zz += (gz[q] / 128) * r);
+          const X = cs * x + sn * zz + ax, Z = -sn * x + cs * zz + az;
+          const fx = (X - g.origin.x) / r, fz = (Z - g.origin.z) / r;
+          const I2 = Math.floor(fx), K2 = Math.floor(fz);
+          if (I2 < 0 || K2 < 0 || I2 >= g.nx || K2 >= g.nz) continue;
+          const sx = Math.max(-64, Math.min(63, Math.round((fx - I2 - 0.5) * 128))), sz = Math.max(-64, Math.min(63, Math.round((fz - K2 - 0.5) * 128)));
+          if (I2 === i && K2 === k) {
+            if (gx && gz) (gx[q] = sx), (gz[q] = sz);
+            continue;
+          }
+          src.push(q);
+          dst.push(j * layer + K2 * g.nx + I2);
+          vals.push(v);
+          hits.push(hit[q]);
+          frees.push(free[q]);
+          tops.push(g.topFrac[q]);
+          unders.push(g.underside[q]);
+          sub.push(((sx + 64) << 8) | (sz + 64));
+          data[q] = 0;
+          mark[q] = 2;
+          hit[q] = 0;
+          free[q] = 0;
+          g.topFrac[q] = 255;
+          g.underside[q] = 0;
+          if (gx && gz) gx[q] = gz[q] = 0;
+        }
+      }
+      if ((j - fl) % 4 === 3) yield;
+    }
+    const m = src.length;
+    const cols = new Set<number>();
+    for (const q of forgot) (mark[q] = 0), cols.add(q % layer);
+    if (!m && !forgot.length) return 0;
+    for (let q = 0; q < m; q++) {
+      if (q % 20000 === 19999) yield;
+      const t = dst[q], mv = vals[q], dv = data[t];
+      cols.add(src[q] % layer);
+      if (dv === 127) continue;
+      if (mark[t] === 1) {
+        // Two movers on one voxel: occupied beats free, else the stronger.
+        if (!((mv > 0 && dv <= 0) || (mv > 0 === dv > 0 && Math.abs(mv) > Math.abs(dv)))) continue;
+      } else {
+        // Seen since the cutoff: what the camera saw wins.
+        if (dv > 0 ? (hit[t] & 0xffff) > cutoff : dv < 0 && free[t] > cutoff) continue;
+        if (mv > 0 ? dv >= mv : dv > 0) continue;
+        // Free space only moves into space that was free or moved away, never
+        // into the unknown (the never-seen inside of furniture next to it).
+        if (mv < 0 && dv === 0 && mark[t] !== 2) continue;
+      }
+      mark[t] = 1;
+      data[t] = mv;
+      hit[t] = mv > 0 ? hits[q] : 0;
+      free[t] = mv < 0 ? frees[q] : 0;
+      if (tops[q] !== 255) g.topFrac[t] = tops[q];
+      g.underside[t] = unders[q];
+      if (gx && gz) (gx[t] = (sub[q] >> 8) - 64), (gz[t] = (sub[q] & 255) - 64);
+      cols.add(t % layer);
+    }
+    for (let q = 0; q < m; q++) mark[dst[q]] = mark[src[q]] = 0;
+    // Low-band free times of the columns touched (see VoxelGrid.colFree).
+    const cf = g.colFree, band = g.freeBandTop;
+    if (cf)
+      for (const col of cols) {
+        let best = 0;
+        for (let j = fl; j < band; j++) {
+          const q = j * layer + col;
+          if (data[q] < 0) best = Math.max(best, free[q] || 1);
+        }
+        cf[col] = best;
+      }
+    // Recovery copies predate the move (restoring one would undo it).
+    this.snapshots = [];
+    g.touchAll();
+    g.version++;
+    this.emit({ kind: 'localReg', t: this.now, moved: m, correction: C });
+    return m;
+  }
 
   /** Whole seconds since the session started, from 1 (VoxelGrid.hitTime). */
   timeCode(t: number): number {
@@ -1830,6 +2322,7 @@ export class WorldModel {
     g.colFree = old.colFree ? shifted(old.colFree, new Uint16Array(old.nx * old.nz), 1, () => 1) : null;
     g.freeBandTop = old.freeBandTop;
     g.subX = old.subX ? shifted(old.subX, new Int8Array(n), old.ny, () => 0) : null;
+    g.freeTime = old.freeTime ? shifted(old.freeTime, new Uint16Array(n), old.ny, () => 0) : null;
     g.subZ = old.subZ ? shifted(old.subZ, new Int8Array(n), old.ny, () => 0) : null;
     g.stamp = old.stamp;
     const entering: [number, number][] = [];
@@ -1977,7 +2470,7 @@ export class WorldModel {
       // and the old "empty" belief there is the likeliest to be wrong (the
       // inside of a sofa the old, shifted copy of the room had in front of
       // it): weaken it towards unknown, so that only fresh looks clear it again.
-      if (this.staleFreeDecay > 0 && sigma < 0.04 && endV <= this.staleFreeTrigger && p.y > this.floorY + 0.06) g.decayBehind(eye, p, this.staleFreeDecay, this.staleFreeKeep);
+      if (this.staleFreeDecay > 0 && sigma < 0.04 && endV <= this.staleFreeTrigger && p.y > this.floorY + 0.06) g.decayBehind(eye, p, this.staleFreeDecay, this.staleFreeKeep, this.staleFreeMinAge > 0 ? g.stamp - this.staleFreeMinAge : Infinity);
       const c = g.integrateRay(eye, p, true, hitDelta, miss, carveShort);
       if (sigma < 0.04) {
         rays++;
@@ -2142,6 +2635,7 @@ export class WorldModel {
       g.underside.set(old.underside.subarray(jo * layer, (jo + 1) * layer), j * layer);
       g.topFrac.set(old.topFrac.subarray(jo * layer, (jo + 1) * layer), j * layer);
       if (old.hitTime && g.hitTime) g.hitTime.set(old.hitTime.subarray(jo * layer, (jo + 1) * layer), j * layer);
+      if (old.freeTime) (g.freeTime ??= new Uint16Array(g.data.length)).set(old.freeTime.subarray(jo * layer, (jo + 1) * layer), j * layer);
     }
     g.observed.set(old.observed);
     if (old.colFree && g.colFree) g.colFree.set(old.colFree);
@@ -2958,6 +3452,7 @@ export type MapEvent =
   | { kind: 'rewrite'; t: number; why: 'floor' | 'reset' }
   | { kind: 'realign'; t: number; since: number; correction: Correction }
   | { kind: 'warp'; t: number; t0: number; t1: number; correction: Correction; moved: number }
+  | { kind: 'localReg'; t: number; moved: number; correction: Affine2 }
   | { kind: 'window'; t: number; si: number; sk: number }
   | { kind: 'import'; t: number; voxels: number }
   | { kind: 'detach'; t: number }

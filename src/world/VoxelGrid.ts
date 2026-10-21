@@ -87,6 +87,14 @@ export class VoxelGrid {
    */
   colFree: Uint16Array | null = null;
   /**
+   * Per voxel: time code (as `stamp`) when a ray last carved it (left it
+   * free). Lets free space be told old from fresh voxel by voxel, so that
+   * old free space can move with the old structure it was seen in front of
+   * (WorldModel.localReg). 0 = not since the voxel entered the window.
+   * Null: off.
+   */
+  freeTime: Uint16Array | null = null;
+  /**
    * Per voxel: where in the voxel (x, z) the structure really is, as an
    * offset from its centre in 1/128 of a voxel. Structure moved by a warp
    * (submaps following anchors) lands between voxel centres; without this,
@@ -287,7 +295,7 @@ export class VoxelGrid {
     const r = this.res, o = this.origin;
     const nx = this.nx, ny = this.ny, nz = this.nz, data = this.data;
     const hits = this.staleAfter > 0 ? this.hitTime : null;
-    const colFree = this.colFree, band = this.freeBandTop, stampNow = this.stamp;
+    const colFree = this.colFree, band = this.freeBandTop, stampNow = this.stamp, freeT = this.freeTime;
     const shielded = this.shieldedCarving;
     const staleStamp = this.stamp - this.staleAfter, staleMiss = Math.min(-1, missDelta) * this.staleMissGain;
     let i = this.cellX(from.x), j = this.cellY(from.y), k = this.cellZ(from.z);
@@ -315,7 +323,10 @@ export class VoxelGrid {
         data[q] = nv;
         this.touch(q);
         if (cls(v) !== cls(nv)) this.version++;
-        if (colFree !== null && j < band && nv < 0) colFree[k * nx + i] = stampNow;
+        if (nv < 0) {
+          if (colFree !== null && j < band) colFree[k * nx + i] = stampNow;
+          if (freeT !== null) freeT[q] = stampNow;
+        }
         if (shield) break;
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
@@ -371,7 +382,8 @@ export class VoxelGrid {
    * `to` along the ray from `from`, over `dist` metres. Occupied and unknown
    * voxels are left alone.
    */
-  decayBehind(from: Vec3, to: Vec3, dist: number, keep: number): void {
+  decayBehind(from: Vec3, to: Vec3, dist: number, keep: number, olderThan = Infinity): void {
+    const ft = this.freeTime;
     const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
     const len = Math.hypot(dx, dy, dz);
     if (len < 1e-4) return;
@@ -386,6 +398,8 @@ export class VoxelGrid {
       lastN = n;
       const v = this.data[n];
       if (v >= 0) continue;
+      // (Only free space seen before `olderThan`, a time code, when free times are kept.)
+      if (ft !== null && ft[n] >= olderThan) continue;
       const nv = Math.trunc(v * keep);
       this.data[n] = nv;
       this.touch(n);

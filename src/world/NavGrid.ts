@@ -64,6 +64,13 @@ export interface NavParams {
   freeMaxAge: number;
   /** ...only where structure is this close (m; 0 = everywhere): open floor can't put the pet inside furniture. */
   freeMaxAgeNear: number;
+  /**
+   * The same rule by distance walked instead of time (m; 0 = off): odometry
+   * drift grows with the path walked, not the clock, so free space seen
+   * empty a while ago from a phone that has barely moved since is still
+   * right. Either limit (freeMaxAge, freeMaxWalk) makes a column old.
+   */
+  freeMaxWalk: number;
 }
 
 export const DEFAULT_NAV: NavParams = {
@@ -84,6 +91,7 @@ export const DEFAULT_NAV: NavParams = {
   staleSeconds: 30,
   freeMaxAge: 120,
   freeMaxAgeNear: 0.3,
+  freeMaxWalk: 0,
 };
 
 export interface Waypoint {
@@ -622,6 +630,20 @@ export interface NavWorldInfo {
   floorLayer: number;
   floorY: number;
   depthPoints: number;
+  /** Distance walked (m) now and by a time code (WorldModel; for NavParams.freeMaxWalk). */
+  walked?: number;
+  walkedAt?: (code: number) => number;
+}
+
+/** Whether any old-free-space rule is on (NavParams.freeMaxAge / freeMaxWalk). */
+export function freeRuleOn(p: NavParams): boolean {
+  return p.freeMaxAge > 0 || p.freeMaxWalk > 0;
+}
+
+/** The arguments of staleColumns for these params and world. */
+export function staleColumnsFor(g: VoxelGrid, world: NavWorldInfo, p: NavParams): Uint8Array {
+  const walk = p.freeMaxWalk > 0 && world.walked !== undefined && world.walkedAt ? { now: world.walked, at: (c: number) => world.walkedAt!(c), max: p.freeMaxWalk } : undefined;
+  return staleColumns(g, world.floorLayer, p.staleMargin > 0 ? p.staleSeconds : 0, p.freeMaxAge, walk);
 }
 
 /**
@@ -709,7 +731,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
     const n0 = candI.length;
     const keep = new Uint8Array(n0);
     // (A grid copy in the worker has no hit times: the client sends the columns.)
-    const stale = p.staleMargin > 0 || p.freeMaxAge > 0 ? staleCols ?? (g.hitTime ? staleColumns(g, world.floorLayer, p.staleMargin > 0 ? p.staleSeconds : 0, p.freeMaxAge) : null) : null;
+    const stale = p.staleMargin > 0 || freeRuleOn(p) ? staleCols ?? (g.hitTime ? staleColumnsFor(g, world, p) : null) : null;
     const rs = stale ? Math.round(p.staleMargin / r) : 0;
     const wd = new Float32Array(n0);
     for (let q = 0; q < n0; q++) {
@@ -754,7 +776,7 @@ export function computeNav(g: VoxelGrid, world: NavWorldInfo, p: NavParams, colS
           }
         }
       // Old free space (see NavParams.freeMaxAge): not walkable (near structure, with freeMaxAgeNear).
-      if (ok && stale && p.freeMaxAge > 0 && j === floorTopJ && stale[k * nx + i] & 2) {
+      if (ok && stale && freeRuleOn(p) && j === floorTopJ && stale[k * nx + i] & 2) {
         const rn = Math.round(p.freeMaxAgeNear / r);
         let near = rn <= 0;
         for (let dk = -rn; dk <= rn && !near; dk++)
@@ -888,11 +910,20 @@ function inferLowFree(g: VoxelGrid, T: Uint8Array, floorLayer: number, maxCells:
  * freeMaxAge > 0) = its low band was last seen empty longer ago than that
  * (VoxelGrid.colFree; 0 = never, not old).
  */
-export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number, freeMaxAge = 0): Uint8Array {
+export function staleColumns(g: VoxelGrid, floorLayer: number, seconds: number, freeMaxAge = 0, walk?: { now: number; at: (code: number) => number; max: number }): Uint8Array {
   const layer = g.nx * g.nz, out = new Uint8Array(layer), ht = g.hitTime!, before = g.stamp - seconds;
-  if (freeMaxAge > 0 && g.colFree) {
-    const cf = g.colFree, fb = g.stamp - freeMaxAge;
-    for (let c = 0; c < layer; c++) if (cf[c] !== 0 && cf[c] < fb) out[c] = 2;
+  if ((freeMaxAge > 0 || walk) && g.colFree) {
+    const cf = g.colFree, fb = freeMaxAge > 0 ? g.stamp - freeMaxAge : -1;
+    // Per time code: walked too far since then (cached; codes are seconds).
+    let oldWalk: Uint8Array | null = null;
+    if (walk) {
+      oldWalk = new Uint8Array(g.stamp + 2);
+      for (let code = 1; code <= g.stamp + 1; code++) oldWalk[code] = walk.now - walk.at(code) > walk.max ? 1 : 0;
+    }
+    for (let c = 0; c < layer; c++) {
+      const f = cf[c];
+      if (f !== 0 && (f < fb || (oldWalk !== null && (f >= oldWalk.length || oldWalk[f] === 1)))) out[c] = 2;
+    }
   }
   const top = Math.min(g.ny - 1, floorLayer + Math.round(0.25 / g.res));
   // (seconds 0: stale structure not wanted, only old free space.)
