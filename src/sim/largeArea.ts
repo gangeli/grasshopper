@@ -172,7 +172,7 @@ export interface LargeAreaReport {
   rooms: RoomRetention[];
   cpu: { sense: Stat; game: Stat; frame: Stat; nav: Stat; frameOver16: number };
   final: LargeAreaSample & { pathsColliding: number; pathsTested: number; pathMaxPen: number; nodesColliding: number };
-  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; anchors: Record<string, number> | null; realigns: { t: number; before: number; after: number; what: string }[]; localReg?: { tries: number; applied: number; why: Record<string, number>; regs: Record<string, number | string | boolean>[] } };
+  events: { trackingLosses: number; loopClosures: number; depthFrames: number; depthRejected: number; health: Record<string, number>; mvKept: number; mvDropped: number; recenters: number; holds: { frames: number; resolved: number; released: number }; gate: Record<string, number>; healthLog: string[]; loopsClosed: number; detaches: number; furnitureMoved: number; reattaches: number; lossJumps: number; anchors: Record<string, number> | null; realigns: { t: number; before: number; after: number; what: string }[]; localReg?: { tries: number; applied: number; why: Record<string, number>; regs: Record<string, number | string | boolean>[] }; warpFree?: Record<string, number>; loopDiag?: { t: number; lp0: number; lp2?: number; lp10?: number }[] };
   /** Retention summary: mean over rooms of (end - first) coverage / precision. */
   retention: { coverageDrop: number; precisionDrop: number; worstCoverageDrop: number };
   heapMB: number;
@@ -228,6 +228,15 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     });
   let petAnchor: { id: number; a0: number[] | null; last: number[] | null } | null = null;
   o.setup?.(world, stack, sensor);
+  // LOOPDIAG=1: local precision at each tracker loop closure and 2 / 10 s after (does the map agree with the snapped frame?).
+  const loopDiag: { t: number; lp0: number; lp2?: number; lp10?: number }[] = [];
+  if (process.env.LOOPDIAG) {
+    const prev = sensor.onLoop;
+    sensor.onLoop = (e) => {
+      prev?.(e);
+      if (curCam && world.grid) loopDiag.push({ t: e.t, lp0: localPrecision(world, sensor, room, curCam).precision });
+    };
+  }
   // ORACLE_FOLLOW=1: the tracker's own loop closures handed to local registration exactly (sim truth; the ceiling of localRegFollowJumps).
   if (process.env.ORACLE_FOLLOW) {
     const prev = sensor.onLoop;
@@ -368,6 +377,10 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
       room.time = step.t;
       if (f > 0) walked += Math.hypot(step.cam.pos.x - path[f - 1].cam.pos.x, step.cam.pos.z - path[f - 1].cam.pos.z);
       sensor.moveTo(step.cam, step.t, dt);
+      for (const d of loopDiag) {
+        if (d.lp2 === undefined && step.t - d.t >= 2) d.lp2 = localPrecision(world, sensor, room, step.cam).precision;
+        if (d.lp10 === undefined && step.t - d.t >= 10) d.lp10 = localPrecision(world, sensor, room, step.cam).precision;
+      }
       const pr = pend.reg;
       if (pr && !world.warpBusy) {
         const lp = localPrecision(world, sensor, room, step.cam), ff = localFalseFree(world, sensor, room, step.cam);
@@ -585,7 +598,7 @@ export function runLargeArea(o: LargeAreaOptions = {}): LargeAreaReport {
     rooms,
     cpu: { sense: stat(senseT), game: stat(gameT), frame: fs, nav: stat(navTimes), frameOver16: frameT.filter((x) => x > 16).length },
     final: { ...fin, pathsColliding: em.pathsColliding, pathsTested: em.pathsTested, pathMaxPen: em.pathMaxPenetration, nodesColliding: em.nodesColliding },
-    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, anchors: anchors ? { ...anchors.stats, live: anchors.live, submaps: world.submaps.length, submapWarps: world.submapWarps, anchorMoves: world.anchorMoves } : null, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, localReg: world.localReg ? { tries: world.localRegTries, applied: world.localRegApplied, why: { ...world.localRegWhy }, regs } : undefined, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
+    events: { trackingLosses: losses, loopClosures: sensor.loopClosures, depthFrames, depthRejected, health: { ...(game.health.counts as Record<string, number>) }, mvKept: world.multiView?.kept ?? 0, mvDropped: world.multiView?.dropped ?? 0, recenters: world.recenters, holds: { frames: world.heldFrames, resolved: world.holdsResolved, released: world.holdsReleased }, loopsClosed: game.health.drift.loopClosures, anchors: anchors ? { ...anchors.stats, live: anchors.live, submaps: world.submaps.length, submapWarps: world.submapWarps, anchorMoves: world.anchorMoves } : null, detaches: world.detaches, furnitureMoved: moved, reattaches: world.reattaches, lossJumps: sensor.lossJumps, realigns, warpFree: world.warpFree ? { ...world.warpFreeStats } : undefined, loopDiag: loopDiag.length ? loopDiag : undefined, localReg: world.localReg ? { tries: world.localRegTries, applied: world.localRegApplied, why: { ...world.localRegWhy }, regs } : undefined, gate: { ...world.poseGate.reasons }, healthLog: game.health.log.map((e) => `${e.t.toFixed(0)}s ${e.issue}: ${e.detail}`) },
     retention: { coverageDrop: mean(drops), precisionDrop: mean(pdrops), worstCoverageDrop: drops.length ? Math.max(...drops) : 0 },
     heapMB: process.memoryUsage().heapUsed / 1e6,
     arrayBuffersMB: process.memoryUsage().arrayBuffers / 1e6,

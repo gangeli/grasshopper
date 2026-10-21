@@ -1657,7 +1657,7 @@ export class WorldModel {
     const gh = g.hitTime;
     // Free space moves too when free times are kept (warpFree): by when it was last seen empty.
     const ft = this.warpFree ? g.freeTime : null;
-    const fSrc: number[] = [], fDst: number[] = [], fVal: number[] = [], fT: number[] = [];
+    const fSrc: number[] = [], fDst: number[] = [], fVal: number[] = [], fT: number[] = [], fSub: number[] = [];
     const fMark = ft ? (this.localRegMark && this.localRegMark.length === g.data.length ? this.localRegMark : (this.localRegMark = new Uint8Array(g.data.length))) : null;
     for (let j = fl; j < ny; j++, yield)
       for (let k = 0; k < g.nz; k++)
@@ -1668,13 +1668,22 @@ export class WorldModel {
             if (when < code0 || when > code1 || when === 0) continue;
             const e = corrFor(when);
             if (!e) continue;
-            const x = g.centerX(i), z = g.centerZ(k);
-            const I2 = g.cellX(e[0] * x + e[1] * z + e[2]), K2 = g.cellZ(-e[1] * x + e[0] * z + e[3]);
-            if ((I2 === i && K2 === k) || I2 < 0 || K2 < 0 || I2 >= g.nx || K2 >= g.nz) continue;
+            // (Where in the voxel it is, as for structure: repeated small moves don't round away.)
+            const x = g.centerX(i) + (gx ? (gx[q] / 128) * r : 0), z = g.centerZ(k) + (gz ? (gz[q] / 128) * r : 0);
+            const fx = (e[0] * x + e[1] * z + e[2] - g.origin.x) / r, fz = (-e[1] * x + e[0] * z + e[3] - g.origin.z) / r;
+            const I2 = Math.floor(fx), K2 = Math.floor(fz);
+            const sx = Math.max(-64, Math.min(63, Math.round((fx - I2 - 0.5) * 128))), sz = Math.max(-64, Math.min(63, Math.round((fz - K2 - 0.5) * 128)));
+            if (I2 < 0 || K2 < 0 || I2 >= g.nx || K2 >= g.nz) continue;
+            if (I2 === i && K2 === k) {
+              if (gx && gz) (gx[q] = sx), (gz[q] = sz);
+              continue;
+            }
             fSrc.push(q);
             fDst.push(j * layer + K2 * g.nx + I2);
             fVal.push(g.data[q]);
             fT.push(when);
+            fSub.push(((sx + 64) << 8) | (sz + 64));
+            if (gx && gz) gx[q] = gz[q] = 0;
             g.data[q] = 0;
             ft[q] = 0;
             fMark![q] = 2;
@@ -1781,16 +1790,50 @@ export class WorldModel {
     }
     // Pass 2b: free movers, after the structure: never over structure, into the unknown only where something moved away.
     if (ft && fMark) {
+      this.warpFreeStats.moved += fSrc.length;
       for (let q = 0; q < fSrc.length; q++) {
         if (q % 20000 === 19999) yield;
         const t = fDst[q], dv = g.data[t];
-        if (dv > 0) continue;
-        if (dv === 0 && fMark[t] !== 2) continue;
-        if (dv < 0 && dv <= fVal[q]) continue;
+        if (dv > 0) {
+          this.warpFreeStats.onSolid++;
+          continue;
+        }
+        if (dv === 0 && fMark[t] !== 2) {
+          this.warpFreeStats.intoUnknown++;
+          continue;
+        }
+        if (dv < 0 && dv <= fVal[q]) {
+          this.warpFreeStats.merged++;
+          continue;
+        }
         g.data[t] = fVal[q];
         ft[t] = fT[q];
+        if (gx && gz) (gx[t] = (fSub[q] >> 8) - 64), (gz[t] = (fSub[q] & 255) - 64);
       }
       for (let q = 0; q < fSrc.length; q++) fMark[fSrc[q]] = 0;
+      // Away from structure that moved (open floor), free space stays where it
+      // was too: the stale copy can't be inside anything there, and moving
+      // patchwork free space by different corrections leaves holes (walking
+      // needs seen-empty space). Near moved structure the old copy goes.
+      const near = new Uint8Array(layer), RN = 3;
+      for (let q = 0; q < dI.length; q++)
+        for (const [I, K] of [[dI[q], dK[q]], [sI[q], sK[q]]]) {
+          const i = I - this.wi, k = K - this.wk;
+          for (let dk = -RN; dk <= RN; dk++)
+            for (let di = -RN; di <= RN; di++) {
+              const ii = i + di, kk = k + dk;
+              if (ii >= 0 && kk >= 0 && ii < g.nx && kk < g.nz) near[kk * g.nx + ii] = 1;
+            }
+        }
+      for (let q = 0; q < fSrc.length; q++) {
+        const src = fSrc[q];
+        if (g.data[src] === 0 && !near[src % layer]) {
+          g.data[src] = fVal[q];
+          ft[src] = fT[q];
+        }
+      }
+      this.fillFreeHoles(g, fSrc);
+      for (const q of fSrc) if (g.data[q] === 0) this.warpFreeStats.holes++;
       if (fSrc.length && g.colFree) {
         const cols = new Set<number>();
         for (let q = 0; q < fSrc.length; q++) cols.add(fSrc[q] % layer), cols.add(fDst[q] % layer);
@@ -1821,6 +1864,35 @@ export class WorldModel {
   }
   /** The part of a warp in progress (diagnostics). */
   warpPhase = '';
+  /**
+   * Free space moved by different corrections (one per submap, or a turn
+   * rounded to voxels) leaves holes where nothing moved in: a vacated voxel
+   * left unknown with free space on at least 3 of its 4 sides takes the
+   * weakest of them (walking needs seen-empty space; a hole the size of a
+   * voxel inside free space is rounding, not news).
+   */
+  private fillFreeHoles(g: VoxelGrid, vacated: number[]): void {
+    const ft = g.freeTime, nx = g.nx, layer = nx * g.nz;
+    for (const q of vacated) {
+      if (g.data[q] !== 0) continue;
+      const c = q % layer, i = c % nx, k = (c - i) / nx;
+      if (i < 1 || k < 1 || i >= nx - 1 || k >= g.nz - 1) continue;
+      let n = 0, weakest = -128, t = 0;
+      for (const o of [q - 1, q + 1, q - nx, q + nx]) {
+        const v = g.data[o];
+        if (v < 0) {
+          n++;
+          if (v > weakest) (weakest = v), (t = ft ? ft[o] : 0);
+        }
+      }
+      if (n >= 3) {
+        g.data[q] = weakest;
+        if (ft) ft[q] = t;
+      }
+    }
+  }
+  /** Free voxels moved by warps, and what became of them (diagnostics). */
+  warpFreeStats = { moved: 0, onSolid: 0, intoUnknown: 0, merged: 0, holes: 0 };
   /** Warps move free space too, by when it was last seen empty (per-voxel free times, window only). */
   warpFree = false;
   /** Warp by when structure was laid down (birth) rather than when it was last seen. */
@@ -1843,6 +1915,8 @@ export class WorldModel {
   /** Structure / free space not seen for this long (s) counts as old (may move). */
   localRegMinAge = 4;
   localRegRadius = 4;
+  /** Old voxels within this distance of the camera move (m). */
+  localRegWarpRadius = 4;
   /** Depth frames of the last this many seconds are the view. */
   localRegFresh = 1;
   localRegMaxShift = 0.3;
@@ -2140,9 +2214,11 @@ export class WorldModel {
       lo = Math.max(1, codes[Math.floor(codes.length * 0.1)] - this.localRegSpan);
       hi = Math.min(cutoff, codes[Math.floor(codes.length * 0.9)] + this.localRegSpan);
     }
-    this.warpTask = this.localWarpPass(i0, i1, k0, k1, eye, R, lo, hi, C);
+    // What moves: within localRegWarpRadius of the camera (the matched part of the old map, not the rooms around it).
+    const RW = Math.min(R, this.localRegWarpRadius);
+    this.warpTask = this.localWarpPass(i0, i1, k0, k1, eye, RW, lo, hi, C);
     // Moved structure lands around where the camera now is (centre moved with it).
-    this.localRegMoves.push({ c: { x: C[0] * eye.x + C[1] * eye.z + C[2], y: eye.y, z: -C[1] * eye.x + C[0] * eye.z + C[3] }, R: R + 0.3, lo, hi, t });
+    this.localRegMoves.push({ c: { x: C[0] * eye.x + C[1] * eye.z + C[2], y: eye.y, z: -C[1] * eye.x + C[0] * eye.z + C[3] }, R: RW + 0.3, lo, hi, t });
     if (this.localRegMoves.length > 40) this.localRegMoves.shift();
     this.stepWarp(1);
   }
@@ -2248,6 +2324,27 @@ export class WorldModel {
       cols.add(t % layer);
     }
     for (let q = 0; q < m; q++) mark[dst[q]] = mark[src[q]] = 0;
+    const freeSrc: number[] = [];
+    for (let q = 0; q < m; q++) if (vals[q] < 0) freeSrc.push(src[q]);
+    // Away from structure that moved, free space also stays where it was (see warpPass).
+    const near = new Uint8Array(layer), RN = 3;
+    for (let q = 0; q < m; q++) {
+      if (vals[q] <= 0) continue;
+      for (const cc of [src[q] % layer, dst[q] % layer]) {
+        const ci = cc % g.nx, ck = (cc - ci) / g.nx;
+        for (let dk = -RN; dk <= RN; dk++)
+          for (let di = -RN; di <= RN; di++) {
+            const ii = ci + di, kk = ck + dk;
+            if (ii >= 0 && kk >= 0 && ii < g.nx && kk < g.nz) near[kk * g.nx + ii] = 1;
+          }
+      }
+    }
+    for (let q = 0; q < m; q++)
+      if (vals[q] < 0 && data[src[q]] === 0 && !near[src[q] % layer]) {
+        data[src[q]] = vals[q];
+        free[src[q]] = frees[q];
+      }
+    this.fillFreeHoles(g, freeSrc);
     // Low-band free times of the columns touched (see VoxelGrid.colFree).
     const cf = g.colFree, band = g.freeBandTop;
     if (cf)

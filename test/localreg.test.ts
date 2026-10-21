@@ -100,7 +100,7 @@ describe('local re-registration: moving the old map', () => {
     expect(g.data[at(0.025, 1.025)]).toBeLessThan(0); // free space followed it
     expect(g.data[post]).toBe(60); // seen since: stays
     expect(g.hitTime![post] & 0xffff).toBe(50);
-    expect(g.data[at(0.025, 0.525)]).toBe(0); // vacated, nothing moved in
+    expect(g.data[at(0.025, 0.525)]).toBe(-20); // away from the moved wall, free space also stays where it was
     // Free space doesn't spill into never-seen space.
     expect(g.data[at(0.025, 1.175)]).toBe(0);
   });
