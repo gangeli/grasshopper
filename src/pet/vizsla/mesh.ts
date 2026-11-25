@@ -204,7 +204,10 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     // Pads under the paws.
     const paw = rw('finger') + rw('hand') * 0.7 + rw('toe');
     const pad = paw > 0.3 && y < 0.02 ? smooth(-0.45, -0.8, ny) : 0;
-    const leather = Math.max(rw('nose'), pad);
+    // (Bare only on the leather itself, which the nose's own mesh covers: a wide bald
+    // patch round it would show as a pale disc on the end of the muzzle.)
+    const noseK = smooth(0.55, 0.85, rw('nose'));
+    const leather = Math.max(noseK, pad);
     fl *= (1 - 0.85 * rim) * (1 - mouthK) * (1 - leather);
     // Sleek, but not machine-even.
     fl *= 0.86 + 0.28 * vnoise(x * 45 + 3, y * 45, z * 45);
@@ -312,7 +315,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
       c.multiplyScalar(1 - 0.5 * groove * Math.min(1, paw));
     }
     // Nose leather, lip line and pads (flesh-brown, never black).
-    c.lerp(cLeather, rw('nose'));
+    c.lerp(cLeather, noseK);
     c.lerp(cLeather, 0.85 * rw('lip') * smooth(-0.25, -0.75, ny) * (1 - mouthK));
     c.lerp(cPad, pad);
     // Mouth lining: darker towards the throat, ridged like a palate.
@@ -466,7 +469,8 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
         // Light glows faintly through the leather.
         out.thin[k] = 0.22 * smooth(0.1, 0.5, u);
         if (layer === 0) c.copy(cOut).multiplyScalar(0.94 + 0.1 * vnoise(p.x * 90, p.y * 90, p.z * 90));
-        else c.copy(cIn).multiplyScalar(0.55 + 0.22 * edge);
+        // (The lining turns to the coat's colour at the rim, or the edge would show as a pale line.)
+        else c.copy(cIn).multiplyScalar(0.55 + 0.22 * edge).lerp(cOut, 0.85 * smooth(0.45, 0.1, edge));
         // Shaded where it lies against the head.
         c.multiplyScalar(layer === 0 ? 0.88 + 0.12 * smooth(0.0, 0.2, u) : 0.75);
         out.color.set([c.r, c.g, c.b], k * 3);
