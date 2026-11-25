@@ -9,6 +9,8 @@ couch, inside baskets, tucked in corners — and you have to find it.
 * **No WebXR AR?** (iPhone Safari, desktop) Tap *Play in a virtual room*: the same game runs in a
   simulated room (drag to look, WASD / left-thumb to move, `C` to crouch).
 * **Pose lab**: `lab.html` renders every animation as a contact sheet.
+* **Rather have a dog?** Pick **Vizsla** on the start page (it's remembered), or add `?pet=vizsla`: a lean,
+  golden-rust Hungarian Vizsla plays instead of Hopper — same game, same room, a dog's body and a dog's manners.
 
 ## How a round works
 
@@ -36,9 +38,16 @@ src/
   pet/
     PetModel       sculpted (SDF → surface nets) furry creature: auto-skinned to 38 bones, shell fur,
                    textured eyes with cornea/lids/lashes, painted mouth; no external assets
-    Animator       layered procedural animation: 16 actions, cross-fades, look-at, blinking,
+    Animator       layered procedural animation: 17 actions, cross-fades, look-at, blinking,
                    spring-driven antennae/ears/tail, analytic 2-bone leg IK keeping feet planted
     PetController  path following: hop-walk cycle, turn → crouch → leap along a parabola → land
+    species        which pet plays: Hopper or the Vizsla (start-page picker, ?pet=)
+    parts, pose    what the pets share: the eye rig, nose leather, textures; the pose channels
+    vizsla/        the other pet, built the same way (see "The Vizsla" below)
+      sculpt         the dog as blended shapes, plus a separate lower jaw
+      mesh           meshing, skinning, the coat's colour and groom; the ear leathers
+      VizslaModel    the rig: eyes, nose, teeth and tongue, nails, collar with a glowing tag
+      DogMotion      the same 17 actions as a dog does them; four-leg IK, gaits
   game/
     HideSpots      candidate spots scored by concealment from the seeker now and from sampled
                    standing/crouching viewpoints, cosiness (under/inside/corner), novelty, distance
@@ -63,6 +72,36 @@ real furniture hides the pet; devices with GPU depth also get three.js' depth oc
 **The creature** is built in code rather than loaded from a rigged asset. That gives full control over
 the rig for procedural motion: jumps of any height or distance, peeking around arbitrary edges,
 squeezing under furniture. Everything is skinned or bone-parented and animated procedurally.
+
+### The Vizsla
+
+The second pet is a Hungarian Vizsla, made with the same kit as Hopper and to the same standard: a
+signed-distance sculpt meshed and skinned in code, a shell coat, Hopper's eye rig at a dog's size.
+What a dog needs that Hopper doesn't:
+
+* **A quadruped rig.** Shoulder–elbow–wrist–toes in front, hip–stifle–hock–toes behind, each solved
+  by two-bone IK to a paw target, so paws stay where they land (a planted paw creeps a few
+  millimetres a second at most at a trot: `scripts/dog-motion-probe.ts`). The bone names are Hopper's, so the game samples either pet
+  the same way.
+* **Gaits.** It trots in diagonal pairs — overlapping at a walk, flying between them when it hurries —
+  and opens into a bounding gallop at a run, the back flexing with each stride.
+* **A mouth that opens.** The lower jaw is its own sculpt on a jaw bone, closing flush into a hollow
+  under the muzzle; inside are teeth and a tongue that lolls out when it pants.
+* **Ears and tail.** Thin two-jointed ear leathers that swing as it moves, prick and fold back; a
+  docked tail that wags from the root.
+* **A short, sleek coat** (the fur shader's `sleek` option): close-lying, glossy, solid golden rust
+  with the breed's lighter shadings — and no black anywhere: nose, eye rims, pads and nails are
+  flesh-brown. Three coats: `golden`, `russet`, `sandy` (`lab.html?pet=vizsla&palette=russet`).
+* **Dog manners** for the same 17 actions: it lies down like a sphinx to hide (flat, chin on the floor,
+  under furniture), gives a paw to wave, startles back, quarters with its nose down and then freezes
+  **on point** — foreleg up, tail out straight — and when petted leans in with its whole back end wagging.
+* **Room for a long body.** Nose to tail it is twice Hopper's length, so it senses the map around it:
+  with furniture right ahead it lifts its head and draws back instead of poking through, and under a
+  low table it drops to a belly-crawl.
+* **A collar** whose tag glows for hints, where Hopper's antennae do.
+
+Hopper is untouched by all this (its renders are pixel-identical): the layering, blinking, gaze and
+eyes are shared, and each species brings its own actions and body.
 
 ## Staying unstuck
 
@@ -98,20 +137,23 @@ npm run sheet            # just the pose contact sheet → artifacts/contact-she
   (mesh), no nav node is inside furniture, there are walkable surfaces under and on tables, the
   table top and the inside of a basket are reachable *by jumping*, and paths and jump arcs never
   pass through furniture. Object labelling is checked too.
-* `test/pet.test.ts`: rig integrity and skin weights, every action stays finite and above the floor,
-  IK keeps the feet planted, hiding poses are lower, cross-fades don't pop, and the controller lands
-  jumps exactly.
+* `test/pet.test.ts`: for **both pets**: rig integrity and skin weights, every action stays finite and
+  above the floor, IK keeps the feet planted, hiding poses are lower, cross-fades don't pop, and the
+  controller lands jumps exactly. For the Vizsla also: planted paws don't skate and legs don't lock
+  straight at a trot, it pants and points and sits, and it makes room for itself near furniture.
 * `test/game.test.ts`: **a bot plays full rounds** in 8 rooms (hand-built and random). It maps by
   looking around, starts the game, keeps its eyes covered, then searches by walking the room, crouching
   and following giggles. The test asserts that Hopper is truly hidden (ground-truth raycasts against
   the real room, not the map) when seeking starts, that it reaches its spot, that it never clips
   through furniture, that "found" only fires when Hopper is really visible, and that the bot finds it
-  in most rounds.
+  in most rounds. Three more rounds are played with the Vizsla.
 * `e2e/sim-bot.spec.ts`: the same bot plays in the browser simulator, with a screenshot per phase.
 * `e2e/ar-emulated.spec.ts`: the **real WebXR code path** runs against the IWER emulator
   (`?emulate=phone|quest`). It requests an AR session, places Hopper with an XR select, maps by
   turning the emulated device, plays a round and walks the seeker around until Hopper is found.
 * `e2e/contact-sheet.spec.ts`: renders every animation at several times as a review sheet.
+* `e2e/vizsla.spec.ts`: the Vizsla's sheet, the start-page picker (swaps the pet, remembers it), and
+  a full bot-played round with the Vizsla in the browser.
 
 ### Stress testing mapping & pathfinding (realistic sensing, real data)
 
@@ -130,7 +172,8 @@ browser downloads a `.hopperrec` file (depth frames + tracked poses), and
 `npx tsx scripts/tum-replay.ts your-room.hopperrec --png map.png` reports the same metrics on it.
 
 Handy URL parameters: `?sim=1&room=living|bedroom|empty|r<seed>&bot=1&speed=4&fixed=1&seed=N`,
-`?emulate=phone|quest` (AR without a device), `?record=1` (record an AR session for offline replay).
+`?emulate=phone|quest` (AR without a device), `?record=1` (record an AR session for offline replay),
+`?pet=vizsla|hopper` (which pet; also works on `lab.html`).
 
 ## Development
 

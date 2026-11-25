@@ -319,7 +319,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     if (mouthK > 0) {
       const deep = smooth(DOG_JAW.c[2] + 0.02, DOG_JAW.back, z);
       const ridge = 0.5 + 0.5 * Math.sin(z * 1500);
-      const lining = cMouth.clone().multiplyScalar((0.6 - 0.34 * deep) * (0.88 + 0.12 * ridge));
+      const lining = cMouth.clone().multiplyScalar((0.92 - 0.38 * deep) * (0.9 + 0.1 * ridge));
       // The lips' inner edge is leather; the lining begins just inside it.
       const inside = smooth(0.93, 0.74, mouthRim(x, z));
       c.lerp(cLeather.clone().multiplyScalar(0.62).lerp(lining, inside), mouthK);
@@ -335,6 +335,8 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     let aoK = (0.52 + 0.48 * ao - 0.3 * toes * (1 - ao)) * (0.62 + 0.38 * aoB) * (0.9 + 0.1 * smooth(0.0, 0.06, y));
     // (The socket is filled by the eye: don't let its hollow black out the lids' surround.)
     aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.78), hollow);
+    // (Nor the mouth: an open mouth should read as pink, not as a black hole.)
+    aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.72), mouthK);
     c.multiplyScalar(aoK);
     if (hollow > 0) {
       const lumOpen = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
@@ -382,7 +384,7 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
     c.copy(cBody).lerp(cLight, 0.3 + 0.25 * smooth(0, -0.8, ny));
     c.lerp(cLeather, 0.9 * lip);
     const deep = smooth(DOG_JAW.c[2] + 0.02, DOG_JAW.back, z);
-    c.lerp(cMouth.clone().multiplyScalar(0.72 - 0.36 * deep), top);
+    c.lerp(cMouth.clone().multiplyScalar(0.9 - 0.36 * deep), top);
     // Shaded by its own creases and by the muzzle above it.
     const ao = occlusion(S, x, y, z, nx, ny, nz);
     const under = broadOcclusion(body, x, y, z, nx, ny, nz);

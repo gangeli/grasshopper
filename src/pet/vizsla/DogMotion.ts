@@ -44,6 +44,8 @@ function pant(t: number, p: Pose, k: number): void {
   const beat = Math.sin(t * TAU * 4.6);
   p.jaw = Math.max(p.jaw, k * (0.5 + 0.08 * beat));
   p.tongue = Math.max(p.tongue, k * (0.88 + 0.1 * beat));
+  // The tongue humps up and flattens with each breath.
+  p.tongueArch = Math.max(p.tongueArch, k * (0.45 + 0.3 * beat));
   p.squash += 0.035 * k * beat;
   p.chestPitch += 0.012 * k * beat;
   p.smile = 1;

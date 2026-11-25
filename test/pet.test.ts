@@ -229,7 +229,7 @@ describe('Vizsla', () => {
           if (i > 90 && pet.state === 'walk') {
             if (down && wasDown[k]) {
               planted++;
-              // Under a millimetre a frame... in fact a few microns.
+              // Half a millimetre a frame at the very most (measured: about a twentieth of one).
               expect(Math.hypot(p.x - prev[k].x, p.z - prev[k].z), `${k} slipped at ${cruise} m/s`).toBeLessThan(0.0005);
             } else if (!down) lifted++;
             expect(worldPos(rig, a).distanceTo(worldPos(rig, c)) / len[k], `${k} over-reached at ${cruise} m/s`).toBeLessThan(0.995);

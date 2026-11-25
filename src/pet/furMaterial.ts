@@ -212,7 +212,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         // Locks vary in length, so the outline breaks into wisps.
         #ifdef FUR_SLEEK
         // (A smooth coat is one even length: no wisps, and no patches where a lock ends short.)
-        float hh = uShellH * mix(1.0 / mix(0.55, 1.0, lockRnd.x), 0.97, uSleek);
+        float hh = uShellH * 0.97;
         #else
         float hh = uShellH / mix(0.55, 1.0, lockRnd.x);
         #endif

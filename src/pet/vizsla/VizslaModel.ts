@@ -96,7 +96,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const noseMat = new THREE.MeshPhysicalMaterial({ color: cLeather.clone().multiplyScalar(0.92), vertexColors: true, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25, bumpMap: pebble, bumpScale: 0.6, envMapIntensity: 0.7 });
   const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, transparent: true, opacity: 0.8 });
   const tongueMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.38, clearcoat: 0.5, clearcoatRoughness: 0.3 });
-  const toothMat = new THREE.MeshStandardMaterial({ color: 0xeee6d4, roughness: 0.34 });
+  const toothMat = new THREE.MeshStandardMaterial({ color: 0xe6dcc8, roughness: 0.36 });
   const nailMat = new THREE.MeshStandardMaterial({ color: cLeather.clone().multiplyScalar(0.8), roughness: 0.4 });
   const collarMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.62 });
   const metalMat = new THREE.MeshStandardMaterial({ color: 0xd8c9a0, roughness: 0.3, metalness: 0.85 });
@@ -254,7 +254,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
       for (let q = 0; q < 3; q++) {
         const z = zf - 0.02 - q * 0.0062;
         const b = jawTop(arch(z, 0.0046) * s, z);
-        lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0006, 0)), b.clone().add(new THREE.Vector3(0, 0.0015 + 0.0003 * (q % 2), 0)), 0.0011));
+        lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0006, 0)), b.clone().add(new THREE.Vector3(0, 0.0011 + 0.0003 * (q % 2), 0)), 0.001));
       }
     }
     for (let q = 0; q < 6; q++) {
@@ -272,11 +272,11 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     for (const s of [1, -1]) {
       const zc = zf - 0.0092;
       const c0 = roof(arch(zc, 0.0042) * s, zc);
-      upper.push(tooth(c0, c0.clone().add(new THREE.Vector3(0.0002 * s, -0.004, 0.0003)), 0.0014));
+      upper.push(tooth(c0, c0.clone().add(new THREE.Vector3(0.0002 * s, -0.0034, 0.0003)), 0.0013));
       for (let q = 0; q < 3; q++) {
         const z = zf - 0.0175 - q * 0.0066;
         const b = roof(arch(z, 0.0048) * s, z);
-        upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0019 - 0.0004 * (q % 2), 0)), 0.0012));
+        upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0013 - 0.0003 * (q % 2), 0)), 0.001));
       }
     }
     for (let q = 0; q < 6; q++) {
