@@ -18,8 +18,8 @@ export type Region =
   | 'head' | 'cheek' | 'muzzle' | 'brow' | 'ear' | 'neck' | 'body' | 'belly' | 'chest'
   | 'thigh' | 'shin' | 'foot' | 'toe' | 'arm' | 'hand' | 'finger' | 'tail' | 'tuft';
 
-export interface Prim {
-  region: Region;
+export interface Prim<R extends string = Region> {
+  region: R;
   /** Signed distance at p. */
   d(x: number, y: number, z: number): number;
   /** Bone weights at p (on or near the surface). */
@@ -36,7 +36,7 @@ export interface Prim {
 const len3 = (x: number, y: number, z: number) => Math.sqrt(x * x + y * y + z * z);
 
 /** Ellipsoid (iq's bound-corrected approximation), optionally rotated by a 3x3 (row-major) matrix. */
-export function ellipsoid(region: Region, c: V3, r: V3, bone: string | ((x: number, y: number, z: number) => BoneWeight[]), k = 0.01, rot?: number[]): Prim {
+export function ellipsoid<R extends string = Region>(region: R, c: V3, r: V3, bone: string | ((x: number, y: number, z: number) => BoneWeight[]), k = 0.01, rot?: number[]): Prim<R> {
   const pad = Math.max(r[0], r[1], r[2]) + k;
   return {
     region,
@@ -65,7 +65,7 @@ export function ellipsoid(region: Region, c: V3, r: V3, bone: string | ((x: numb
  * Round cone between a (radius ra) and b (radius rb): a tapered capsule, the
  * workhorse for limbs and tails. Bone weights blend from boneA to boneB along it.
  */
-export function roundCone(region: Region, a: V3, b: V3, ra: number, rb: number, boneA: string, boneB: string = boneA, k = 0.01): Prim {
+export function roundCone<R extends string = Region>(region: R, a: V3, b: V3, ra: number, rb: number, boneA: string, boneB: string = boneA, k = 0.01): Prim<R> {
   const bax = b[0] - a[0], bay = b[1] - a[1], baz = b[2] - a[2];
   const l2 = bax * bax + bay * bay + baz * baz;
   const rr = ra - rb;
@@ -109,7 +109,7 @@ export function roundCone(region: Region, a: V3, b: V3, ra: number, rb: number, 
  * Torus ring around `axis` through centre c (major radius R, tube radius r);
  * `squash` stretches the ring along the frame's up direction (for oval eyes).
  */
-export function ring(region: Region, c: V3, axis: V3, R: number, r: number, bone: string, k = 0.01, squash = 1): Prim {
+export function ring<G extends string = Region>(region: G, c: V3, axis: V3, R: number, r: number, bone: string, k = 0.01, squash = 1): Prim<G> {
   const al = Math.hypot(...axis);
   const ax = axis.map((v) => v / al) as V3;
   // Frame: u = up × axis, v = axis × u.
@@ -134,7 +134,7 @@ export function ring(region: Region, c: V3, axis: V3, R: number, r: number, bone
   };
 }
 
-export function carve(p: Prim, k = 0.006): Prim {
+export function carve<R extends string = Region>(p: Prim<R>, k = 0.006): Prim<R> {
   return { ...p, carve: true, k };
 }
 
@@ -154,10 +154,10 @@ const GRID = 0.01;
 const MARGIN = 0.03;
 
 /** A sculpt: an ordered list of primitives combined left to right. */
-export class Sculpt {
-  readonly prims: Prim[] = [];
-  private grid: { min: V3; n: [number, number, number]; cells: Prim[][] } | null = null;
-  add(...p: Prim[]): this {
+export class Sculpt<R extends string = Region> {
+  readonly prims: Prim<R>[] = [];
+  private grid: { min: V3; n: [number, number, number]; cells: Prim<R>[][] } | null = null;
+  add(...p: Prim<R>[]): this {
     this.prims.push(...p);
     this.grid = null;
     return this;
@@ -170,7 +170,7 @@ export class Sculpt {
    * is all meshing, attribution and AO look at; far away the field reads as
    * MARGIN (outside). null = nothing nearby.
    */
-  private near(x: number, y: number, z: number): Prim[] | null {
+  private near(x: number, y: number, z: number): Prim<R>[] | null {
     const g = (this.grid ??= this.buildGrid());
     const i = Math.floor((x - g.min[0]) / GRID), j = Math.floor((y - g.min[1]) / GRID), k = Math.floor((z - g.min[2]) / GRID);
     if (i < 0 || j < 0 || k < 0 || i >= g.n[0] || j >= g.n[1] || k >= g.n[2]) return null;
@@ -186,7 +186,7 @@ export class Sculpt {
         hi[a] = Math.max(hi[a], p.max[a] + MARGIN);
       }
     const n = [0, 1, 2].map((a) => Math.max(1, Math.ceil((hi[a] - lo[a]) / GRID))) as [number, number, number];
-    const cells: Prim[][] = [];
+    const cells: Prim<R>[][] = [];
     for (let k = 0; k < n[2]; k++)
       for (let j = 0; j < n[1]; j++)
         for (let i = 0; i < n[0]; i++) {
@@ -218,8 +218,8 @@ export class Sculpt {
    * Which primitives own the surface at p: soft-max over non-carving
    * primitives by distance. Returns blended bone weights and the dominant region.
    */
-  attribution(x: number, y: number, z: number, sharpness = 0.005): { bones: BoneWeight[]; region: Region; regionWeights: Map<Region, number> } {
-    const ds: { p: Prim; d: number }[] = [];
+  attribution(x: number, y: number, z: number, sharpness = 0.005): { bones: BoneWeight[]; region: R; regionWeights: Map<R, number> } {
+    const ds: { p: Prim<R>; d: number }[] = [];
     let dmin = Infinity;
     for (const p of this.near(x, y, z) ?? []) {
       if (p.carve) continue;
@@ -230,8 +230,8 @@ export class Sculpt {
       if (d < dmin) dmin = d;
     }
     const bw = new Map<string, number>();
-    const rw = new Map<Region, number>();
-    let region: Region = 'body';
+    const rw = new Map<R, number>();
+    let region = 'body' as R;
     let best = -1;
     for (const { p, d } of ds) {
       const w = Math.exp(-(d - dmin) / sharpness);

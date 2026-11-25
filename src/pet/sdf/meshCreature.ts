@@ -17,7 +17,7 @@ export interface CreaturePalette {
 }
 
 /** Smooth 3D value noise in [0,1]. */
-function vnoise(x: number, y: number, z: number): number {
+export function vnoise(x: number, y: number, z: number): number {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const fx = x - xi, fy = y - yi, fz = z - zi;
   const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy), w = fz * fz * (3 - 2 * fz);
@@ -28,8 +28,8 @@ function vnoise(x: number, y: number, z: number): number {
   const l = (a: number, b: number, t: number) => a + (b - a) * t;
   return l(l(l(h(xi, yi, zi), h(xi + 1, yi, zi), u), l(h(xi, yi + 1, zi), h(xi + 1, yi + 1, zi), u), v), l(l(h(xi, yi, zi + 1), h(xi + 1, yi, zi + 1), u), l(h(xi, yi + 1, zi + 1), h(xi + 1, yi + 1, zi + 1), u), v), w);
 }
-const fbm = (x: number, y: number, z: number) => vnoise(x, y, z) * 0.6 + vnoise(x * 2.1, y * 2.1, z * 2.1) * 0.3 + vnoise(x * 4.3, y * 4.3, z * 4.3) * 0.1;
-const smooth = (a: number, b: number, x: number) => {
+export const fbm = (x: number, y: number, z: number) => vnoise(x, y, z) * 0.6 + vnoise(x * 2.1, y * 2.1, z * 2.1) * 0.3 + vnoise(x * 4.3, y * 4.3, z * 4.3) * 0.1;
+export const smooth = (a: number, b: number, x: number) => {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
 };
@@ -39,7 +39,7 @@ const smooth = (a: number, b: number, x: number) => {
  * normal; wherever the field is closer than the step, something is nearby.
  * Returns 1 (open) .. 0 (fully occluded).
  */
-function occlusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+export function occlusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
   let occ = 0, w = 1, wsum = 0;
   for (let i = 0; i < 5; i++) {
     const h = 0.003 + 0.0055 * i;
@@ -52,7 +52,7 @@ function occlusion(S: { d(x: number, y: number, z: number): number }, x: number,
 }
 
 /** Broad occlusion (a few cm out): under the head, between the legs, behind the arms. */
-function broadOcclusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+export function broadOcclusion(S: { d(x: number, y: number, z: number): number }, x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
   let occ = 0;
   for (let h = 0.016; h < 0.04; h += 0.016) {
     const d = S.d(x + nx * h, y + ny * h, z + nz * h);

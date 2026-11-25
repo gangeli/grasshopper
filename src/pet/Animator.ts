@@ -9,60 +9,19 @@ import type { BoneName, PetRig } from './PetModel';
  * actions cross-fade by weight; the blended pose then gets additive layers
  * (look-at, blinking, breathing) and physically simulated secondary motion
  * (antennae, ears, tail springs), and finally leg IK keeps the feet planted.
+ *
+ * The layering, blinking, gaze and eyes are the same for every pet; the
+ * actions and the body they drive come from the species. Hopper's are here;
+ * the Vizsla's (a quadruped) are in vizsla/DogMotion.
  */
 
-export const CHANNELS = [
-  'bodyX', 'bodyY', 'bodyZ', 'bodyPitch', 'bodyRoll', 'bodyYaw',
-  'spinePitch', 'spineRoll', 'spineYaw', 'chestPitch', 'chestRoll', 'chestYaw',
-  'neckPitch', 'neckYaw', 'neckRoll', 'headPitch', 'headYaw', 'headRoll',
-  'armLPitch', 'armLRaise', 'elbowL', 'armRPitch', 'armRRaise', 'elbowR',
-  'tailLift', 'tailSide', 'tailCurl',
-  'wingSpread', 'wingFlap',
-  'antLift', 'antSpread', 'earLift',
-  'footLX', 'footLY', 'footLZ', 'footRX', 'footRY', 'footRZ', 'footPitch', 'footPlant',
-  'squash',
-  'eyeOpen', 'happy', 'mouthOpen', 'smile', 'blush', 'pupilSize', 'lookX', 'lookY', 'lookWeight', 'glow',
-] as const;
-export type Channel = (typeof CHANNELS)[number];
-export type Pose = Record<Channel, number>;
-
-export function neutralPose(): Pose {
-  const p = {} as Pose;
-  for (const c of CHANNELS) p[c] = 0;
-  p.eyeOpen = 1;
-  p.smile = 1;
-  p.pupilSize = 1;
-  p.lookWeight = 1;
-  p.glow = 0.6;
-  p.footPlant = 1;
-  return p;
-}
-
-export interface ActionCtx {
-  /** Hop phase in [0,1) for locomotion. */
-  hopPhase: number;
-  /** Ground speed (m/s). */
-  speed: number;
-  /** Hop cycles per second (so the feet can stay planted for the right stride). */
-  hopRate: number;
-  /** Progress through a jump flight, [0,1]. */
-  jumpU: number;
-  /** Peek direction: +1 = to the pet's left, -1 = right, 0 = up/over. */
-  peekSide: number;
-  /** Where Hopper is being petted: +1 = on their left, -1 = right (they lean into it). */
-  touchSide: number;
-  /** A per-pet random seed for idle variation. */
-  seed: number;
-}
-
-export type ActionName =
-  | 'idle' | 'hop' | 'jumpCrouch' | 'jumpAir' | 'land' | 'hide' | 'hideLow' | 'peek' | 'giggle'
-  | 'surprised' | 'celebrate' | 'wave' | 'lookAround' | 'sniff' | 'coverEyes' | 'sleep' | 'petted';
+import { CHANNELS, neutralPose, type ActionCtx, type ActionFn, type ActionName, type Channel, type Pose } from './pose';
+import { Jiggle } from './jiggle';
+import { DOG_ACTIONS, DogBody } from './vizsla/DogMotion';
+export { CHANNELS, neutralPose, type ActionCtx, type ActionName, type Channel, type Pose } from './pose';
 
 /** Channels that place the body (not the face), for blending one posture into another. */
 const BODY_CHANNELS: readonly Channel[] = CHANNELS.filter((c) => c.startsWith('body') || /^(spine|chest|neck|head|arm|elbow|tail|wing|ant|ear|foot|squash)/.test(c));
-
-type ActionFn = (t: number, c: ActionCtx, p: Pose) => void;
 
 const TAU = Math.PI * 2;
 
@@ -521,84 +480,6 @@ function makeRng(seed: number): () => number {
   };
 }
 
-const _j1 = new THREE.Vector3();
-const _j2 = new THREE.Vector3();
-const _j3 = new THREE.Vector3();
-const _jq = new THREE.Quaternion();
-const _jq2 = new THREE.Quaternion();
-const _js = new THREE.Vector3();
-
-/**
- * Secondary motion for a soft dangling part (antenna, ear, tail, wing): its tip
- * is a damped spring chasing where the animation puts it, and the lag is turned
- * back into a bend of the bone chain. The damping is relative to the target's
- * own velocity, so steady travel causes no lag - only accelerations do, which
- * gives the overlap and follow-through of a real soft appendage. A few vector
- * ops per chain per frame.
- */
-class Jiggle {
-  private readonly pos = new THREE.Vector3();
-  private readonly vel = new THREE.Vector3();
-  private readonly prevT = new THREE.Vector3();
-  private live = false;
-  constructor(
-    private readonly chain: THREE.Object3D[],
-    private readonly tipLocal: THREE.Vector3,
-    private readonly freq: number,
-    private readonly zeta: number,
-    private readonly gain: number,
-    private readonly maxBend: number,
-  ) {}
-
-  reset(): void {
-    this.live = false;
-  }
-
-  /** Needs fresh world matrices; bends the chain's local rotations in place. */
-  update(dt: number, weight = 1): void {
-    const tip = this.chain[this.chain.length - 1];
-    const T = _j1.copy(this.tipLocal).applyMatrix4(tip.matrixWorld);
-    if (!this.live || dt <= 0 || weight <= 0.01 || T.distanceToSquared(this.pos) > 0.04 || !Number.isFinite(this.pos.x)) {
-      this.pos.copy(T);
-      this.vel.set(0, 0, 0);
-      this.prevT.copy(T);
-      this.live = true;
-      return;
-    }
-    const w = 2 * Math.PI * this.freq, k = w * w, c = 2 * this.zeta * w;
-    const tv = _j2.copy(T).sub(this.prevT).divideScalar(dt);
-    this.prevT.copy(T);
-    const n = Math.ceil(dt * 120), h = dt / n;
-    for (let i = 0; i < n; i++) {
-      // a = k (T - p) - c (v - v_T), semi-implicit Euler.
-      const ax = k * (T.x - this.pos.x) - c * (this.vel.x - tv.x);
-      const ay = k * (T.y - this.pos.y) - c * (this.vel.y - tv.y);
-      const az = k * (T.z - this.pos.z) - c * (this.vel.z - tv.z);
-      this.vel.x += ax * h;
-      this.vel.y += ay * h;
-      this.vel.z += az * h;
-      this.pos.addScaledVector(this.vel, h);
-    }
-    // Bend the chain about its base so the tip moves towards the lagging point
-    // (the stretch component along the chain is ignored).
-    _j3.setFromMatrixPosition(this.chain[0].matrixWorld);
-    const r = _j3.subVectors(T, _j3);
-    const rl = r.length();
-    if (rl < 1e-4) return;
-    const d = _j2.subVectors(this.pos, T);
-    d.addScaledVector(r, -d.dot(r) / (rl * rl));
-    const angle = Math.min(this.maxBend, (this.gain * d.length()) / rl) * weight;
-    if (angle < 1e-4) return;
-    const axis = r.cross(d).normalize();
-    const per = angle / this.chain.length;
-    for (const b of this.chain) {
-      b.parent!.matrixWorld.decompose(_js, _jq, _js);
-      _j2.copy(axis).applyQuaternion(_jq.invert());
-      b.quaternion.premultiply(_jq2.setFromAxisAngle(_j2, per));
-    }
-  }
-}
-
 type FootState = { locked: boolean; world: THREE.Vector3; off: THREE.Vector3; step: number; len: number };
 const STEP_TIME = 0.14;
 
@@ -628,9 +509,12 @@ export class Animator {
   /** Wing membranes and their motion-blur fans (absent on custom rigs). */
   private wingMat: THREE.Material | null = null;
   private wingBlur: Record<'L' | 'R', THREE.Object3D | undefined>;
+  /** The Vizsla's body (null for Hopper, whose body is posed here). */
+  private dog: DogBody | null;
 
   constructor(readonly rig: PetRig, seed = 0) {
     this.ctx.seed = seed;
+    this.dog = rig.species === 'vizsla' ? new DogBody(rig) : null;
     this.rand = makeRng(seed + 1);
     const b = rig.bones;
     const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
@@ -671,6 +555,7 @@ export class Animator {
       Object.assign(f, { locked: false, step: 0, len: 0 });
       f.off.set(0, 0, 0);
     }
+    this.dog?.reset();
   }
 
   /** Cross-fade to an action; restarting the same action resets its clock if `restart`. */
@@ -725,7 +610,7 @@ export class Animator {
       const T = this.tmp;
       const n = neutralPose();
       Object.assign(T, n);
-      ACTIONS[l.name](l.t, this.ctx, T);
+      (this.dog ? DOG_ACTIONS : ACTIONS)[l.name](l.t, this.ctx, T);
       // Ease in and out of each cross-fade rather than blending linearly.
       const w = l.w * l.w * (3 - 2 * l.w);
       for (const c of CHANNELS) P[c] += T[c] * w;
@@ -762,14 +647,18 @@ export class Animator {
     const set = (n: BoneName, x: number, y: number, z: number) => {
       bones[n].rotation.set(x, y, z);
     };
-    // Squash & stretch with volume preservation.
-    const sq = 1 + clamp(P.squash, -0.5, 0.5);
-    scaler.scale.set(1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq));
+    const dog = this.dog;
+    if (dog) dog.poseBody(P);
+    else {
+      // Squash & stretch with volume preservation.
+      const sq = 1 + clamp(P.squash, -0.5, 0.5);
+      scaler.scale.set(1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq));
 
-    bones.hips.position.set(rest.hips.x + P.bodyX, rest.hips.y + P.bodyY, rest.hips.z + P.bodyZ);
-    set('hips', P.bodyPitch, P.bodyYaw, P.bodyRoll);
-    set('spine', P.spinePitch, P.spineYaw, P.spineRoll);
-    set('chest', P.chestPitch, P.chestYaw, P.chestRoll);
+      bones.hips.position.set(rest.hips.x + P.bodyX, rest.hips.y + P.bodyY, rest.hips.z + P.bodyZ);
+      set('hips', P.bodyPitch, P.bodyYaw, P.bodyRoll);
+      set('spine', P.spinePitch, P.spineYaw, P.spineRoll);
+      set('chest', P.chestPitch, P.chestYaw, P.chestRoll);
+    }
 
     // Look-at: split between neck and head, the remainder goes to the eyes.
     let lookYaw = 0, lookPitch = 0;
@@ -782,7 +671,8 @@ export class Animator {
       bones.chest.worldToLocal(_v);
       _v.sub(bones.neck.position);
       const yaw = Math.atan2(_v.x, _v.z);
-      const pitch = -Math.atan2(_v.y - 0.05, Math.hypot(_v.x, _v.z));
+      // (The head's middle sits above the neck joint: further on a dog's long neck.)
+      const pitch = -Math.atan2(_v.y - (dog ? 0.07 : 0.05), Math.hypot(_v.x, _v.z));
       // Don't twist backwards for targets behind: fade out.
       const behind = smoothstep(1.9, 2.6, Math.abs(yaw));
       lookYaw = clamp(yaw, -1.3, 1.3) * P.lookWeight * (1 - behind);
@@ -816,11 +706,13 @@ export class Animator {
     sc.y += (sc.ty - sc.y) * sk;
     const saccW = clamp(P.lookWeight, 0, 1);
 
-    // Arms (positive pitch swings back; raise lifts outward).
-    set('shoulderL', P.armLPitch, 0, P.armLRaise);
-    set('shoulderR', P.armRPitch, 0, -P.armRRaise);
-    set('elbowL', -P.elbowL, 0, 0);
-    set('elbowR', -P.elbowR, 0, 0);
+    if (!dog) {
+      // Arms (positive pitch swings back; raise lifts outward).
+      set('shoulderL', P.armLPitch, 0, P.armLRaise);
+      set('shoulderR', P.armRPitch, 0, -P.armRRaise);
+      set('elbowL', -P.elbowL, 0, 0);
+      set('elbowR', -P.elbowR, 0, 0);
+    }
 
     // Ear flicks: a quick twitch of one ear every few seconds.
     const tw = this.twitch;
@@ -835,52 +727,54 @@ export class Animator {
     // Snap back, then spring forward again (a flick, not a wave).
     const flick = tw.ph < 1 ? Math.sin(tw.ph * Math.PI * 2) * (1 - tw.ph) * tw.amp : 0;
 
-    // Fast flapping blurs: the membrane itself only flutters a little and fades,
-    // while faint copies fanned across the stroke draw the blurred arc.
-    const flapAmp = clamp(P.wingFlap, 0, 1.5) * 0.6;
-    const blurK = smoothstep(0.15, 0.55, P.wingFlap);
-    const flapNow = flapAmp * Math.sin(this.time * 55) * (1 - 0.75 * blurK);
-    if (this.wingMat) this.wingMat.opacity = 1 - 0.55 * blurK;
-    for (const side of ['L', 'R'] as const) {
-      const s = side === 'L' ? 1 : -1;
-      const fan = this.wingBlur[side];
-      if (fan) {
-        fan.visible = blurK > 0.01;
-        if (fan.visible) {
-          (fan.userData.mat as THREE.Material).opacity = 0.14 * blurK;
-          for (const pv of fan.children) {
-            const d = (pv.userData.f as number) * flapAmp - flapNow;
-            pv.rotation.set(0, -s * d * 0.3, s * d * 0.7);
+    if (!dog) {
+      // Fast flapping blurs: the membrane itself only flutters a little and fades,
+      // while faint copies fanned across the stroke draw the blurred arc.
+      const flapAmp = clamp(P.wingFlap, 0, 1.5) * 0.6;
+      const blurK = smoothstep(0.15, 0.55, P.wingFlap);
+      const flapNow = flapAmp * Math.sin(this.time * 55) * (1 - 0.75 * blurK);
+      if (this.wingMat) this.wingMat.opacity = 1 - 0.55 * blurK;
+      for (const side of ['L', 'R'] as const) {
+        const s = side === 'L' ? 1 : -1;
+        const fan = this.wingBlur[side];
+        if (fan) {
+          fan.visible = blurK > 0.01;
+          if (fan.visible) {
+            (fan.userData.mat as THREE.Material).opacity = 0.14 * blurK;
+            for (const pv of fan.children) {
+              const d = (pv.userData.f as number) * flapAmp - flapNow;
+              pv.rotation.set(0, -s * d * 0.3, s * d * 0.7);
+            }
           }
         }
+        const lift = -P.antLift * 0.45;
+        const spread = P.antSpread * 0.4 * s;
+        for (let q = 0; q < 4; q++) {
+          const wob = 0.04 * noise1(this.time * 1.3 + q * 0.4, this.ctx.seed + (s > 0 ? 11 : 13));
+          set(`ant${side}${q}` as BoneName, lift * (0.5 + q * 0.3) + wob, spread * (0.6 + q * 0.2), -spread * 0.3);
+        }
+        // Positive earLift perks the ears up (their lag and flop comes from the jiggle below).
+        const fl = s === tw.side ? flick : 0;
+        set(`ear${side}` as BoneName, fl * 0.25, 0, s * (P.earLift * 0.5 + fl * 0.35));
+        // Wings: fold back, spread out, flap.
+        const flap = flapNow;
+        // At rest the wings lie folded back along the shoulders. Spreading raises
+        // them in the plane of the back (so they stay face-on and peek above the
+        // shoulders) with a little outward swing.
+        // (Tuned so the spread membrane still faces back and out rather than
+        // turning edge-on; a horizontal wing reads as a flickering hairline.)
+        set(`wing${side}` as BoneName, 0.1 + P.wingSpread * 0.4, -s * (P.wingSpread * 0.55 + flap * 0.3), s * (P.wingSpread * 0.3 + flap * 0.7));
       }
-      const lift = -P.antLift * 0.45;
-      const spread = P.antSpread * 0.4 * s;
-      for (let q = 0; q < 4; q++) {
-        const wob = 0.04 * noise1(this.time * 1.3 + q * 0.4, this.ctx.seed + (s > 0 ? 11 : 13));
-        set(`ant${side}${q}` as BoneName, lift * (0.5 + q * 0.3) + wob, spread * (0.6 + q * 0.2), -spread * 0.3);
+      // Tail chain: curl, lift and sway distributed along the bones, with spring lag.
+      for (let q = 0; q < 6; q++) {
+        const f = (q + 1) / 6;
+        set(
+          `tail${q}` as BoneName,
+          -P.tailLift * 0.25 - P.tailCurl * 0.22 * f,
+          P.tailSide * 0.18,
+          0,
+        );
       }
-      // Positive earLift perks the ears up (their lag and flop comes from the jiggle below).
-      const fl = s === tw.side ? flick : 0;
-      set(`ear${side}` as BoneName, fl * 0.25, 0, s * (P.earLift * 0.5 + fl * 0.35));
-      // Wings: fold back, spread out, flap.
-      const flap = flapNow;
-      // At rest the wings lie folded back along the shoulders. Spreading raises
-      // them in the plane of the back (so they stay face-on and peek above the
-      // shoulders) with a little outward swing.
-      // (Tuned so the spread membrane still faces back and out rather than
-      // turning edge-on; a horizontal wing reads as a flickering hairline.)
-      set(`wing${side}` as BoneName, 0.1 + P.wingSpread * 0.4, -s * (P.wingSpread * 0.55 + flap * 0.3), s * (P.wingSpread * 0.3 + flap * 0.7));
-    }
-    // Tail chain: curl, lift and sway distributed along the bones, with spring lag.
-    for (let q = 0; q < 6; q++) {
-      const f = (q + 1) / 6;
-      set(
-        `tail${q}` as BoneName,
-        -P.tailLift * 0.25 - P.tailCurl * 0.22 * f,
-        P.tailSide * 0.18,
-        0,
-      );
     }
 
     // Face.
@@ -914,7 +808,7 @@ export class Animator {
     if (face.lidMats) for (const m of face.lidMats) m.color.setScalar(1 + 0.17 * squint);
     // A closed eye sinks into the face, so the lid reads as a soft fold in the
     // fur rather than a dome standing proud of it.
-    face.eyeL.scale.z = face.eyeR.scale.z = 0.82 * (1 - 0.12 * closed - 0.3 * shut);
+    face.eyeL.scale.z = face.eyeR.scale.z = (face.eyeDepth ?? 0.82) * (1 - 0.12 * closed - 0.3 * shut);
     // When happy the lower lid grows over the upper one, so its arched lash
     // line is the one that shows.
     // Closed lids also widen a touch so their edge tucks under the face fur
@@ -937,17 +831,23 @@ export class Animator {
     // While the head is still catching up, the eyes cover the difference.
     const eyeYaw = clamp(P.lookX * 0.5 + lookYaw * 0.18 + 0.75 * (lookYaw - g.yaw) + sc.x * saccW, -0.45, 0.45);
     const eyePitch = clamp(-P.lookY * 0.4 + lookPitch * 0.3 + 0.6 * (lookPitch - g.pitch) + sc.y * saccW, -0.4, 0.4);
-    face.irisL.rotation.set(eyePitch, eyeYaw * (eyeYaw < 0 ? 0.55 : 1) - 0.25, 0);
-    face.irisR.rotation.set(eyePitch, eyeYaw * (eyeYaw > 0 ? 0.55 : 1) + 0.25, 0);
-    const mo = clamp(P.mouthOpen, 0, 1);
-    face.mouthOpen.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.12);
-    face.mouthOpen.visible = mo > 0.04;
-    // A happy open mouth is a "D" (flat top, round bottom); a startled one an "O".
-    if (face.mouthOpen.morphTargetInfluences) face.mouthOpen.morphTargetInfluences[0] = clamp(happy * 1.3, 0, 1) * clamp(P.smile, 0, 1);
-    face.smile.visible = mo < 0.25;
-    face.smile.scale.set(1, clamp(P.smile, 0.05, 1.2), 1);
-    face.blushMat.opacity = 0.35 + 0.5 * clamp(P.blush, 0, 1);
+    const toe = face.irisToe ?? 0.25;
+    face.irisL.rotation.set(eyePitch, eyeYaw * (eyeYaw < 0 ? 0.55 : 1) - toe, 0);
+    face.irisR.rotation.set(eyePitch, eyeYaw * (eyeYaw > 0 ? 0.55 : 1) + toe, 0);
     this.rig.glowMaterial.emissiveIntensity = 0.2 + 1.4 * clamp(P.glow, 0, 1.2);
+    if (dog) {
+      // Jaw, ears, tail and the four legs.
+      dog.finish(P, dt, flick * tw.side);
+      return;
+    }
+    const mo = clamp(P.mouthOpen, 0, 1);
+    face.mouthOpen!.scale.set(0.8 + mo * 0.4, 0.2 + mo * 1.1, 0.01 + mo * 0.12);
+    face.mouthOpen!.visible = mo > 0.04;
+    // A happy open mouth is a "D" (flat top, round bottom); a startled one an "O".
+    if (face.mouthOpen!.morphTargetInfluences) face.mouthOpen!.morphTargetInfluences[0] = clamp(happy * 1.3, 0, 1) * clamp(P.smile, 0, 1);
+    face.smile!.visible = mo < 0.25;
+    face.smile!.scale.set(1, clamp(P.smile, 0.05, 1.2), 1);
+    face.blushMat!.opacity = 0.35 + 0.5 * clamp(P.blush, 0, 1);
 
     // Secondary motion on top of the finished primary pose.
     this.rig.group.updateMatrixWorld(true);
