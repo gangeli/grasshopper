@@ -26,8 +26,8 @@ export const VIZSLA_PALETTES: Record<string, VizslaPalette> = {
   golden: { body: 0xab5d28, bodyDark: 0x86451c, belly: 0xc9905c, blush: 0xc0606c, glow: 0xffd56a, eye: 0x9c6524, wing: 0x2f8f78, leather: 0x8a4a34 },
   // Deeper, redder.
   russet: { body: 0x994a24, bodyDark: 0x733417, belly: 0xba7f52, blush: 0xb85864, glow: 0x9ffcff, eye: 0x8a5520, wing: 0x33507f, leather: 0x783e2c },
-  // Pale, sandy gold.
-  sandy: { body: 0xc68a4c, bodyDark: 0xa2662f, belly: 0xe0b98a, blush: 0xc66a74, glow: 0xfff07a, eye: 0xa87430, wing: 0xb5483e, leather: 0x9a5c40 },
+  // Sandy gold, the palest a Vizsla comes (paler still and it reads as another breed).
+  sandy: { body: 0xbc7f43, bodyDark: 0x975b29, belly: 0xd9ae7e, blush: 0xc66a74, glow: 0xfff07a, eye: 0xa87430, wing: 0xb5483e, leather: 0x96583c },
 };
 
 export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts: PetOptions = {}): PetRig {
@@ -407,7 +407,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     face,
     materials,
     glowMaterial,
-    palette: { ...pal },
+    palette: pal,
     headSample: new THREE.Vector3(...DOG_HEAD_SAMPLE),
   };
 }

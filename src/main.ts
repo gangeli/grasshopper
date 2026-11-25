@@ -7,8 +7,9 @@ import { SimMode } from './app/SimMode';
 import { CameraFeed } from './app/CameraFeed';
 import { createStack } from './game/stack';
 import { Animator } from './pet/Animator';
-import { buildPet, type PetRig } from './pet/PetModel';
-import { currentSpecies, setSpecies, SPECIES, speciesLabel, type Species } from './pet/species';
+import { buildPet, rebuildPet, type PetRig } from './pet/PetModel';
+import { currentCoat, currentSpecies, type Species } from './pet/species';
+import { createPetPicker } from './app/PetPicker';
 import { applyPetEnvironment } from './pet/lighting';
 import { Hearts } from './pet/Hearts';
 import { Petting, type PetResponse } from './game/Petting';
@@ -24,7 +25,8 @@ import { setupForgetControl, startMemory } from './app/Memory';
  *   &speed=4          simulation steps per frame (fast-forward)
  *   &fixed=1          fixed 1/30s timestep (deterministic)
  *   &emulate=1        install the IWER WebXR emulator (AR without a device)
- *   &pet=vizsla|hopper  which pet plays (otherwise the one picked on this page, remembered)
+ *   &pet=vizsla|hopper  which pet plays (otherwise the one picked in the model selector, remembered)
+ *   &coat=<name>      its coat (mint|plum|ember for Hopper, golden|russet|sandy for the Vizsla)
  *   &seed=N
  */
 const q = new URLSearchParams(location.search);
@@ -98,8 +100,14 @@ async function main() {
     document.getElementById('tapme')?.classList.add('gone');
   });
 
-  // Pet picker: Hopper, or a Vizsla. The showcase swaps at once; the game starts with whichever is chosen.
-  setupPetPicker(document.getElementById('pet-picker'), (s) => showcase.setPet(s));
+  // The model selector: Hopper or a Vizsla, and its coat. The showcase swaps
+  // at once; the game starts with whichever is chosen (and can change it again
+  // from the HUD's 🐾 button).
+  const pickerHost = document.getElementById('pet-picker');
+  if (pickerHost) {
+    pickerHost.append(createPetPicker((species, coat) => showcase.setPet(species, coat)).el);
+    pickerHost.style.display = '';
+  }
 
   const enter = async (mode: 'ar' | 'sim' | 'camera') => {
     // iOS only shows the motion-sensor prompt from inside the tap itself.
@@ -241,47 +249,6 @@ function setupInstall(note: HTMLElement, installMode = false) {
   };
 }
 
-/**
- * The pet picker on the start page: one chip per pet. Choosing one is
- * remembered for next time (unless ?pet= pins it for this visit).
- */
-function setupPetPicker(el: HTMLElement | null, onPick: (s: Species) => void) {
-  if (!el) return;
-  const chips = new Map<Species, HTMLButtonElement>();
-  const mark = (now: Species) => {
-    for (const [s, b] of chips) {
-      b.classList.toggle('on', s === now);
-      b.setAttribute('aria-checked', String(s === now));
-    }
-  };
-  for (const s of SPECIES) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'pet';
-    b.dataset.pet = s;
-    b.setAttribute('role', 'radio');
-    b.textContent = speciesLabel(s);
-    b.onclick = () => {
-      if (currentSpecies() === s || el.classList.contains('busy')) return;
-      setSpecies(s);
-      mark(s);
-      // Building a pet takes a moment: show the choice first, then swap.
-      el.classList.add('busy');
-      setTimeout(() => {
-        try {
-          onPick(s);
-        } finally {
-          el.classList.remove('busy');
-        }
-      }, 30);
-    };
-    chips.set(s, b);
-    el.appendChild(b);
-  }
-  mark(currentSpecies());
-  el.style.display = '';
-}
-
 function androidNotChrome(): boolean {
   const ua = navigator.userAgent;
   return /Android/.test(ua) && (!/Chrome\//.test(ua) || /Edg|OPR|SamsungBrowser|Firefox|FxiOS/.test(ua));
@@ -357,34 +324,74 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
   scene.add(disc);
   let rig!: PetRig, anim!: Animator;
   const cam = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.01, 10);
-  const portrait = innerHeight > innerWidth;
-  // Frame Hopper in the upper part of the screen, above the title and buttons.
-  cam.position.set(0, 0.36, portrait ? 2.05 : 2.3);
-  cam.lookAt(0, portrait ? 0.02 : -0.08, 0);
   // ?icon=1: a head-and-shoulders portrait (used to render the app icons).
   const icon = q.get('icon') === '1';
-  if (icon) {
-    cam.position.set(0, 0.26, 0.95);
-    cam.lookAt(0, 0.19, 0);
-  }
+  // Frame the pet in the upper part of the screen, above the title and buttons.
+  // On a short screen the title reaches further up (the model selector and the
+  // notes under the buttons take the room they take): then the pet moves up to
+  // stand just above it and, if it must, steps back a little.
+  const title = document.querySelector('#landing h1');
+  const at = new THREE.Vector3(), from = new THREE.Vector3(), probe = new THREE.Vector3();
+  let framed = '';
+  const frame = () => {
+    const W = innerWidth, H = innerHeight;
+    const titleTop = title ? title.getBoundingClientRect().top : H;
+    const key = `${W}x${H}/${Math.round(titleTop)}`;
+    if (key === framed) return;
+    framed = key;
+    cam.aspect = W / H;
+    cam.clearViewOffset();
+    const aim = (back: number) => {
+      cam.position.copy(at).addScaledVector(from, back);
+      cam.lookAt(at);
+      cam.updateProjectionMatrix();
+      cam.updateMatrixWorld(true);
+    };
+    /** Where a height above the pet's feet lands on screen (px from the top). */
+    const screenY = (y: number) => ((1 - probe.set(0, y, 0).project(cam).y) / 2) * H;
+    if (icon) {
+      at.set(0, 0.19, 0);
+      from.set(0, 0.07, 0.95);
+      aim(1);
+      return;
+    }
+    const portrait = H > W;
+    at.set(0, portrait ? 0.02 : -0.08, 0);
+    from.set(0, 0.36, portrait ? 2.05 : 2.3).sub(at);
+    aim(1);
+    // The room it has: from under the "tap me!" bubble down to the title.
+    const top = 56, bottom = titleTop - 12;
+    const feet = screenY(0), tall = feet - screenY(0.37);
+    if (feet > bottom && bottom - top > 96) {
+      aim(1 / THREE.MathUtils.clamp((bottom - top) / tall, 0.62, 1));
+      // Slide the picture up until its feet are at the title's top.
+      const up = Math.round(screenY(0) - bottom);
+      if (up > 0) {
+        cam.setViewOffset(W, H, 0, up, W, H);
+        cam.updateProjectionMatrix();
+      }
+    }
+    if (anim) anim.lookTarget = cam.position.clone();
+  };
   const cycle = ['wave', 'idle', 'giggle', 'lookAround', 'celebrate', 'idle', 'peek', 'idle'] as const;
   let i = 0, t = 0, last = performance.now();
-  /** Put a pet on the stage (replacing the one there). */
-  const setPet = (species: Species) => {
+  /** Put a pet on the stage in a coat (replacing the one there, which says hello again). */
+  const setPet = (species: Species, coat: string = currentCoat(species)) => {
     if (rig) {
-      scene.remove(rig.group);
-      for (const m of rig.materials) m.dispose();
+      rebuildPet(rig, coat, { species });
+      anim.rebind();
+    } else {
+      rig = buildPet(coat, { species });
+      scene.add(rig.group);
+      anim = new Animator(rig, 7);
+      anim.lookTarget = cam.position.clone();
     }
-    rig = buildPet('mint', { species });
-    scene.add(rig.group);
     applyPetEnvironment(renderer, rig);
-    anim = new Animator(rig, 7);
-    anim.lookTarget = cam.position.clone();
     i = 0;
     t = 0;
-    anim.play(icon ? 'idle' : 'wave', 0);
-    // For tests: the petting state and hearts.
-    window.__hopper = { ...window.__hopper, showcase: { anim, petting, hearts, species } };
+    anim.play(icon ? 'idle' : 'wave', 0, true);
+    // For tests: the petting state and hearts, and who is on stage.
+    window.__hopper = { ...window.__hopper, showcase: { anim, petting, hearts, species, coat } };
   };
   // The "tap me!" bubble floats beside Hopper's head.
   const bubble = document.getElementById('tapme');
@@ -395,9 +402,9 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     head.y += 0.12;
     head.x += 0.16;
     head.project(cam);
-    // (Kept on screen: a long-necked pet's head can be near the edge.)
+    // (Kept on screen: a long-necked pet's head can be near the edge, and a small screen's pet near the top.)
     bubble.style.left = `${Math.min(innerWidth - 84, ((head.x + 1) / 2) * innerWidth)}px`;
-    bubble.style.top = `${((1 - head.y) / 2) * innerHeight}px`;
+    bubble.style.top = `${Math.max(44, ((1 - head.y) / 2) * innerHeight)}px`;
   };
   // Pet Hopper: tap (anywhere above the buttons), or hold / stroke for more.
   const petting = new Petting();
@@ -419,6 +426,7 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     hearts.spawn(heartAt, res.hearts);
     onPet?.(res);
   };
+  frame();
   setPet(currentSpecies());
   const canvas = renderer.domElement;
   canvas.style.cursor = 'pointer';
@@ -450,14 +458,15 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     // (A dog shows best a little side-on; Hopper faces you.)
     const turn = rig.species === 'vizsla' ? 0.5 : 0;
     rig.group.rotation.y = icon ? 0.18 + turn : turn + Math.sin(now / 2400) * 0.35;
+    // (The title moves when notes and buttons under it come and go.)
+    frame();
     placeBubble();
     anim.update(dt);
     renderer.render(scene, cam);
   });
   const onResize = () => {
     renderer.setSize(innerWidth, innerHeight);
-    cam.aspect = innerWidth / innerHeight;
-    cam.updateProjectionMatrix();
+    frame();
   };
   addEventListener('resize', onResize);
   return {

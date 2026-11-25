@@ -153,6 +153,8 @@ export class ArMode {
 
   constructor(readonly stage: Stage, readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     this.ui = new GameUI(stack, hud, voice);
+    // Another pet or coat from the model selector: light and compile the new body.
+    this.ui.onPetChanged = () => stage.refreshPet(stack.rig);
     // Spread drift checks over frames (a few ms each) instead of stalling one frame.
     stack.game.health.drift.budgetMs = 3;
     // WebXR depth is densified with no confidence: surfaces the sensor can't

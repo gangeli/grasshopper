@@ -9,8 +9,10 @@ couch, inside baskets, tucked in corners — and you have to find it.
 * **No WebXR AR?** (iPhone Safari, desktop) Tap *Play in a virtual room*: the same game runs in a
   simulated room (drag to look, WASD / left-thumb to move, `C` to crouch).
 * **Pose lab**: `lab.html` renders every animation as a contact sheet.
-* **Rather have a dog?** Pick **Vizsla** on the start page (it's remembered), or add `?pet=vizsla`: a lean,
-  golden-rust Hungarian Vizsla plays instead of Hopper — same game, same room, a dog's body and a dog's manners.
+* **Rather have a dog?** The **model selector** picks who plays and in which coat: Hopper (mint, plum
+  or ember) or a lean Hungarian **Vizsla** (golden rust, russet or sandy gold) — same game, same room,
+  a dog's body and a dog's manners. It is on the start page and, while you play, behind the **🐾**
+  button: the pet changes where it stands, mid-game. The choice is remembered.
 
 ## How a round works
 
@@ -41,7 +43,8 @@ src/
     Animator       layered procedural animation: 17 actions, cross-fades, look-at, blinking,
                    spring-driven antennae/ears/tail, analytic 2-bone leg IK keeping feet planted
     PetController  path following: hop-walk cycle, turn → crouch → leap along a parabola → land
-    species        which pet plays: Hopper or the Vizsla (start-page picker, ?pet=)
+    species        which pet plays and in which coat: the model selector's choice, remembered
+                   (or pinned by a link: ?pet=, ?coat=)
     parts, pose    what the pets share: the eye rig, nose leather, textures; the pose channels
     vizsla/        the other pet, built the same way (see "The Vizsla" below)
       sculpt         the dog as blended shapes, plus a separate lower jaw
@@ -56,7 +59,7 @@ src/
     Health         the "immune system": detects impossible or contradictory states and recovers
                    (see "Staying unstuck" below)
   app/            browser shell: Stage (renderer, shadows, occluder), HUD, synthesized Voice,
-                  ArMode (WebXR), SimMode (virtual room)
+                  ArMode (WebXR), SimMode (virtual room), PetPicker (the model selector)
   sim/            test harness: procedural rooms, simulated sensors (depth/planes/mesh),
                   a seeker bot that plays the game, round runner
   emulate/        IWER WebXR emulator bridge: an emulated AR phone or Quest whose
@@ -92,7 +95,8 @@ What a dog needs that Hopper doesn't:
   docked tail that wags from the root.
 * **A short, sleek coat** (the fur shader's `sleek` option): close-lying, glossy, solid golden rust
   with the breed's lighter shadings — and no black anywhere: nose, eye rims, pads and nails are
-  flesh-brown. Three coats: `golden`, `russet`, `sandy` (`lab.html?pet=vizsla&palette=russet`).
+  flesh-brown. Three coats, all within the breed's range: `golden` rust, `russet`, `sandy` gold
+  (choose one in the model selector, or `lab.html?pet=vizsla&palette=russet`).
 * **Dog manners** for the same 17 actions: it lies down like a sphinx to hide (flat, chin on the floor,
   under furniture), gives a paw to wave, startles back, quarters with its nose down and then freezes
   **on point** — foreleg up, tail out straight — celebrates with a bounce, a spin and a play bow, cocks
@@ -104,6 +108,22 @@ What a dog needs that Hopper doesn't:
 
 Hopper is untouched by all this (its renders are pixel-identical): the layering, blinking, gaze and
 eyes are shared, and each species brings its own actions and body.
+
+### The model selector
+
+One control (`app/PetPicker`) chooses the pet and its coat: a row of pets and, under it, that pet's
+coats as swatches. It sits on the start page, where the showcase pet changes as you choose, and in
+the HUD behind the 🐾 button, in the simulator and in AR alike.
+
+* **Mid-game swaps happen in place.** `rebuildPet` builds the new body under the rig's own root group
+  and frees what the old one held on the GPU, so the game, the controller and the scene keep the pet
+  they had: same spot, same state. The animator rebinds to the new bones and carries on in the action
+  it was playing, so a pet swapped while hiding stays hidden, in the new pet's hiding pose.
+* **Remembered per pet** (`pet/species`): the pet, and each pet's own coat, so going back to Hopper
+  brings back the coat you gave it. A link can pin both for one visit without changing that:
+  `?pet=vizsla&coat=russet`.
+* Building a body takes a moment (about a second for a coat not seen yet; bodies are cached per coat
+  after that), so the choice shows at once and the control dims until the pet is there.
 
 ## Staying unstuck
 
@@ -156,6 +176,15 @@ npm run sheet            # just the pose contact sheet → artifacts/contact-she
 * `e2e/contact-sheet.spec.ts`: renders every animation at several times as a review sheet.
 * `e2e/vizsla.spec.ts`: the Vizsla's sheet, the start-page picker (swaps the pet, remembers it), and
   a full bot-played round with the Vizsla in the browser.
+* `test/selector.test.ts`: the model selector's rules: every coat on offer is a real palette of that
+  pet, choices are remembered per pet and a link can pin them; a rig rebuilt in place keeps its root,
+  frees the old body and leaves nothing of the other pet behind; the animator carries every action
+  over to the other body; and **a bot-played round survives two swaps** (a Vizsla takes over on the
+  walk, Hopper comes back while it hides) and is still found, with no recoveries needed.
+* `e2e/pet-picker.spec.ts`: the selector in the browser: on the start page (pets, coats, keyboard,
+  remembered across visits), into the game, from the HUD mid-game (GPU resources don't pile up over
+  repeated swaps; a round the bot plays through two swaps is still found), and inside an emulated AR
+  session.
 
 ### Stress testing mapping & pathfinding (realistic sensing, real data)
 
@@ -175,7 +204,8 @@ browser downloads a `.hopperrec` file (depth frames + tracked poses), and
 
 Handy URL parameters: `?sim=1&room=living|bedroom|empty|r<seed>&bot=1&speed=4&fixed=1&seed=N`,
 `?emulate=phone|quest` (AR without a device), `?record=1` (record an AR session for offline replay),
-`?pet=vizsla|hopper` (which pet; also works on `lab.html`).
+`?pet=vizsla|hopper` and `?coat=mint|plum|ember|golden|russet|sandy` (which pet, in which coat, for
+this visit; `?pet=` also works on `lab.html`, where the coat is `&palette=`).
 
 ## Development
 

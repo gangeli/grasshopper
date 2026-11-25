@@ -38,6 +38,8 @@ export class Stage {
   readonly quality: QualityGovernor;
   private lastRenderT = 0;
   private petRig: GameStack['rig'] | null = null;
+  /** How strongly the pet's environment lights it (less over a camera image). */
+  private petEnv = 0.8;
   private readonly _c = new THREE.Vector3();
 
   constructor(container: HTMLElement, opts: { ar: boolean }) {
@@ -102,10 +104,21 @@ export class Stage {
   }
 
   addPet(stack: GameStack) {
-    this.setPetRig(stack.rig);
     this.mapRoot.add(stack.rig.group);
-    applyPetEnvironment(this.renderer, stack.rig, this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8);
-    this.precompile(stack.rig.group);
+    this.petEnv = this.renderer.getContextAttributes()?.alpha ? 0.6 : 0.8;
+    this.refreshPet(stack.rig);
+  }
+
+  /**
+   * Take a pet into the scene's care: light it, hand its fur to the quality
+   * ladder and compile its shaders. Called again whenever the pet is rebuilt
+   * in place (another model or coat from the model selector).
+   */
+  refreshPet(rig: GameStack['rig'] | null = this.petRig) {
+    if (!rig) return;
+    this.setPetRig(rig);
+    applyPetEnvironment(this.renderer, rig, this.petEnv);
+    this.precompile(rig.group);
   }
 
   /**

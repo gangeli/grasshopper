@@ -1,7 +1,8 @@
 import * as THREE from 'three';
-import type { GameStack } from '../game/stack';
+import { swapPet, type GameStack } from '../game/stack';
 import type { TapResult } from '../game/HideAndSeek';
 import type { ActivityId } from '../game/Activities';
+import type { Species } from '../pet/species';
 import type { Hud } from './Hud';
 import type { Voice } from './Voice';
 import { TapMarker } from './TapMarker';
@@ -21,6 +22,8 @@ export class GameUI {
   private heartAt = new THREE.Vector3();
   private lastT = 0;
   private tipShown = false;
+  /** Called after the pet was swapped for another model or coat (the mode re-lights and recompiles it). */
+  onPetChanged: (() => void) | null = null;
   constructor(readonly stack: GameStack, readonly hud: Hud, readonly voice: Voice) {
     const { game, pet } = stack;
     game.events.onMessage = (m) => hud.say(m, 6);
@@ -68,6 +71,19 @@ export class GameUI {
     hud.on('hint', () => game.hint());
     hud.on('difficulty', () => (game.opts.difficulty = hud.difficultyValue));
     hud.onActivity = (id) => this.pickActivity(id);
+    hud.onPetPick = (species, coat) => this.changePet(species, coat);
+  }
+
+  /**
+   * The model selector chose another pet or coat: swap it in where the pet
+   * stands, mid-game (same spot, same action; a hiding pet stays hidden).
+   */
+  changePet(species: Species, coat: string) {
+    swapPet(this.stack, species, coat);
+    this.onPetChanged?.();
+    // A new friend says hello (not while it hides: the sound would give it away).
+    const phase = this.stack.game.phase;
+    if (phase === 'roam' || phase === 'found') this.voice.greet();
   }
 
   /** An activity chip was tapped. */

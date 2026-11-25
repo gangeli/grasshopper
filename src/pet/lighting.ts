@@ -10,11 +10,17 @@ import type { PetRig } from './PetModel';
  */
 export function petEnvironment(renderer: THREE.WebGLRenderer): THREE.Texture | null {
   if (typeof location !== 'undefined' && new URLSearchParams(location.search).get('env') === '0') return null;
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  pmrem.dispose();
+  // One per renderer: every pet (and every coat tried on in the model selector) shares it.
+  let env = envs.get(renderer);
+  if (!env) {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    envs.set(renderer, env);
+  }
   return env;
 }
+const envs = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
 
 export function applyPetEnvironment(renderer: THREE.WebGLRenderer, rig: PetRig, intensity = 0.8): void {
   const env = petEnvironment(renderer);

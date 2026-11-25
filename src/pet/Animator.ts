@@ -503,19 +503,34 @@ export class Animator {
   private sacc = { x: 0, y: 0, tx: 0, ty: 0, t: 0.8 };
   /** An occasional single-ear flick. */
   private twitch = { t: 3, ph: 1, side: 1, amp: 1 };
-  private jiggles: { ant: Jiggle[]; ear: Jiggle[]; tail: Jiggle; wing: Jiggle[] };
-  private feet: Record<'L' | 'R', FootState>;
-  private restAnkle: Record<'L' | 'R', THREE.Vector3>;
+  private jiggles!: { ant: Jiggle[]; ear: Jiggle[]; tail: Jiggle; wing: Jiggle[] };
+  private feet!: Record<'L' | 'R', FootState>;
+  private restAnkle!: Record<'L' | 'R', THREE.Vector3>;
   /** Wing membranes and their motion-blur fans (absent on custom rigs). */
   private wingMat: THREE.Material | null = null;
-  private wingBlur: Record<'L' | 'R', THREE.Object3D | undefined>;
+  private wingBlur!: Record<'L' | 'R', THREE.Object3D | undefined>;
   /** The Vizsla's body (null for Hopper, whose body is posed here). */
-  private dog: DogBody | null;
+  private dog: DogBody | null = null;
 
   constructor(readonly rig: PetRig, seed = 0) {
     this.ctx.seed = seed;
-    this.dog = rig.species === 'vizsla' ? new DogBody(rig) : null;
     this.rand = makeRng(seed + 1);
+    this.bind();
+  }
+
+  /**
+   * Take up the rig's body again after it was rebuilt in place (another pet
+   * or coat: rebuildPet). The action it was playing carries on; springs and
+   * planted feet start fresh on the new body.
+   */
+  rebind(): void {
+    this.bind();
+  }
+
+  /** Everything that holds on to the rig's bones and meshes (the rig is in its rest pose here). */
+  private bind(): void {
+    const rig = this.rig;
+    this.dog = rig.species === 'vizsla' ? new DogBody(rig) : null;
     const b = rig.bones;
     const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
     this.jiggles = {
@@ -535,7 +550,7 @@ export class Animator {
     for (const s of ['L', 'R'] as const) rig.scaler.worldToLocal(this.restAnkle[s]);
     this.wingBlur = { L: rig.group.getObjectByName('wingBlurL'), R: rig.group.getObjectByName('wingBlurR') };
     const wm = rig.group.getObjectByName('wingMeshL') as THREE.Mesh | undefined;
-    if (wm && !Array.isArray(wm.material)) this.wingMat = wm.material;
+    this.wingMat = wm && !Array.isArray(wm.material) ? wm.material : null;
   }
 
   /** Back to a fresh idle with all simulated state cleared (pose lab, tests). */

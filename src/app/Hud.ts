@@ -1,4 +1,6 @@
 import type { ActivityId, ActivityStatus } from '../game/Activities';
+import type { Species } from '../pet/species';
+import { createPetPicker, type PetPicker } from './PetPicker';
 
 /**
  * DOM HUD. In AR it is the WebXR dom-overlay root, so the same buttons work
@@ -25,6 +27,11 @@ export class Hud {
   private actButtons = new Map<ActivityId, { btn: HTMLButtonElement; sub: HTMLElement; bar: HTMLElement; key: string }>();
   /** Called when an activity chip is tapped. */
   onActivity: ((id: ActivityId) => void) | null = null;
+  /** Called when a pet or coat is chosen in the model selector (the 🐾 button): put that model on screen. */
+  onPetPick: ((species: Species, coat: string) => void) | null = null;
+  private petBtn: HTMLButtonElement;
+  private petSheet: HTMLElement;
+  private petPicker: PetPicker;
   private bubbleTimer = 0;
   private handlers = new Map<HudAction, () => void>();
   private diffBtn: HTMLButtonElement;
@@ -54,7 +61,26 @@ export class Hud {
     this.diffBtn.title = 'Difficulty';
     const dbg = button('map', 'chip', () => this.fire('debug'));
     dbg.title = 'Show what Hopper has mapped';
-    corner.append(this.diffBtn, dbg, exit);
+    // The model selector: who is playing, and in which coat.
+    this.petBtn = button('🐾', 'icon', () => this.showPetPicker(!this.petPickerOpen));
+    this.petBtn.title = 'Choose your pet';
+    this.petBtn.setAttribute('aria-label', 'Choose your pet');
+    this.petBtn.setAttribute('aria-haspopup', 'dialog');
+    this.petBtn.dataset.hud = 'pet';
+    corner.append(this.petBtn, this.diffBtn, dbg, exit);
+    this.petPicker = createPetPicker((species, coat) => this.onPetPick?.(species, coat));
+    this.petSheet = el('div', 'petsheet');
+    this.petSheet.setAttribute('role', 'dialog');
+    this.petSheet.setAttribute('aria-label', 'Choose your pet');
+    // (Taps on the sheet are not taps on the room behind it.)
+    this.petSheet.addEventListener('beforexrselect', (e) => e.preventDefault());
+    this.petSheet.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      this.showPetPicker(false);
+      this.petBtn.focus();
+    });
+    this.petSheet.append(el('div', 'petsheet-title', 'Who’s playing?'), this.petPicker.el, button('Done', 'chip', () => this.showPetPicker(false)));
     // AR escape hatches: re-place Hopper (fixes a mis-tapped floor) and
     // forget the map when it has visibly gone wrong.
     this.tools = el('div', 'hud-tools');
@@ -80,7 +106,8 @@ export class Hud {
     this.acts = el('div', 'acts');
     this.acts.setAttribute('role', 'group');
     this.acts.setAttribute('aria-label', 'Activities');
-    this.root.append(top, corner, this.tools, bottom, this.acts, this.cover, this.card, this.reticleHint);
+    this.root.append(top, corner, this.tools, bottom, this.acts, this.petSheet, this.cover, this.card, this.reticleHint);
+    this.showPetPicker(false);
     this.setActivities(null);
     this.showTools(false);
     this.setAlert(null);
@@ -202,9 +229,23 @@ export class Hud {
     this.secondary.style.display = visible ? '' : 'none';
   }
 
+  /** Open or close the model selector (pet and coat). */
+  showPetPicker(on: boolean) {
+    if (on) this.petPicker.sync();
+    this.petSheet.style.display = on ? '' : 'none';
+    this.petBtn.setAttribute('aria-expanded', String(on));
+    this.petBtn.classList.toggle('on', on);
+  }
+
+  get petPickerOpen(): boolean {
+    return this.petSheet.style.display !== 'none';
+  }
+
   showCover(on: boolean, n = 0, sub = '') {
     this.cover.style.display = on ? 'flex' : 'none';
     if (on) {
+      // Eyes covered: the round is on, the selector is put away.
+      if (this.petPickerOpen) this.showPetPicker(false);
       this.coverNum.textContent = n > 0 ? String(n) : '…';
       this.coverSub.textContent = sub;
     }

@@ -59,14 +59,26 @@
     background: linear-gradient(180deg, #fff8e8 20%, #ffd56a 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
     filter: drop-shadow(0 4px 18px rgba(255,200,90,.25)); }
   #landing .tag { margin: 4px 0 14px; color: #e6e9f5; font-size: 19px; font-weight: 500; text-align: center; }
-  /* Pet picker: Hopper or the Vizsla. */
-  #landing .pets { display: flex; gap: 4px; margin: 0 0 18px; padding: 4px; border-radius: 999px; background: rgba(255,255,255,.07);
-    border: 1px solid rgba(255,255,255,.1); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); transition: opacity .2s; }
-  #landing .pets.busy { opacity: .6; pointer-events: none; }
-  #landing .pet { padding: 7px 16px; border-radius: 999px; background: none; color: #c9cfe2; font: 600 14px/1 inherit; font-family: inherit;
+  /* The model selector (app/PetPicker): pets, then the chosen pet's coats. On the start page and in the HUD's sheet. */
+  .petpick { display: flex; flex-direction: column; align-items: center; gap: 8px; transition: opacity .2s; }
+  .petpick.busy { opacity: .6; pointer-events: none; }
+  .petpick .pets { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.1); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .petpick .pet { padding: 7px 16px; border-radius: 999px; background: none; color: #c9cfe2; font: 600 14px/1 inherit; font-family: inherit;
     transition: background .2s, color .2s; -webkit-tap-highlight-color: transparent; }
-  #landing .pet.on { background: rgba(143,240,195,.92); color: #10261d; box-shadow: 0 2px 10px rgba(76,201,149,.35); }
-  #landing .pet:focus-visible { outline: 2px solid #ffd56a; outline-offset: 2px; }
+  .petpick .pet.on { background: rgba(143,240,195,.92); color: #10261d; box-shadow: 0 2px 10px rgba(76,201,149,.35); }
+  .petpick .coat-row { display: flex; align-items: center; gap: 8px; }
+  /* (An empty twin of the coat's name on the other side keeps the swatches centred under the pets.) */
+  .petpick .coat-row::before { content: ""; width: 72px; }
+  .petpick .coats { display: flex; gap: 8px; }
+  /* A coat swatch: the coat's colour over its paler belly, ringed when chosen. */
+  .petpick .coat { width: 30px; height: 30px; padding: 0; border-radius: 50%; border: 2px solid rgba(255,255,255,.28);
+    background: radial-gradient(ellipse 95% 70% at 50% 112%, var(--belly) 0 58%, rgba(0,0,0,0) 60%), var(--body);
+    box-shadow: inset 0 -2px 4px rgba(0,0,0,.18); transition: transform .15s, box-shadow .2s, border-color .2s; -webkit-tap-highlight-color: transparent; }
+  .petpick .coat.on { border-color: #fff; transform: scale(1.12); box-shadow: 0 0 0 2px rgba(143,240,195,.9), 0 2px 10px rgba(0,0,0,.35); }
+  .petpick .coat-name { width: 72px; color: #c9cfe2; font-size: 13px; font-weight: 600; line-height: 1.15; text-align: left; }
+  .petpick .pet:focus-visible, .petpick .coat:focus-visible { outline: 2px solid #ffd56a; outline-offset: 2px; }
+  #landing #pet-picker { margin: 0 0 16px; }
   #landing .steps { list-style: none; display: flex; gap: 8px; margin: 18px 0 20px; padding: 0; flex-wrap: wrap; justify-content: center; max-width: 460px; }
   #landing .steps li { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 16px;
     background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1); color: #dfe4f2; font-size: 14px; font-weight: 500;
@@ -115,6 +127,26 @@
   .place-hint { position: absolute; left: 16px; right: 16px; bottom: calc(110px + env(safe-area-inset-bottom)); text-align: center; color: #fff; font-weight: 700;
     text-shadow: 0 1px 4px rgba(0,0,0,.7); }
   .hud { font-family: "Fredoka", ui-rounded, "SF Pro Rounded", system-ui, sans-serif; }
+  /* The model selector's sheet, under the corner buttons (🐾 opens it). */
+  .petsheet { position: absolute; top: calc(54px + env(safe-area-inset-top)); right: 12px; box-sizing: border-box; max-width: calc(100vw - 24px);
+    display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 14px 12px; border-radius: 22px; pointer-events: auto;
+    color: #eef1fa; background: rgba(20,26,44,.88); border: 1.5px solid rgba(255,255,255,.12); box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  .petsheet-title { font-size: 16px; font-weight: 600; }
+  .hud .icon.on { background: #8ff0c3; }
+  /* Narrow phones: the top row (move, rescan · pet, difficulty, map, exit) has to fit side by side. */
+  @media (max-width: 400px) {
+    .hud-corner, .hud-tools { gap: 4px; }
+    .hud .chip { padding: 6px 9px; font-size: 13px; }
+    .hud .icon { width: 32px; height: 32px; }
+  }
+  @media (max-width: 340px) {
+    .hud-corner, .hud-tools { gap: 3px; }
+    .hud-corner { right: 8px; }
+    .hud-tools { left: 8px; }
+    .hud .chip { padding: 6px 7px; font-size: 12px; }
+    .hud .icon { width: 30px; height: 30px; }
+  }
   /* Activities picker: walk (default), hide & seek (unlocks once the room is mapped), ... */
   .acts { position: absolute; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); display: flex; gap: 10px; justify-content: center; pointer-events: none; }
   .hud .act { position: relative; flex: 1 1 0; min-width: 0; max-width: 210px; display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 10px;
@@ -154,7 +186,7 @@
     <h1>Hopper</h1>
     <p class="tag">wants to play in your room</p>
   </div>
-  <div id="pet-picker" class="pets" role="radiogroup" aria-label="Choose your pet" style="display:none"></div>
+  <div id="pet-picker" style="display:none"></div>
   <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
   <div class="row2" id="chrome-row" style="display:none">
     <a id="btn-chrome" class="cta">Open in Chrome</a>

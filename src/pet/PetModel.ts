@@ -22,7 +22,7 @@ import {
   buildEye, catchlightTexture, fangGeometry, hornGeometry, irisTexture, lipLineTexture, MOUTH_H, MOUTH_W, MOUTH_Y0, mouthTexture, noseGeometry,
   pebbleTexture, radialTexture, scleraMaterial, tubeGeometry, whiskerGeometry, wingGeometry, wingTexture, type EyeMats, type LidOptions,
 } from './parts';
-import { currentSpecies, type Species } from './species';
+import { currentCoat, currentSpecies, type Species } from './species';
 import { buildVizsla, VIZSLA_PALETTES } from './vizsla/VizslaModel';
 import { DOG_BONES } from './vizsla/skeleton';
 export { HEAD_CENTER, HEAD_RADIUS, type BoneName } from './skeleton';
@@ -47,6 +47,11 @@ export const PALETTES: Record<string, PetPalette> = {
   plum: { body: 0x9a86c4, bodyDark: 0x5a4688, belly: 0xf5e8ee, blush: 0xf28fb2, glow: 0x9ffcff, eye: 0x5a3a78, wing: 0xf0cbe6, markings: 0.55 },
   ember: { body: 0xe0975e, bodyDark: 0xa45a34, belly: 0xfaefdc, blush: 0xf07280, glow: 0xfff07a, eye: 0x6b5418, wing: 0xf4bed4, markings: 0.6 },
 };
+
+/** The palette behind a coat (species.ts lists each pet's), or the pet's default when the name is not one of its coats. */
+export function coatPalette(species: Species, coat: string): PetPalette {
+  return species === 'vizsla' ? (VIZSLA_PALETTES[coat] ?? VIZSLA_PALETTES.golden) : (PALETTES[coat] ?? PALETTES.mint);
+}
 
 export interface PetRig {
   /** Which pet this is (the Animator picks its motion set from it). */
@@ -117,9 +122,16 @@ export interface PetOptions {
   species?: Species;
 }
 
-export function buildPet(paletteName: keyof typeof PALETTES | PetPalette = 'mint', opts: PetOptions = {}): PetRig {
+/**
+ * Build a pet. With no palette it wears the coat chosen for it in the model
+ * selector (species.ts): mint for Hopper and golden rust for the Vizsla
+ * unless something else was picked.
+ */
+export function buildPet(paletteName?: keyof typeof PALETTES | PetPalette, opts: PetOptions = {}): PetRig {
+  const species = opts.species ?? currentSpecies();
+  paletteName ??= currentCoat(species);
   // The Vizsla has its own palettes: a Hopper palette name falls back to golden rust.
-  if ((opts.species ?? currentSpecies()) === 'vizsla') return buildVizsla(typeof paletteName === 'string' ? paletteName : 'golden', opts);
+  if (species === 'vizsla') return buildVizsla(typeof paletteName === 'string' ? paletteName : 'golden', opts);
   const pal = typeof paletteName === 'string' ? (PALETTES[paletteName] ?? PALETTES.mint) : paletteName;
   const group = new THREE.Group();
   group.name = 'Hopper';
@@ -587,6 +599,47 @@ function buildFace(bones: Record<BoneName, THREE.Bone>, abs: Record<BoneName, TH
   };
 }
 
+
+/**
+ * Turn a rig into another pet, or the same pet in another coat, in place. The
+ * root group stays, so the pet keeps its place in the scene and everyone who
+ * holds the rig (game, controller, stage) still holds the right one;
+ * everything under the group is built afresh and what the old body held on
+ * the GPU is freed. An Animator bound to the rig must rebind() afterwards
+ * (swapPet in game/stack does both).
+ */
+export function rebuildPet(rig: PetRig, paletteName?: keyof typeof PALETTES | PetPalette, opts: PetOptions = {}): PetRig {
+  const next = buildPet(paletteName, opts);
+  disposePet(rig, next);
+  rig.group.remove(rig.scaler);
+  rig.group.add(next.scaler);
+  // (headSample is named so that a pet without one clears the last pet's.)
+  Object.assign(rig, next, { group: rig.group, headSample: next.headSample });
+  rig.group.updateMatrixWorld(true);
+  return rig;
+}
+
+/**
+ * Free what a rig holds on the GPU: its geometry and materials. Geometry that
+ * `keep` also uses (the body mesh is cached per coat) is left alone, and so
+ * are textures, which are small and shared between pets.
+ */
+export function disposePet(rig: PetRig, keep?: PetRig): void {
+  const kept = new Set<THREE.BufferGeometry>();
+  keep?.scaler.traverse((o) => {
+    const g = (o as THREE.Mesh).geometry;
+    if (g) kept.add(g);
+  });
+  const geos = new Set<THREE.BufferGeometry>(), mats = new Set<THREE.Material>(rig.materials);
+  rig.scaler.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.geometry && !kept.has(m.geometry)) geos.add(m.geometry);
+    for (const mat of Array.isArray(m.material) ? m.material : m.material ? [m.material] : []) mats.add(mat);
+  });
+  for (const g of geos) g.dispose();
+  for (const m of mats) m.dispose();
+  rig.skeleton.dispose();
+}
 
 export function boneNames(species: Species = 'hopper'): BoneName[] {
   return (species === 'vizsla' ? DOG_BONES : BONES).map(([n]) => n as BoneName);

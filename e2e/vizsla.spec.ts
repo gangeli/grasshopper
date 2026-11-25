@@ -23,7 +23,8 @@ test('Vizsla pose contact sheet renders', async ({ page }) => {
 });
 
 test('start page: the pet picker swaps to the Vizsla and remembers it', async ({ page }) => {
-  test.setTimeout(90_000);
+  // (Three loads of the start page at full detail: slow in the software-rendered test browser.)
+  test.setTimeout(240_000);
   mkdirSync('artifacts', { recursive: true });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
