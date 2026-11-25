@@ -667,6 +667,10 @@ export interface EyeConfig {
   lashes?: boolean;
   /** Fur length on the lids (m). */
   lidFur?: number;
+  /** Slant: how far the outer corner sits above the inner one (radians; default level). */
+  slant?: number;
+  /** Size of the painted catchlights relative to Hopper's (default 1). */
+  shine?: number;
 }
 
 /**
@@ -688,7 +692,7 @@ export function buildEye(side: 'L' | 'R', cfg: EyeConfig): { eye: THREE.Group; i
   eye.name = `eye${side}`;
   eye.position.copy(new THREE.Vector3(...cfg.center).sub(cfg.headAbs));
   // Splayed a little outward and tipped up: big eyes that look *at* you.
-  eye.rotation.set(cfg.pitch, s * cfg.splay, 0);
+  eye.rotation.set(cfg.pitch, s * cfg.splay, s * (cfg.slant ?? 0));
   headBone.add(eye);
   // Everything inside the eye is spherical; the group's scale makes it a
   // tall oval, so the iris can rotate without poking through the white.
@@ -719,7 +723,7 @@ export function buildEye(side: 'L' | 'R', cfg: EyeConfig): { eye: THREE.Group; i
     [-0.32, 0.36, 0.23],
     [0.3, -0.32, 0.09],
   ]) {
-    const shine = new THREE.Mesh(new THREE.PlaneGeometry(R * r * 2, R * r * 2), m.shineMat);
+    const shine = new THREE.Mesh(new THREE.PlaneGeometry(R * r * 2 * (cfg.shine ?? 1), R * r * 2 * (cfg.shine ?? 1)), m.shineMat);
     const dir = new THREE.Vector3(x * s, y, Math.sqrt(Math.max(0, 1 - x * x - y * y)));
     shine.position.copy(dir).multiplyScalar(R * 1.035);
     shine.lookAt(shine.position.clone().multiplyScalar(2));

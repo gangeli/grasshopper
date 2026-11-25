@@ -83,8 +83,9 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   // Dogs show very little white: the "sclera" is a warm, shaded brown-white.
   // (The opening is a horizontal almond, where Hopper's is a tall oval.)
   const sclera = scleraMaterial(cBody.clone().lerp(cLeather, 0.5).multiplyScalar(0.8), 1.45, 1.0);
-  sclera.color.set(0xd9c9b6);
-  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye, 1.3), roughness: 0.4 });
+  sclera.color.set(0xcdbba6);
+  // Amber, light enough to read as a colour around the pupil rather than as a black bead.
+  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye, 1.42), roughness: 0.4 });
   const pupilMat = new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.3 });
   const corneaMat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.05, roughness: 0.02, clearcoat: 1, clearcoatRoughness: 0.02, depthWrite: false, envMapIntensity: 2.2 });
   const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff, map: catchlightTexture(), transparent: true, depthWrite: false });
@@ -94,7 +95,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const pebble = pebbleTexture();
   // Nose leather: flesh-brown, moist.
   const noseMat = new THREE.MeshPhysicalMaterial({ color: cLeather.clone().multiplyScalar(0.92), vertexColors: true, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25, bumpMap: pebble, bumpScale: 0.6, envMapIntensity: 0.7 });
-  const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, transparent: true, opacity: 0.8 });
+  const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, transparent: true, opacity: 0.5 });
   const tongueMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.38, clearcoat: 0.5, clearcoatRoughness: 0.3 });
   const toothMat = new THREE.MeshStandardMaterial({ color: 0xe6dcc8, roughness: 0.36 });
   const nailMat = new THREE.MeshStandardMaterial({ color: cLeather.clone().multiplyScalar(0.8), roughness: 0.4 });
@@ -193,7 +194,10 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
       // A dog's eye is nearly all iris.
       irisFrac: 0.8,
       lashes: false,
-      lidFur: 0.0016,
+      lidFur: 0.0012,
+      // Outer corners a touch higher: alert and kind, where level or drooping reads as dull.
+      slant: 0.13,
+      shine: 0.78,
     });
   const L = mkEye('L'), Rr = mkEye('R');
 
@@ -202,8 +206,8 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     const { p, n } = dogSurfaceAt(...DOG_NOSE);
     const nose = new THREE.Mesh(noseGeometry(), noseMat);
     nose.name = 'nose';
-    nose.scale.set(0.0092, 0.0071, 0.0046);
-    nose.position.copy(toHead(p.clone().addScaledVector(n, -0.0019)));
+    nose.scale.set(0.0071, 0.0056, 0.0038);
+    nose.position.copy(toHead(p.clone().addScaledVector(n, -0.0017)));
     nose.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n.clone().lerp(new THREE.Vector3(0, 0, 1), 0.5).normalize());
     bones.head.add(nose);
   }
@@ -382,11 +386,12 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     eyeSquint,
     lidMats: [lidMat, lidFur],
     eyeDepth: DOG_EYE_SCALE[2],
-    irisToe: DOG_EYE_SPLAY * 0.8,
-    // Lids at rest sit part-way over the eye: a soft almond, not a round stare.
-    lidUpOpen: -1.12,
-    lidLoOpen: 1.3,
-    pupilScale: 0.66,
+    // (Toed in by the whole of their splay: both eyes on what it looks at, never wall-eyed.)
+    irisToe: DOG_EYE_SPLAY,
+    // Lids at rest sit well over the eye, above and below: an almond, not a round stare.
+    lidUpOpen: -0.94,
+    lidLoOpen: 1.18,
+    pupilScale: 0.58,
     tongue,
   };
   group.traverse((o) => {
@@ -413,36 +418,39 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
  * the lower teeth (panting); morph target 1 arches the middle (a lick, a yawn).
  */
 function tongueGeometry(jawAbs: THREE.Vector3, pink: THREE.Color): THREE.BufferGeometry {
-  const NU = 24, NV = 14;
+  const NU = 26, NV = 14;
   const J = DOG_JAW;
-  const z0 = J.back + 0.001, z1 = J.c[2] + J.r[2] - 0.0115;
+  // The lower lip at the front; at rest the tip lies a centimetre behind it, inside the teeth.
+  const lip = J.c[2] + J.r[2];
+  const z0 = J.back + 0.001, z1 = lip - 0.0105;
   const pos: number[] = [], out: number[] = [], arch: number[] = [], col: number[] = [], idx: number[] = [];
   const cTip = pink.clone().lerp(new THREE.Color(0xff8f9c), 0.6), cRoot = pink.clone().multiplyScalar(0.7);
   const c = new THREE.Color();
   for (let i = 0; i <= NU; i++) {
     const t = i / NU;
-    // Lying in its bed: it follows the floor of the mouth, which rises towards the throat.
-    const yBed = THREE.MathUtils.lerp(0.2496, 0.2488, t);
-    // Half-width: even along the blade, rounding off at the tip.
-    const w = THREE.MathUtils.lerp(0.0068, 0.0054, t) * Math.sqrt(Math.max(0, 1 - Math.pow(t, 6)));
-    const th = THREE.MathUtils.lerp(0.0016, 0.0012, t) * Math.sqrt(Math.max(0.02, 1 - Math.pow(t, 8)));
+    const yBed = THREE.MathUtils.lerp(0.2507, 0.2501, t);
+    // Half-width: even along the blade, ending in a broad round tip (a spatula, not a point).
+    const w = THREE.MathUtils.lerp(0.005, 0.0047, t) * (t > 0.88 ? Math.sqrt(Math.max(0, 1 - Math.pow((t - 0.88) / 0.12, 2))) : 1);
+    const th = THREE.MathUtils.lerp(0.0015, 0.0012, t) * Math.sqrt(Math.max(0.02, 1 - Math.pow(t, 8)));
+    const z = THREE.MathUtils.lerp(z0, z1, t);
+    // Out: it slides forward until the tip is a little beyond the lip, riding
+    // up over the lower front teeth on the way, and what is past the lip
+    // curls down over it. A neat tip showing, not a ribbon hanging.
+    const zOut = z + 0.0185 * Math.pow(t, 1.25);
+    const past = Math.max(0, zOut - (lip - 0.0008));
+    const lift = 0.0044 * Math.exp(-Math.pow((zOut - (lip - 0.0065)) / 0.0085, 2)) + 0.0008 * smooth(t);
+    // (It drapes: steeply down over the lip and chin, rather than sticking out.)
+    const drop = 0.9 * past + 40 * past * past;
+    const wide = 1 + 0.38 * smooth(t / 0.8);
     for (let j = 0; j <= NV; j++) {
       const a = (j / NV) * Math.PI * 2;
       const cx = Math.sin(a), cy = Math.cos(a);
       const groove = cy > 0 ? 0.0005 * Math.exp(-(cx * cx) / 0.05) * (1 - 0.6 * t) : 0;
-      const x = cx * w, y = cy * th - groove, z = THREE.MathUtils.lerp(z0, z1, t);
+      const x = cx * w, y = cy * th - groove;
       pos.push(x - jawAbs.x, yBed + y - jawAbs.y, z - jawAbs.z);
-      // Out: slides forward and broadens; the front drapes over the lower teeth and hangs, cupped a little.
-      const reach = 0.0215 * Math.pow(t, 1.3);
-      const droop = smooth((t - 0.6) / 0.4);
-      const wide = 1 + 0.45 * smooth(t / 0.75);
-      const zz = z + reach - 0.003 * droop * droop;
-      // It rides up over the lower front teeth, then hangs.
-      const lift = 0.0036 * Math.sin(Math.PI * Math.min(1, t / 0.72));
-      const yy = yBed + lift + y * (1.4 - 0.2 * droop) - 0.0082 * droop * droop + 0.0008 * cx * cx * droop;
-      out.push(x * wide - x, yy - (yBed + y), zz - z);
+      out.push(x * wide - x, lift - drop + y * 0.3, zOut - 22 * past * past - z);
       // Arch: the middle lifts.
-      arch.push(0, 0.003 * Math.sin(Math.PI * t) * (1 - 0.5 * cx * cx), 0.002 * t);
+      arch.push(0, 0.0026 * Math.sin(Math.PI * t) * (1 - 0.5 * cx * cx), 0.0015 * t);
       c.copy(cRoot).lerp(cTip, smooth(t / 0.7)).multiplyScalar(cy > 0 ? 1 - 420 * groove : 0.8);
       col.push(c.r, c.g, c.b);
     }

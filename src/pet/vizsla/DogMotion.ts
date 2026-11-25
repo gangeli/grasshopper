@@ -38,14 +38,19 @@ function blendBody(p: Pose, q: Pose, w: number): void {
   for (const ch of BODY) p[ch] += (q[ch] - p[ch]) * w;
 }
 
-/** Panting: jaw dropped, tongue out and a quick shallow breath. `k` 0..1. */
-function pant(t: number, p: Pose, k: number): void {
+/**
+ * Panting: jaw dropped and a quick shallow breath. `k` 0..1. Quietly, the
+ * tongue stays in the mouth, its tip on the lower teeth; `loll` 0..1 lets it
+ * hang out, for when it is hot from running or beside itself with joy.
+ */
+function pant(t: number, p: Pose, k: number, loll = 0): void {
   if (k <= 0) return;
   const beat = Math.sin(t * TAU * 4.6);
-  p.jaw = Math.max(p.jaw, k * (0.5 + 0.08 * beat));
-  p.tongue = Math.max(p.tongue, k * (0.88 + 0.1 * beat));
+  // (A modest gape: enough for the tongue, short of a yawn.)
+  p.jaw = Math.max(p.jaw, k * (0.34 + 0.06 * beat));
+  p.tongue = Math.max(p.tongue, k * (0.5 + 0.5 * loll + 0.05 * beat));
   // The tongue humps up and flattens with each breath.
-  p.tongueArch = Math.max(p.tongueArch, k * (0.45 + 0.3 * beat));
+  p.tongueArch = Math.max(p.tongueArch, k * (0.35 + 0.25 * beat));
   p.squash += 0.035 * k * beat;
   p.chestPitch += 0.012 * k * beat;
   p.smile = 1;
@@ -78,13 +83,14 @@ function stand(t: number, c: ActionCtx, p: Pose): void {
 function idle(t: number, c: ActionCtx, p: Pose): void {
   stand(t, c, p);
   // Pants in spells, mouth closed in between.
-  const panting = smoothstep(0.05, 0.45, noise1(t * 0.13 + 3.1, c.seed + 20));
-  pant(t, p, panting);
+  // (Mouth shut is its resting face: composed, attentive. It pants about a quarter of the time.)
+  const panting = smoothstep(0.3, 0.62, noise1(t * 0.13 + 3.1, c.seed + 20));
+  pant(t, p, 0.85 * panting);
   // Now and then, between pants, it cocks its head at you, ears pricked: what was that?
   const n = noise1(t * 0.19 + 7.7, c.seed + 31);
   const tilt = smoothstep(0.42, 0.6, Math.abs(n)) * (1 - panting);
-  p.headRoll += 0.42 * Math.sign(n) * tilt;
-  p.neckRoll = 0.08 * Math.sign(n) * tilt;
+  p.headRoll += 0.3 * Math.sign(n) * tilt;
+  p.neckRoll = 0.06 * Math.sign(n) * tilt;
   p.earLift += 0.6 * tilt;
   p.tailSide *= 1 - 0.7 * tilt;
 }
@@ -109,8 +115,8 @@ function playBow(t: number, p: Pose, k: number): void {
   B.tailSide = 1.0 * Math.sin(t * 17);
   B.spineYaw = 0.07 * Math.sin(t * 17 + 0.8);
   B.earLift = 0.5;
-  B.jaw = 0.5;
-  B.tongue = 0.8;
+  B.jaw = 0.4;
+  B.tongue = 1;
   blendBody(p, B, k);
 }
 
@@ -255,8 +261,8 @@ function gait(t: number, c: ActionCtx, p: Pose, travel = c.speed): void {
   p.tailSide = 0.3 * Math.sin(TAU * ph + 1);
   p.earLift = -0.15 * sp;
   // Mouth open at speed.
-  p.jaw = 0.04 + 0.32 * smoothstep(0.35, 0.9, sp);
-  p.tongue = 0.55 * smoothstep(0.5, 1, sp);
+  p.jaw = 0.03 + 0.27 * smoothstep(0.45, 0.95, sp);
+  p.tongue = 0.5 * smoothstep(0.45, 0.7, sp) + 0.5 * smoothstep(0.75, 1, sp);
   p.lookWeight = 0.3;
 }
 
@@ -380,7 +386,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.earLift = 0.1 + 0.2 * Math.sin(t * 9);
     p.happy = 0.85;
     p.eyeOpen = 0.9;
-    pant(t * 1.3, p, e);
+    pant(t * 1.3, p, e, 1);
     p.lookWeight = 0.7;
     p.glow = 1;
   },
@@ -402,7 +408,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.headPitch = 0.2 * e;
     p.eyeOpen = 1.2;
     p.pupilSize = 0.72;
-    p.jaw = 0.4;
+    p.jaw = 0.26;
     p.smile = 0;
     p.earLift = 0.95;
     p.tailLift = 0.8;
@@ -418,11 +424,11 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.bodyY += 0.012 * Math.max(0, Math.sin(TAU * (ph - 0.16)));
     p.neckPitch -= 0.3;
     p.headPitch += 0.25;
-
-    p.happy = 0.8;
-    p.eyeOpen = 0.9;
-    p.jaw = 0.55;
-    p.tongue = 0.7;
+    // Bright-eyed: a soft squint, not eyes screwed shut.
+    p.happy = 0.4;
+    p.eyeOpen = 1;
+    p.jaw = 0.4;
+    p.tongue = 1;
     p.tailLift = 0.5;
     p.tailSide = 0.9 * Math.sin(t * 14);
     p.earLift = 0.4;
@@ -451,11 +457,12 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     // Weight over the other foreleg.
     p.bodyX = 0.006 * up;
     p.chestRoll = -0.05 * up;
-    p.headRoll = 0.16 * e;
+    p.headRoll = 0.08 * e;
     p.tailSide = 0.8 * Math.sin(t * 11) * e;
     p.tailLift = S.tailLift * e;
-    p.happy = 0.6 * e;
-    pant(t, p, 0.8 * e);
+    // Bright-eyed, mouth open in an easy smile, tongue in.
+    p.happy = 0.2 * e;
+    pant(t, p, 0.7 * e);
     p.earLift = 0.35 * e;
   },
   lookAround(t, c, p) {
@@ -553,7 +560,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.tailLift = 0.25 * e;
     p.happy = 0.9 * e;
     p.eyeOpen = 1 - 0.12 * e;
-    pant(t, p, 0.75 * e);
+    pant(t, p, 0.55 * e, 0.3);
     p.lookWeight = 0.25;
     p.glow = 0.6 + 0.4 * e;
   },
@@ -627,7 +634,7 @@ export class DogBody {
     this.pastern.x = 0;
     this.jiggles = {
       // Long ear leathers swing and flap; the tail is stiffer and only whips at its tip.
-      ear: ([['L', 1], ['R', -1]] as const).map(([s, k]) => new Jiggle([b[`ear${s}`], b[`ear${s}1`]], new THREE.Vector3(0.001 * k, -0.032, 0.009), 2.9, 0.24, 1.0, 0.55)),
+      ear: ([['L', 1], ['R', -1]] as const).map(([s, k]) => new Jiggle([b[`ear${s}`], b[`ear${s}1`]], new THREE.Vector3(0.0006 * k, -0.0283, 0.0075), 2.9, 0.24, 1.0, 0.55)),
       tail: new Jiggle([1, 2, 3, 4, 5].map((q) => b[`tail${q}` as DogBoneName]), new THREE.Vector3(0, -0.001, -0.0125), 3.4, 0.4, 0.7, 0.3),
     };
   }

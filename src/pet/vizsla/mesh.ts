@@ -329,7 +329,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     }
     // Eye rims: a liner of leather that fades out while the eyes are shut.
     const lumBefore = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
-    c.lerp(cLeather, 0.5 * rim).multiplyScalar(1 - 0.12 * rim);
+    c.lerp(cLeather, 0.42 * rim).multiplyScalar(1 - 0.08 * rim);
     // Baked occlusion: under the jaw, between the legs, the elbows, between the toes.
     const ao = occlusion(S, x, y, z, nx, ny, nz);
     const aoB = broadOcclusion(S, x, y, z, nx, ny, nz);
@@ -337,7 +337,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     const hollow = 1 - smooth(1.0, 1.9, eyeD);
     let aoK = (0.52 + 0.48 * ao - 0.3 * toes * (1 - ao)) * (0.62 + 0.38 * aoB) * (0.9 + 0.1 * smooth(0.0, 0.06, y));
     // (The socket is filled by the eye: don't let its hollow black out the lids' surround.)
-    aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.78), hollow);
+    aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.88), hollow);
     // (Nor the mouth: an open mouth should read as pink, not as a black hole.)
     aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.72), mouthK);
     c.multiplyScalar(aoK);
@@ -384,7 +384,7 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
     out.silk[v] = 0.75;
     out.socket[v * 3 + 1] = 1;
     // Chin and underjaw are among the lighter shadings.
-    c.copy(cBody).lerp(cLight, 0.3 + 0.25 * smooth(0, -0.8, ny));
+    c.copy(cBody).lerp(cLight, 0.1 + 0.34 * smooth(0, -0.8, ny));
     c.lerp(cLeather, 0.9 * lip);
     const deep = smooth(DOG_JAW.c[2] + 0.02, DOG_JAW.back, z);
     c.lerp(cMouth.clone().multiplyScalar(0.9 - 0.36 * deep), top);
@@ -401,7 +401,7 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
 }
 
 /** Length of the ear leather and where its second joint is along it. */
-export const EAR_LENGTH = 0.06;
+export const EAR_LENGTH = 0.054;
 
 /**
  * A point on the ear's mid-surface (pet space, rest pose). u runs from the
@@ -411,16 +411,20 @@ export const EAR_LENGTH = 0.06;
  */
 function earPoint(s: number, u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
   const base = DOG_P.earL;
-  // Centre line: out of the skull over a soft fold, then down close to the cheek, swinging a little forward.
+  // Centre line: out of the skull over a soft fold, then down close against the cheek, swinging a little forward.
   const fold = Math.sin(Math.min(1, u / 0.26) * Math.PI * 0.5);
-  const cx = base[0] - 0.004 + 0.0112 * fold + 0.002 * u;
+  const cx = base[0] - 0.004 + 0.0074 * fold + 0.0015 * u;
   const cy = base[1] + 0.0018 * Math.sin(Math.min(1, u / 0.14) * Math.PI) - EAR_LENGTH * Math.pow(u, 1.08);
-  const cz = base[2] + 0.001 + 0.012 * u * u;
+  const cz = base[2] + 0.001 + 0.009 * u * u;
   // Half-width: broadest a third of the way down, tapering to a rounded tip.
   const w = u < 0.35 ? THREE.MathUtils.lerp(0.0112, 0.0146, smooth(0, 0.35, u)) : 0.0146 * Math.pow(Math.max(0, 1 - Math.pow((u - 0.35) / 0.65, 2.5)), 0.55);
   // The edges curl in towards the head, the front edge more.
   const curl = (0.003 * v * v + 0.001 * v) * smooth(0.12, 0.6, u);
-  out.set((cx - curl) * s, cy - 0.003 * v * (1 - u), cz + w * v * (1 - 0.08 * u));
+  // The head narrows towards the muzzle and the leather lies along it: its
+  // front edge sits further in than its back edge, so from in front the ear
+  // shows its face, framing the cheek, rather than hanging edge-on like a strap.
+  const turn = 0.3 * w * v * smooth(0.1, 0.5, u);
+  out.set((cx - curl - turn) * s, cy - 0.003 * v * (1 - u), cz + w * v * (1 - 0.08 * u));
   return out;
 }
 
@@ -433,7 +437,8 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
   const positions = new Float32Array(count * 3), normals = new Float32Array(count * 3);
   const out = blank(count);
   const cOut = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.55);
-  const cIn = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.45).lerp(new THREE.Color(pal.blush), 0.08);
+  // (The lining stays close to the coat's colour: the far ear shows below the jaw, and a pink one there reads as a tongue.)
+  const cIn = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.3).lerp(new THREE.Color(pal.blush), 0.04);
   const p = new THREE.Vector3(), pu = new THREE.Vector3(), pv = new THREE.Vector3(), nrm = new THREE.Vector3(), tan = new THREE.Vector3();
   const c = new THREE.Color();
   const joint = (DOG_P.earL[1] - DOG_P.earL1[1]) / EAR_LENGTH;

@@ -182,7 +182,7 @@ describe('Vizsla', () => {
   it('pants with its mouth open and tongue out, and closes its mouth to listen', () => {
     const { rig } = play('giggle', 1);
     const jaw = (rig.bones as Record<string, THREE.Bone>).jaw;
-    expect(jaw.rotation.x).toBeGreaterThan(0.15);
+    expect(jaw.rotation.x).toBeGreaterThan(0.1);
     expect(rig.face.tongue!.morphTargetInfluences![0]).toBeGreaterThan(0.5);
     const quiet = play('lookAround', 1).rig;
     expect((quiet.bones as Record<string, THREE.Bone>).jaw.rotation.x).toBeLessThan(0.03);
