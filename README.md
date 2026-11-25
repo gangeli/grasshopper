@@ -86,7 +86,8 @@ What a dog needs that Hopper doesn't:
 * **Gaits.** It trots in diagonal pairs — overlapping at a walk, flying between them when it hurries —
   and opens into a bounding gallop at a run, the back flexing with each stride.
 * **A mouth that opens.** The lower jaw is its own sculpt on a jaw bone, closing flush into a hollow
-  under the muzzle; inside are teeth and a tongue that lolls out when it pants.
+  under the muzzle; inside are teeth and a tongue, which stays in while it pants quietly and lolls out
+  when it is excited or has been running.
 * **Ears and tail.** Thin two-jointed ear leathers that swing as it moves, prick and fold back; a
   docked tail that wags from the root.
 * **A short, sleek coat** (the fur shader's `sleek` option): close-lying, glossy, solid golden rust
