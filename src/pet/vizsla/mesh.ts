@@ -452,7 +452,8 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
         if (nrm.x * s < 0) nrm.negate();
         // Thin leather: thickest down the middle near the set-on, a fine edge all round.
         const edge = Math.sqrt(Math.max(0, 1 - v * v)) * Math.sqrt(Math.max(0, 1 - Math.pow(u, 6)));
-        const half = (0.0016 - 0.0007 * u) * (0.12 + 0.88 * edge);
+        // (Closing to nothing at the rim, so the two faces meet there and no light shows between them.)
+        const half = (0.0016 - 0.0007 * u) * edge;
         const sign = layer === 0 ? 1 : -1;
         positions.set([p.x + nrm.x * half * sign, p.y + nrm.y * half * sign, p.z + nrm.z * half * sign], k * 3);
         normals.set([nrm.x * sign, nrm.y * sign, nrm.z * sign], k * 3);
@@ -470,7 +471,8 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
         out.thin[k] = 0.22 * smooth(0.1, 0.5, u);
         if (layer === 0) c.copy(cOut).multiplyScalar(0.94 + 0.1 * vnoise(p.x * 90, p.y * 90, p.z * 90));
         // (The lining turns to the coat's colour at the rim, or the edge would show as a pale line.)
-        else c.copy(cIn).multiplyScalar(0.55 + 0.22 * edge).lerp(cOut, 0.85 * smooth(0.45, 0.1, edge));
+        // (...and at the fold where it leaves the skull.)
+        else c.copy(cIn).multiplyScalar(0.55 + 0.22 * edge).lerp(cOut, 0.85 * Math.max(smooth(0.45, 0.1, edge), smooth(0.22, 0.06, u)));
         // Shaded where it lies against the head.
         c.multiplyScalar(layer === 0 ? 0.88 + 0.12 * smooth(0.0, 0.2, u) : 0.75);
         out.color.set([c.r, c.g, c.b], k * 3);
