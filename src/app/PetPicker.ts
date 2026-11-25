@@ -111,6 +111,8 @@ function radioGroup(cls: string, label: string): HTMLElement {
     // (Not also a step in the simulator, which walks on the arrow keys.)
     e.preventDefault();
     e.stopPropagation();
+    // One swap at a time: the focus stays on the choice being made.
+    if (g.closest('.petpick.busy')) return;
     const next = all[(at + step + all.length) % all.length];
     next.focus();
     next.click();
