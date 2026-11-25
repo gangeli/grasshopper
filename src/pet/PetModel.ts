@@ -88,6 +88,15 @@ export interface FaceRig {
   /** Eyeball depth scale at rest, and how far the irises toe in to look straight ahead (defaults: Hopper's). */
   eyeDepth?: number;
   irisToe?: number;
+  /**
+   * Lid angles with the eyes open (defaults: Hopper's, tucked right back so
+   * the whole round eye shows). A dog's lids rest part-way over the eye,
+   * which gives it an almond shape.
+   */
+  lidUpOpen?: number;
+  lidLoOpen?: number;
+  /** Pupil size relative to Hopper's. */
+  pupilScale?: number;
   /** 0 = eyes open .. 1 = closed; fades the socket liner so closed lids blend into the face (set by the Animator). */
   eyeClosed?: { value: number };
   /** 0..1: how far the face fur fills in over a shut (not squinting) eye (set by the Animator). */

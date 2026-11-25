@@ -22,6 +22,13 @@ export interface FurOptions {
    * fewer layers, so the coat reads lighter than with many; this evens it out.
    */
   tone?: number;
+  /**
+   * 0 = a soft fluffy pile (Hopper); towards 1 = a short, smooth, close-lying
+   * coat (the Vizsla): the strands lie flatter, the dark between them is
+   * shallower so the coat reads as one glossy surface rather than speckled
+   * fluff, and the highlight is tighter.
+   */
+  sleek?: number;
 }
 
 /**
@@ -100,6 +107,7 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
     shader.uniforms.uGravity = { value: opts.gravity };
     shader.uniforms.uLenScale = { value: opts.lengthScale ?? 1 };
     shader.uniforms.uTone = { value: opts.tone ?? 1 };
+    shader.uniforms.uSleek = { value: opts.sleek ?? 0 };
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -115,6 +123,9 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         varying float vShellH;
         uniform float uGravity;
         uniform float uLenScale;
+        #ifdef FUR_SLEEK
+        uniform float uSleek;
+        #endif
         varying vec3 vRest;
         varying float vFurLen;
         varying vec3 vStrand;
@@ -142,7 +153,12 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         #endif
         vFurLen = fLen;
         // Strands leave the skin, then lay over along the groom; tips droop a little.
+        #ifdef FUR_SLEEK
+        // A smooth coat lies along the groom instead of standing off the skin.
+        transformed += normal * fLen * sh * mix(0.8, 0.42, uSleek) + comb * fLen * (0.35 * sh + 0.8 * sh * sh) * (1.0 + 0.5 * uSleek);
+        #else
         transformed += normal * fLen * sh * 0.8 + comb * fLen * (0.35 * sh + 0.8 * sh * sh);
+        #endif
         transformed.y -= fLen * uGravity * sh * sh;
         vec3 strandObj = normal + comb * (0.3 + 1.3 * sh) - vec3(0.0, 2.0 * uGravity * sh, 0.0);
         #ifdef USE_SKINNING
@@ -157,6 +173,9 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         uniform float uDensity;
         uniform float uClump;
         uniform float uTone;
+        #ifdef FUR_SLEEK
+        uniform float uSleek;
+        #endif
         varying float vShellH;
         #define uShellH vShellH
         varying vec3 vRest;
@@ -172,8 +191,13 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
+        #ifdef FUR_SLEEK
+        // A short coat covers everything but bare leather (nose, pads).
+        if (vFurLen < 0.0003) discard;
+        #else
         // Where fur is very short (muzzle, paw pads) the shells just fade out.
         if (vFurLen < 0.0012 && uShellH > 0.25) discard;
+        #endif
         // Locks: nearest centre of three interleaved jittered lattices.
         vec3 qc = vRest * uClump;
         float dc = 9.0;
@@ -186,7 +210,12 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         }
         vec3 lockRnd = furHash(cid * 1.37 + 5.3);
         // Locks vary in length, so the outline breaks into wisps.
+        #ifdef FUR_SLEEK
+        // (A smooth coat is one even length: no wisps, and no patches where a lock ends short.)
+        float hh = uShellH * mix(1.0 / mix(0.55, 1.0, lockRnd.x), 0.97, uSleek);
+        #else
         float hh = uShellH / mix(0.55, 1.0, lockRnd.x);
+        #endif
         if (hh > 1.0) discard;
         float lockR = 0.62 * pow(1.0 - hh, 0.6);
         // Fine strands: round, tapering columns kept inside their cells.
@@ -197,7 +226,15 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
           vec3 r = 0.36 + 0.28 * furHash(floor(c) + float(i) * 17.0);
           best = min(best, length(fract(c) - r));
         }
+        #ifdef FUR_SLEEK
+        // Seen from far enough that the hairs are finer than a pixel, the dot
+        // pattern would only alias (speckle and rings): the coat closes up
+        // into a smooth layer instead.
+        float furPx = length(fwidth(vRest)) * uDensity;
+        bool strand = best < 0.38 * pow(1.0 - hh, 0.6) + 1.2 * smoothstep(0.3, 0.75, furPx);
+        #else
         bool strand = best < 0.38 * pow(1.0 - hh, 0.6);
+        #endif
         // Short fur (face, paws) is a fine even velvet; locks form where the coat is long.
         // Silky fur (the tail brush) stays a fine even fuzz too, however long.
         float lockAmt = smoothstep(0.003, 0.01, vFurLen) * (1.0 - vSilk);
@@ -207,9 +244,15 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
         float gap = smoothstep(0.25, 1.0, dc / max(lockR, 0.05)) * (0.5 + 0.5 * lockAmt) * (1.0 - 0.7 * vSilk);
         // Dither the root-to-tip ramp a little so few shells don't band.
         float hd = clamp(uShellH + (furHash(floor(vRest * uDensity * 2.0)).x - 0.5) * 0.15, 0.0, 1.0);
+        #ifdef FUR_SLEEK
+        // Shallow shade between the hairs and no bleached tips: one smooth, even coat.
+        diffuseColor.rgb *= uTone * mix(mix(0.45, 0.9, uSleek), mix(1.06, 1.02, uSleek), pow(hd, 0.8)) * (1.0 - 0.28 * (1.0 - uSleek) * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh * (1.0 - 0.7 * vSilk) * (1.0 - uSleek));
+        #else
         diffuseColor.rgb *= uTone * mix(0.45, 1.06, pow(hd, 0.8)) * (1.0 - 0.28 * gap * (1.0 - hh)) * (1.0 + (0.2 * lockRnd.y - 0.1) * lockAmt);
         // Tips a little paler, as if lightly sun-bleached.
-        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh * (1.0 - 0.7 * vSilk));`,
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb + (1.0 - diffuseColor.rgb) * 0.2, hh * hh * (1.0 - 0.7 * vSilk));
+        #endif`,
       )
       .replace(
         '#include <opaque_fragment>',
@@ -227,10 +270,17 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
             kk += directionalLights[i].color * wrap * (0.06 * pow(s, 80.0) + 0.12 * pow(s, 14.0) * diffuseColor.rgb);
           }
           #endif
+          #ifdef FUR_SLEEK
+          // A glossier sheen, and much less backlit fuzz along the outline.
+          outgoingLight += kk * mix(0.25 + 0.75 * uShellH, 0.55, uSleek);
+          float furRim = 1.0 - abs(dot(normalize(vNormal), Vd));
+          outgoingLight += diffuseColor.rgb * pow(furRim, 3.0) * 0.45 * (1.0 - 0.7 * uSleek) * uShellH;
+          #else
           outgoingLight += kk * (0.25 + 0.75 * uShellH);
           // Backlit fuzz: strand tips glow a little along the silhouette.
           float furRim = 1.0 - abs(dot(normalize(vNormal), Vd));
           outgoingLight += diffuseColor.rgb * pow(furRim, 3.0) * 0.45 * uShellH;
+          #endif
         }
         #include <opaque_fragment>`,
       );
@@ -238,7 +288,8 @@ export function makeFurShellMaterial(h: number, opts: FurOptions, base: THREE.Me
     if (eye) addSocketFade(shader, eye.closed, eye.fill, eye.squint);
   };
   if (eye) m.defines = { ...m.defines, SOCKET_FADE: '' };
+  if (opts.sleek) m.defines = { ...m.defines, FUR_SLEEK: '' };
   // The shell height is a uniform: all shells share one GPU program (one compile, no program switches).
-  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${opts.tone ?? 1}-${h < 0 ? 'attr' : 'shell'}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}`;
+  m.customProgramCacheKey = () => `fur2-${opts.lengthScale ?? 1}-${opts.tone ?? 1}-${h < 0 ? 'attr' : 'shell'}-${opts.density}-${opts.clump}-${opts.gravity}${eye ? '-sock' : ''}${opts.sleek ? `-sleek${opts.sleek}` : ''}`;
   return m;
 }

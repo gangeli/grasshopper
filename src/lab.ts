@@ -9,11 +9,12 @@ import type { Waypoint } from './world/NavGrid';
  * Pose lab: renders Hopper in a grid of actions × times (and optional camera
  * angles) so automated tests and humans can review the model and animation at
  * a glance. URL params: actions=a,b,c  times=0.1,0.5  yaw=0.6  size=220  palette=mint
- * dist/camY/lookY (camera), fur=N, res=0.0034 (mesh), look=0 (don't look at the camera)
+ * dist/camY/lookY/lookZ (camera; lookZ aims ahead of the pet, e.g. at a dog's head), fur=N, res=0.0034 (mesh),
+ * look=0 (don't look at the camera), pet=vizsla|hopper (which pet)
  *
  * Filmstrips: seq=walk,jump,... renders whole sequences driven by the real
  * PetController (one row per sequence, one column per time in `times`), on a
- * gridded floor so foot planting can be judged. Sequences: walk, run, jump
+ * gridded floor so foot planting can be judged. Sequences: walk, run, sprint (a long straight at full speed), jump
  * (onto a box), drop (off a box), turn (hop round on the spot), idle (blinks
  * on, look target swinging), and any `script` such as
  * script=idle@0,giggle@0.6,idle@2.4 (actions performed at those seconds).
@@ -28,6 +29,7 @@ const cell = Number(q.get('size') ?? 200);
 const dist = Number(q.get('dist') ?? 0.95);
 const camY = Number(q.get('camY') ?? 0.32);
 const lookY = Number(q.get('lookY') ?? 0.15);
+const lookZ = Number(q.get('lookZ') ?? 0);
 const cols = times.length * yaws.length;
 const rows = actions.length;
 
@@ -131,6 +133,12 @@ function runSeq(name: string, row: number): void {
       plan = (p) => p.follow([wp(0.15, 0, 0), wp(0.6, 0, 0)], name === 'run' ? 1.0 : cruiseParam);
       pet.placeAt(start, Math.PI / 2);
       break;
+    case 'sprint':
+      // A long straight, so the pet reaches its full running speed.
+      start = new THREE.Vector3(-1.6, 0, 0);
+      plan = (p) => p.follow([wp(0, 0, 0), wp(1.8, 0, 0)], 1.0);
+      pet.placeAt(start, Math.PI / 2);
+      break;
     case 'jump':
       box.visible = true;
       box.position.set(0.3, 0.1, 0);
@@ -227,8 +235,8 @@ if (seqs) {
   for (const t of times) {
     for (const yaw of yaws) {
       // The pet looks at this cell's camera (set before posing so it's not the previous cell's).
-      camera.position.set(Math.sin(yaw) * dist, camY, Math.cos(yaw) * dist);
-      camera.lookAt(0, lookY, 0);
+      camera.position.set(Math.sin(yaw) * dist, camY, lookZ + Math.cos(yaw) * dist);
+      camera.lookAt(0, lookY, lookZ);
       anim.lookTarget = q.get('look') === '0' ? null : camera.position.clone();
       poseAt(action, t);
       renderer.setViewport(c * cell, H - (r + 1) * cell, cell, cell);

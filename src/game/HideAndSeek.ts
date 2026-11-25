@@ -335,7 +335,7 @@ export class HideAndSeek {
             objects: this.objects,
             eyeHeight: this.opts.eyeHeight,
             minHiddenNow,
-            poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
+            poseSamples: { hide: measurePoseSamples('hide', this.rig.species), hideLow: measurePoseSamples('hideLow', this.rig.species) },
             ...safety,
           },
           this.world.floorY,
@@ -383,7 +383,7 @@ export class HideAndSeek {
     if (this.previous.length > 4) this.previous.shift();
   }
 
-  /** Ask for a hint: Hopper giggles (spatial audio) and their antennae glow. */
+  /** Ask for a hint: Hopper giggles (spatial audio) and their antennae glow (the Vizsla's collar tag). */
   hint(): void {
     if (this.phase !== 'seek') return;
     this.hintsUsed++;
@@ -796,7 +796,7 @@ export class HideAndSeek {
         rng: this.rng,
         objects: this.objects,
         eyeHeight: this.opts.eyeHeight,
-        poseSamples: { hide: measurePoseSamples('hide'), hideLow: measurePoseSamples('hideLow') },
+        poseSamples: { hide: measurePoseSamples('hide', this.rig.species), hideLow: measurePoseSamples('hideLow', this.rig.species) },
       },
       this.world.floorY,
       4,

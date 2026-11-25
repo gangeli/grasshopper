@@ -7,13 +7,13 @@ import type { BoneName, V } from '../skeleton';
  *
  * It keeps Hopper's bone names so the game can sample either pet the same
  * way, read as a quadruped:
- *   shoulder → elbow → hand   foreleg (point of shoulder, elbow, wrist; the paw hangs off `hand`)
- *   thigh → shin → ankle → toe   hind leg (hip, stifle, hock, paw)
+ *   shoulder → elbow → hand → paw   foreleg (point of shoulder, elbow, wrist, toes)
+ *   thigh → shin → ankle → toe      hind leg (hip, stifle, hock, toes)
  * plus a jaw and a second joint in each pendant ear. Hopper's antennae and
  * wings have no counterpart: those bones ride along unskinned (the antenna
  * tips sit at the ear tips, which is what visibility sampling wants).
  */
-export type DogBoneName = BoneName | 'jaw' | 'earL1' | 'earR1';
+export type DogBoneName = BoneName | 'jaw' | 'earL1' | 'earR1' | 'pawL' | 'pawR';
 
 export const DOG_BONES: [DogBoneName, DogBoneName | null, V][] = [
   ['root', null, [0, 0, 0]],
@@ -35,9 +35,11 @@ export const DOG_BONES: [DogBoneName, DogBoneName | null, V][] = [
   ['shoulderL', 'chest', [0.029, 0.168, 0.078]],
   ['elbowL', 'shoulderL', [0.031, 0.122, 0.05]],
   ['handL', 'elbowL', [0.031, 0.036, 0.056]],
+  ['pawL', 'handL', [0.031, 0.0128, 0.059]],
   ['shoulderR', 'chest', [-0.029, 0.168, 0.078]],
   ['elbowR', 'shoulderR', [-0.031, 0.122, 0.05]],
   ['handR', 'elbowR', [-0.031, 0.036, 0.056]],
+  ['pawR', 'handR', [-0.031, 0.0128, 0.059]],
   // Tail: docked by a third, carried level with the back.
   ['tail0', 'hips', [0, 0.196, -0.112]],
   ['tail1', 'tail0', [0, 0.1955, -0.132]],
@@ -46,20 +48,20 @@ export const DOG_BONES: [DogBoneName, DogBoneName | null, V][] = [
   ['tail4', 'tail3', [0, 0.19, -0.191]],
   ['tail5', 'tail4', [0, 0.1885, -0.209]],
   // Pendant ears: set on at the side of the skull, a second joint halfway down.
-  ['earL', 'head', [0.0255, 0.2905, 0.14]],
-  ['earL1', 'earL', [0.037, 0.263, 0.143]],
-  ['earR', 'head', [-0.0255, 0.2905, 0.14]],
-  ['earR1', 'earR', [-0.037, 0.263, 0.143]],
+  ['earL', 'head', [0.0236, 0.2838, 0.133]],
+  ['earL1', 'earL', [0.0315, 0.259, 0.1355]],
+  ['earR', 'head', [-0.0236, 0.2838, 0.133]],
+  ['earR1', 'earR', [-0.0315, 0.259, 0.1355]],
   ['jaw', 'head', [0, 0.2575, 0.152]],
   // Unskinned stand-ins for Hopper's antennae (tips at the ear tips) and wings.
   ['antL0', 'head', [0.012, 0.3, 0.145]],
   ['antL1', 'antL0', [0.014, 0.302, 0.145]],
   ['antL2', 'antL1', [0.016, 0.303, 0.145]],
-  ['antL3', 'earL1', [0.038, 0.233, 0.149]],
+  ['antL3', 'earL1', [0.0325, 0.226, 0.145]],
   ['antR0', 'head', [-0.012, 0.3, 0.145]],
   ['antR1', 'antR0', [-0.014, 0.302, 0.145]],
   ['antR2', 'antR1', [-0.016, 0.303, 0.145]],
-  ['antR3', 'earR1', [-0.038, 0.233, 0.149]],
+  ['antR3', 'earR1', [-0.0325, 0.226, 0.145]],
   ['wingL', 'chest', [0.02, 0.205, 0.04]],
   ['wingR', 'chest', [-0.02, 0.205, 0.04]],
 ];

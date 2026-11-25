@@ -58,7 +58,15 @@
   #landing h1 { margin: 0; font-weight: 700; font-size: clamp(46px, 13vw, 76px); line-height: 1; letter-spacing: 1px;
     background: linear-gradient(180deg, #fff8e8 20%, #ffd56a 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
     filter: drop-shadow(0 4px 18px rgba(255,200,90,.25)); }
-  #landing .tag { margin: 4px 0 22px; color: #e6e9f5; font-size: 19px; font-weight: 500; text-align: center; }
+  #landing .tag { margin: 4px 0 14px; color: #e6e9f5; font-size: 19px; font-weight: 500; text-align: center; }
+  /* Pet picker: Hopper or the Vizsla. */
+  #landing .pets { display: flex; gap: 4px; margin: 0 0 18px; padding: 4px; border-radius: 999px; background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.1); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); transition: opacity .2s; }
+  #landing .pets.busy { opacity: .6; pointer-events: none; }
+  #landing .pet { padding: 7px 16px; border-radius: 999px; background: none; color: #c9cfe2; font: 600 14px/1 inherit; font-family: inherit;
+    transition: background .2s, color .2s; -webkit-tap-highlight-color: transparent; }
+  #landing .pet.on { background: rgba(143,240,195,.92); color: #10261d; box-shadow: 0 2px 10px rgba(76,201,149,.35); }
+  #landing .pet:focus-visible { outline: 2px solid #ffd56a; outline-offset: 2px; }
   #landing .steps { list-style: none; display: flex; gap: 8px; margin: 18px 0 20px; padding: 0; flex-wrap: wrap; justify-content: center; max-width: 460px; }
   #landing .steps li { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 16px;
     background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1); color: #dfe4f2; font-size: 14px; font-weight: 500;
@@ -146,6 +154,7 @@
     <h1>Hopper</h1>
     <p class="tag">wants to play in your room</p>
   </div>
+  <div id="pet-picker" class="pets" role="radiogroup" aria-label="Choose your pet" style="display:none"></div>
   <button id="btn-ar" class="cta" style="display:none">Start in AR</button>
   <div class="row2" id="chrome-row" style="display:none">
     <a id="btn-chrome" class="cta">Open in Chrome</a>

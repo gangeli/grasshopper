@@ -42,8 +42,8 @@ function blendBody(p: Pose, q: Pose, w: number): void {
 function pant(t: number, p: Pose, k: number): void {
   if (k <= 0) return;
   const beat = Math.sin(t * TAU * 4.6);
-  p.jaw = Math.max(p.jaw, k * (0.58 + 0.1 * beat));
-  p.tongue = Math.max(p.tongue, k * (0.82 + 0.1 * beat));
+  p.jaw = Math.max(p.jaw, k * (0.5 + 0.08 * beat));
+  p.tongue = Math.max(p.tongue, k * (0.88 + 0.1 * beat));
   p.squash += 0.035 * k * beat;
   p.chestPitch += 0.012 * k * beat;
   p.smile = 1;
@@ -154,17 +154,21 @@ function gait(t: number, c: ActionCtx, p: Pose, travel = c.speed): void {
   const g = smoothstep(0.78, 1.0, sp);
   // Short enough stances that the legs never over-reach: a slow trot overlaps
   // its diagonals, a fast one flies between them.
-  const duty = clamp(0.075 / Math.max(stride, 0.01), 0.3, 0.6) * (1 - 0.25 * g);
+  const duty = clamp(0.068 / Math.max(stride, 0.01), 0.3, 0.6) * (1 - 0.25 * g);
   const half = 0.5 * stride * duty;
   const lift = 0.012 + 0.016 * sp + 0.01 * g;
   const paw = (off: number, front: boolean) => {
     const f = (ph + off) % 1;
-    if (f < duty) return { y: 0, z: half - 2 * half * (f / duty), plant: 1, curl: 0 };
+    // A foreleg is nearly straight when it stands, so it works ahead of the
+    // shoulder: it lands well forward and lifts off under the body. A hind leg
+    // drives from under the hip to well behind it.
+    const mid = (front ? 0.014 : -0.004) * Math.min(1, stride / 0.06);
+    if (f < duty) return { y: 0, z: mid + half - 2 * half * (f / duty), plant: 1, curl: 0 };
     const u = (f - duty) / (1 - duty);
     // Snaps up, swings through, reaches, and comes down late.
     const sw = smoothstep(0.08, 0.92, u);
     const up = Math.pow(Math.sin(Math.PI * u), 0.6);
-    return { y: lift * up, z: -half + 2 * half * sw + (front ? 0.004 : 0) * Math.sin(Math.PI * u), plant: 0, curl: Math.sin(Math.PI * Math.min(1, u / 0.75)) };
+    return { y: lift * up, z: mid - half + 2 * half * sw + (front ? 0.004 : 0) * Math.sin(Math.PI * u), plant: 0, curl: Math.sin(Math.PI * Math.min(1, u / 0.75)) };
   };
   const off = (k: keyof typeof TROT) => {
     // Phase offsets blend the short way round the cycle.
@@ -190,7 +194,7 @@ function gait(t: number, c: ActionCtx, p: Pose, travel = c.speed): void {
   p.footPitch = 0.5 * Math.max(HL.curl, HR.curl);
   // Trot: the body rides nearly level, dipping a little into each diagonal.
   const dip = Math.cos(TAU * (2 * ph - duty));
-  const trotY = -0.003 - (0.0015 + 0.003 * sp) * dip;
+  const trotY = -0.0065 - (0.0015 + 0.003 * sp) * dip;
   // Gallop: one big bound a stride. The back flexes to bring the hind legs
   // under, then straightens as the forehand reaches out.
   const bound = Math.sin(TAU * (ph - 0.16));
@@ -397,8 +401,8 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     blendBody(p, S, e);
     const up = smoothstep(0.25, 0.6, t);
     const flap = Math.sin(t * 9) * up;
-    p.handRY = 0.085 * up + 0.012 * flap;
-    p.handRZ = S.handRZ * e + 0.05 * up + 0.012 * flap;
+    p.handRY = 0.105 * up + 0.012 * flap;
+    p.handRZ = S.handRZ * e + 0.07 * up + 0.012 * flap;
     p.handRX = 0.008 * up;
     p.pawRCurl = (0.5 + 0.45 * flap) * up;
     p.plantFR = up > 0.02 ? 0 : 1;
@@ -465,13 +469,15 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     const D = neutralPose();
     down(D, 0.75);
     blendBody(p, D, e);
-    const paw = smoothstep(0.3, 0.75, t);
-    p.neckYaw = -0.2 * paw;
-    p.headRoll = 0.22 * paw;
-    p.handRY += 0.03 * paw;
-    p.handRZ += 0.012 * paw;
-    p.handRX += 0.034 * paw;
-    p.pawRCurl = D.pawRCurl * e + 1.0 * paw;
+    const paw = smoothstep(0.3, 0.8, t);
+    p.neckYaw = -0.16 * paw;
+    p.headRoll = 0.2 * paw;
+    // The paw comes up, across and down over the muzzle (a little pat as it settles).
+    const pat = Math.exp(-Math.max(0, t - 0.8) * 3) * Math.sin(Math.max(0, t - 0.8) * 14);
+    p.handRY += (0.03 + 0.012 * Math.sin(Math.PI * paw) + 0.004 * pat) * paw;
+    p.handRZ += 0.062 * paw;
+    p.handRX += 0.03 * paw;
+    p.pawRCurl = D.pawRCurl * e + 0.45 * paw;
     p.plantFR = paw > 0.02 ? 0 : 1;
     p.eyeOpen = 1 - e;
     p.happy = 0.5 * e;
@@ -530,8 +536,8 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.headYaw = 0.14 * sink;
     p.headRoll = 0.3 * sink;
     p.spineRoll = -0.1 * sink;
-    p.tailSide = 1.1 * sink;
-    p.tailCurl = 0.5 * sink;
+    p.tailSide = 1.6 * sink;
+    p.tailCurl = 0.35 * sink;
     p.earLift = -0.2 * sink;
     p.happy = 0.3;
     p.jaw = 0.01;
@@ -575,7 +581,7 @@ export class DogBody {
     this.pastern.x = 0;
     this.jiggles = {
       // Long ear leathers swing and flap; the tail is stiffer and only whips at its tip.
-      ear: ([['L', 1], ['R', -1]] as const).map(([s, k]) => new Jiggle([b[`ear${s}`], b[`ear${s}1`]], new THREE.Vector3(0.001 * k, -0.034, 0.006), 2.9, 0.24, 1.0, 0.55)),
+      ear: ([['L', 1], ['R', -1]] as const).map(([s, k]) => new Jiggle([b[`ear${s}`], b[`ear${s}1`]], new THREE.Vector3(0.001 * k, -0.032, 0.009), 2.9, 0.24, 1.0, 0.55)),
       tail: new Jiggle([1, 2, 3, 4, 5].map((q) => b[`tail${q}` as DogBoneName]), new THREE.Vector3(0, -0.001, -0.0125), 3.4, 0.4, 0.7, 0.3),
     };
   }
@@ -626,8 +632,8 @@ export class DogBody {
       const fl = Math.sign(flick) === s ? Math.abs(flick) : 0;
       const lift = clamp(P.earLift, -1, 1.2);
       const up = Math.max(0, lift), back = Math.max(0, -lift);
-      b[`ear${side}`].rotation.set(-0.32 * up + 0.3 * back - 0.25 * fl, s * (0.2 * up - 0.12 * back), s * (0.26 * up - 0.06 * back + 0.3 * fl));
-      b[`ear${side}1`].rotation.set(-0.1 * up + 0.22 * back, 0, s * (-0.12 * up - 0.05 * back));
+      b[`ear${side}`].rotation.set(-0.34 * up + 0.3 * back - 0.25 * fl, s * (0.16 * up - 0.12 * back), s * (0.12 * up - 0.05 * back + 0.22 * fl));
+      b[`ear${side}1`].rotation.set(-0.12 * up + 0.22 * back, 0, s * (-0.1 * up - 0.04 * back));
     }
     // Tail: lift and wag come mostly from the root, a little more along it.
     const lift = P.tailLift, side = P.tailSide, curl = P.tailCurl;
@@ -713,7 +719,7 @@ export class DogBody {
       // --- Foreleg: shoulder and elbow reach the wrist; the paw stays flat, or curls when lifted.
       {
         const key: FootKey = `F${side}`;
-        const upper = b[`shoulder${side}`], lower = b[`elbow${side}`], hand = b[`hand${side}`];
+        const upper = b[`shoulder${side}`], lower = b[`elbow${side}`], hand = b[`hand${side}`], paw = b[`paw${side}`];
         const target = _t.copy(this.restEnd[key]);
         target.x += side === 'L' ? P.handLX : P.handRX;
         target.y += side === 'L' ? P.handLY : P.handRY;
@@ -723,11 +729,13 @@ export class DogBody {
         b.chest.worldToLocal(target);
         target.sub(upper.position);
         this.solve2(upper, lower, hand.position, target, -1);
-        // Paw level with the floor (positive curl folds it back under the wrist;
-        // negative lays it out forward, as when lying down).
+        // The pastern stands upright under the wrist. Positive curl folds it
+        // back and up (a lifted paw, the toes curling under with it); negative
+        // lays it out forward along the floor (lying down), toes still flat.
         const curl = side === 'L' ? P.pawLCurl : P.pawRCurl;
         lower.getWorldQuaternion(_q).invert();
         hand.quaternion.copy(_q).multiply(_qs).multiply(_qx.setFromAxisAngle(X, curl));
+        paw.rotation.set(curl < 0 ? -curl : 0.5 * curl, 0, 0);
       }
       // --- Hind leg: the paw target fixes the hock (through the rear pastern), then hip and stifle reach it.
       {

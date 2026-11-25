@@ -787,11 +787,12 @@ export class Animator {
     // Happy squeezes both together into "^^" arcs: the upper lid's line arches
     // up over the raised lower lid.
     const o = clamp(open, 0, 1);
-    let up = THREE.MathUtils.lerp(0.42, -1.65, o) - (open > 1 ? (open - 1) * 0.6 : 0);
+    const UP = face.lidUpOpen ?? -1.65, LO = face.lidLoOpen ?? 1.65;
+    let up = THREE.MathUtils.lerp(0.42, UP, o) - (open > 1 ? (open - 1) * 0.6 : 0);
     // (Cubed: coming out of a smile the upper lid lifts away first, so the eyes
     // don't pass through a heavy-lidded, grumpy look on the way.)
-    up = Math.max(up, THREE.MathUtils.lerp(-1.65, -0.1, happy * happy * happy));
-    const lo = Math.min(THREE.MathUtils.lerp(0.95, 1.65, o), THREE.MathUtils.lerp(1.65, 0.02, happy));
+    up = Math.max(up, THREE.MathUtils.lerp(UP, -0.1, happy * happy * happy));
+    const lo = Math.min(THREE.MathUtils.lerp(0.95, LO, o), THREE.MathUtils.lerp(LO, 0.02, happy));
     face.lidUpL.rotation.x = face.lidUpR.rotation.x = up;
     face.lidLoL.rotation.x = face.lidLoR.rotation.x = lo;
     // How much of the eye the lids cover (sleep, blink or a "^^" squint).
@@ -819,7 +820,7 @@ export class Animator {
     const ls = (0.99 + 0.12 * smoothstep(0.2, 0.8, happy)) * grow;
     face.lidLoL.scale.set(ls, -ls, ls);
     face.lidLoR.scale.set(ls, -ls, ls);
-    const ps = clamp(P.pupilSize, 0.5, 1.5);
+    const ps = clamp(P.pupilSize, 0.5, 1.5) * (face.pupilScale ?? 1);
     for (const ir of [face.irisL, face.irisR]) {
       const pupil = ir.getObjectByName('pupil')!;
       pupil.scale.set(ps, ps, 1);

@@ -5,7 +5,7 @@ import type { Sculpt } from '../sdf/sdf';
 import { surfaceNets } from '../sdf/surfaceNets';
 import type { V } from '../skeleton';
 import { DOG_BONES, DOG_P, type DogBoneName } from './skeleton';
-import { buildJawSculpt, buildVizslaSculpt, DOG_EYE, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_FUR, DOG_MOUTH, mouthChannel, type DogRegion } from './sculpt';
+import { buildJawSculpt, buildVizslaSculpt, DOG_COLLAR, DOG_EYE, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_FUR, DOG_JAW, mouthHollows, mouthRim, type DogRegion } from './sculpt';
 
 /** Coat and leather colours of a Vizsla (the first seven fields are the shared pet palette). */
 export interface VizslaPalette {
@@ -161,7 +161,8 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
   const n = mesh.positions.length / 3;
   const out = blank(n);
   const { color, skinIndex, skinWeight, furLen, flow, silk, socket } = out;
-  const chan = mouthChannel();
+  const hollows = mouthHollows();
+  const mouthD = (x: number, y: number, z: number) => Math.min(hollows[0].d(x, y, z), hollows[1].d(x, y, z));
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark), cLight = new THREE.Color(pal.belly);
   const cLeather = new THREE.Color(pal.leather), cMouth = new THREE.Color(pal.blush);
   const cPad = cLeather.clone().multiplyScalar(0.62);
@@ -191,9 +192,8 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     const sx = x >= 0 ? 1 : -1, side = x >= 0 ? 'L' : 'R';
     let fl = 0;
     for (const [r, w] of att.regionWeights) fl += DOG_FUR[r] * w;
-    // Inside the mouth (the carved channel under the muzzle): bare, dark palate.
-    const inMouth = 1 - smooth(0.0006, 0.0022, Math.abs(chan.d(x, y, z))) * 1;
-    const mouthK = y < 0.262 && z > DOG_MOUTH.back[2] - 0.014 ? inMouth : 0;
+    // Inside the mouth (the hollow under the muzzle that the jaw closes into): bare palate.
+    const mouthK = y < 0.262 && z > DOG_JAW.back - 0.004 ? 1 - smooth(0.0005, 0.002, Math.abs(mouthD(x, y, z))) : 0;
     // Eye rims: bare, pigmented skin right at the lids.
     const e = DOG_EYE[side];
     const eyeD = Math.hypot(x - e[0], (y - e[1]) / DOG_EYE_SCALE[1], z - e[2]) / DOG_EYE_RADIUS;
@@ -205,6 +205,12 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     fl *= (1 - 0.85 * rim) * (1 - mouthK) * (1 - leather);
     // Sleek, but not machine-even.
     fl *= 0.86 + 0.28 * vnoise(x * 45 + 3, y * 45, z * 45);
+    // Pressed flat under the collar.
+    if (rw('neck') > 0.2) {
+      const K = DOG_COLLAR;
+      const along = (x - K.at[0]) * K.axis[0] + (y - K.at[1]) * K.axis[1] + (z - K.at[2]) * K.axis[2];
+      fl *= 0.1 + 0.9 * smooth(K.half + 0.001, K.half + 0.007, Math.abs(along));
+    }
     furLen[v] = fl;
     // --- groom: nose to tail along the body, down the legs ---
     F[0] = F[1] = F[2] = 0;
@@ -213,13 +219,11 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
         case 'head':
         case 'brow':
         case 'cheek':
-          // Back from the nose over the skull and cheeks.
-          addF(w, x * 0.7, (y - 0.268) * 0.8, -1);
-          break;
         case 'muzzle':
         case 'lip':
         case 'nose':
-          addF(w, sx * 0.25 * Math.abs(nx), -0.25, -1);
+          // Away from the nose: back along the muzzle, up over the skull, out and down across the cheeks.
+          addF(w, x * 0.8, (y - 0.262) * 0.8, z - 0.24);
           break;
         case 'neck':
           // Down the neck towards the shoulders; a parting down the throat.
@@ -299,23 +303,25 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     c.lerp(cPad, pad);
     // Mouth lining: darker towards the throat, ridged like a palate.
     if (mouthK > 0) {
-      const deep = smooth(DOG_MOUTH.front[2], DOG_MOUTH.back[2], z);
+      const deep = smooth(DOG_JAW.c[2] + 0.02, DOG_JAW.back, z);
       const ridge = 0.5 + 0.5 * Math.sin(z * 1500);
-      const lining = cMouth.clone().multiplyScalar((0.62 - 0.34 * deep) * (0.88 + 0.12 * ridge));
-      // The lip's edge stays leather; the lining begins just inside.
-      const edge = smooth(0.0, 0.0035, chan.d(x, y, z) + 0.0035) * smooth(0.2475, 0.2515, y);
-      c.lerp(lining.lerp(cLeather.clone().multiplyScalar(0.7), 1 - edge), mouthK);
+      const lining = cMouth.clone().multiplyScalar((0.6 - 0.34 * deep) * (0.88 + 0.12 * ridge));
+      // The lips' inner edge is leather; the lining begins just inside it.
+      const inside = smooth(0.93, 0.74, mouthRim(x, z));
+      c.lerp(cLeather.clone().multiplyScalar(0.62).lerp(lining, inside), mouthK);
     }
     // Eye rims: a liner of leather that fades out while the eyes are shut.
     const lumBefore = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
-    c.lerp(cLeather, 0.55 * rim).multiplyScalar(1 - 0.22 * rim);
+    c.lerp(cLeather, 0.5 * rim).multiplyScalar(1 - 0.12 * rim);
     // Baked occlusion: under the jaw, between the legs, the elbows, between the toes.
     const ao = occlusion(S, x, y, z, nx, ny, nz);
     const aoB = broadOcclusion(S, x, y, z, nx, ny, nz);
     const toes = rw('finger') + rw('toe');
-    const aoK = (0.52 + 0.48 * ao - 0.3 * toes * (1 - ao)) * (0.62 + 0.38 * aoB) * (0.9 + 0.1 * smooth(0.0, 0.06, y));
-    c.multiplyScalar(aoK);
     const hollow = 1 - smooth(1.0, 1.9, eyeD);
+    let aoK = (0.52 + 0.48 * ao - 0.3 * toes * (1 - ao)) * (0.62 + 0.38 * aoB) * (0.9 + 0.1 * smooth(0.0, 0.06, y));
+    // (The socket is filled by the eye: don't let its hollow black out the lids' surround.)
+    aoK = THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.78), hollow);
+    c.multiplyScalar(aoK);
     if (hollow > 0) {
       const lumOpen = c.r * 0.3 + c.g * 0.59 + c.b * 0.11;
       const lumClosed = (rim > 0 ? lumBefore : lumOpen / Math.max(1e-4, aoK)) * THREE.MathUtils.lerp(aoK, Math.max(aoK, 0.95), hollow);
@@ -334,7 +340,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
 
 function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
   const S = getJaw();
-  const mesh = surfaceNets((x, y, z) => S.d(x, y, z), [-0.02, 0.228, 0.136], [0.02, 0.268, 0.23], resolution, 1);
+  const mesh = surfaceNets((x, y, z) => S.d(x, y, z), [-0.024, 0.228, 0.146], [0.024, 0.26, 0.23], resolution, 1);
   const n = mesh.positions.length / 3;
   const out = blank(n);
   const jaw = boneIndex.get('jaw')!;
@@ -347,8 +353,10 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
     out.skinIndex[v * 4] = jaw;
     out.skinWeight[v * 4] = 1;
     // The top of the jaw is the floor of the mouth; its rim is the lower lip.
-    const top = smooth(0.05, 0.5, ny);
-    const lip = smooth(-0.35, 0.05, ny) * (1 - smooth(0.35, 0.7, ny));
+    // (Only well inside the lips: the band below the lip line is coat, like the chin.)
+    const rimK = mouthRim(x, z);
+    const top = smooth(0.2, 0.6, ny) * smooth(0.86, 0.76, rimK);
+    const lip = smooth(0.05, 0.4, ny) * (1 - top);
     out.furLen[v] = DOG_FUR.jaw * (1 - top) * (1 - 0.8 * lip) * (0.86 + 0.28 * vnoise(x * 45 + 3, y * 45, z * 45));
     const fl = Math.hypot(0.15 * nx, 0.3, 1) / 1.25;
     out.flow[v * 3] = (0.15 * nx) / fl;
@@ -359,8 +367,8 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
     // Chin and underjaw are among the lighter shadings.
     c.copy(cBody).lerp(cLight, 0.3 + 0.25 * smooth(0, -0.8, ny));
     c.lerp(cLeather, 0.9 * lip);
-    const deep = smooth(0.215, 0.17, z);
-    c.lerp(cMouth.clone().multiplyScalar(0.78 - 0.4 * deep), top);
+    const deep = smooth(DOG_JAW.c[2] + 0.02, DOG_JAW.back, z);
+    c.lerp(cMouth.clone().multiplyScalar(0.72 - 0.36 * deep), top);
     // Shaded by its own creases and by the muzzle above it.
     const ao = occlusion(S, x, y, z, nx, ny, nz);
     const under = broadOcclusion(body, x, y, z, nx, ny, nz);
@@ -374,7 +382,7 @@ function bakeJaw(pal: VizslaPalette, resolution: number): Baked {
 }
 
 /** Length of the ear leather and where its second joint is along it. */
-export const EAR_LENGTH = 0.066;
+export const EAR_LENGTH = 0.06;
 
 /**
  * A point on the ear's mid-surface (pet space, rest pose). u runs from the
@@ -384,16 +392,16 @@ export const EAR_LENGTH = 0.066;
  */
 function earPoint(s: number, u: number, v: number, out: THREE.Vector3): THREE.Vector3 {
   const base = DOG_P.earL;
-  // Centre line: out over the fold, then down and slightly forward.
-  const fold = Math.sin(Math.min(1, u / 0.3) * Math.PI * 0.5);
-  const cx = base[0] - 0.004 + 0.0135 * fold + 0.003 * u;
-  const cy = base[1] + 0.0015 + 0.0035 * Math.sin(Math.min(1, u / 0.16) * Math.PI) - EAR_LENGTH * Math.pow(u, 1.12);
-  const cz = base[2] + 0.001 + 0.011 * u * u;
-  // Half-width: broad just below the fold, tapering to a rounded tip.
-  const w = u < 0.38 ? THREE.MathUtils.lerp(0.0135, 0.0172, smooth(0, 0.38, u)) : 0.0172 * Math.pow(Math.max(0, 1 - Math.pow((u - 0.38) / 0.62, 2.3)), 0.5);
-  // The front edge hangs a little lower and curls towards the cheek.
-  const curl = 0.0042 * v * v * smooth(0.15, 0.6, u) + 0.0012 * v * smooth(0.2, 0.8, u);
-  out.set((cx - curl) * s, cy - 0.004 * v * (1 - u), cz + w * v * (1 - 0.1 * u));
+  // Centre line: out of the skull over a soft fold, then down close to the cheek, swinging a little forward.
+  const fold = Math.sin(Math.min(1, u / 0.26) * Math.PI * 0.5);
+  const cx = base[0] - 0.004 + 0.0112 * fold + 0.002 * u;
+  const cy = base[1] + 0.0018 * Math.sin(Math.min(1, u / 0.14) * Math.PI) - EAR_LENGTH * Math.pow(u, 1.08);
+  const cz = base[2] + 0.001 + 0.012 * u * u;
+  // Half-width: broadest a third of the way down, tapering to a rounded tip.
+  const w = u < 0.35 ? THREE.MathUtils.lerp(0.0112, 0.0146, smooth(0, 0.35, u)) : 0.0146 * Math.pow(Math.max(0, 1 - Math.pow((u - 0.35) / 0.65, 2.5)), 0.55);
+  // The edges curl in towards the head, the front edge more.
+  const curl = (0.003 * v * v + 0.001 * v) * smooth(0.12, 0.6, u);
+  out.set((cx - curl) * s, cy - 0.003 * v * (1 - u), cz + w * v * (1 - 0.08 * u));
   return out;
 }
 
@@ -416,14 +424,16 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
         const u = i / NU, v = (j / NV) * 2 - 1;
         const k = (layer * (NU + 1) + i) * (NV + 1) + j;
         earPoint(s, u, v, p);
-        earPoint(s, Math.min(1, u + 0.01), v, pu).sub(earPoint(s, Math.max(0, u - 0.01), v, tan));
-        earPoint(s, u, Math.min(1, v + 0.02), pv).sub(earPoint(s, u, Math.max(-1, v - 0.02), tan));
+        // (The surface's frame is taken a little in from the tip and the edges, where the leather closes to a point.)
+        const un = Math.min(u, 0.94), vn = THREE.MathUtils.clamp(v, -0.9, 0.9);
+        earPoint(s, un + 0.01, vn, pu).sub(earPoint(s, Math.max(0, un - 0.01), vn, tan));
+        earPoint(s, un, vn + 0.02, pv).sub(earPoint(s, un, vn - 0.02, tan));
         // Outward normal of the mid-surface (away from the head).
         nrm.crossVectors(pv, pu).normalize();
         if (nrm.x * s < 0) nrm.negate();
         // Thin leather: thickest down the middle near the set-on, a fine edge all round.
         const edge = Math.sqrt(Math.max(0, 1 - v * v)) * Math.sqrt(Math.max(0, 1 - Math.pow(u, 6)));
-        const half = (0.0019 - 0.0009 * u) * (0.12 + 0.88 * edge);
+        const half = (0.0016 - 0.0007 * u) * (0.12 + 0.88 * edge);
         const sign = layer === 0 ? 1 : -1;
         positions.set([p.x + nrm.x * half * sign, p.y + nrm.y * half * sign, p.z + nrm.z * half * sign], k * 3);
         normals.set([nrm.x * sign, nrm.y * sign, nrm.z * sign], k * 3);

@@ -4,8 +4,8 @@ import { addSocketFade, addTranslucency, DEFAULT_FUR, makeFurShellMaterial, type
 import { buildEye, catchlightTexture, irisTexture, noseGeometry, pebbleTexture, radialTexture, scleraMaterial, smooth, tubeGeometry } from '../parts';
 import type { FaceRig, PetOptions, PetRig } from '../PetModel';
 import type { BoneName } from '../skeleton';
-import { dogFurAt, dogSkinDistance, dogSurfaceAt, jawSurfaceAt, vizslaGeometry, type VizslaPalette } from './mesh';
-import { DOG_EYE, DOG_EYE_PITCH, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_EYE_SPLAY, DOG_MOUTH, DOG_NOSE, DOG_PAW_F, DOG_PAW_H, DOG_TOE_DX } from './sculpt';
+import { dogSkinDistance, dogSurfaceAt, jawSurfaceAt, vizslaGeometry, type VizslaPalette } from './mesh';
+import { DOG_COLLAR, DOG_EYE, DOG_EYE_PITCH, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_EYE_SPLAY, DOG_JAW, DOG_NOSE, DOG_PAW_F, DOG_PAW_H, DOG_TOE_DX, mouthRoof } from './sculpt';
 import { DOG_BONES, DOG_HEAD_SAMPLE, type DogBoneName } from './skeleton';
 
 /**
@@ -59,7 +59,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   // --- Materials --------------------------------------------------------------
   const cBody = new THREE.Color(pal.body), cDark = new THREE.Color(pal.bodyDark), cLight = new THREE.Color(pal.belly), cLeather = new THREE.Color(pal.leather);
   // A short coat over tight skin: a little sheen, where Hopper's fluff is matte.
-  const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.74, metalness: 0 });
+  const skin = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.66, metalness: 0 });
   const eyeClosed = { value: 0 }, eyeFill = { value: 0 }, eyeSquint = { value: 0 };
   const underCoat = { value: 1 };
   skin.onBeforeCompile = (shader) => {
@@ -81,9 +81,10 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const lidColor = cBody.clone().lerp(cDark, 0.2);
   const lowerLidColor = cBody.clone();
   // Dogs show very little white: the "sclera" is a warm, shaded brown-white.
-  const sclera = scleraMaterial(cLeather.clone().multiplyScalar(0.8));
-  sclera.color.set(0xe9dccb);
-  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye), roughness: 0.4 });
+  // (The opening is a horizontal almond, where Hopper's is a tall oval.)
+  const sclera = scleraMaterial(cBody.clone().lerp(cLeather, 0.5).multiplyScalar(0.8), 1.45, 1.0);
+  sclera.color.set(0xd9c9b6);
+  const irisMat = new THREE.MeshStandardMaterial({ map: irisTexture(pal.eye, 1.3), roughness: 0.4 });
   const pupilMat = new THREE.MeshStandardMaterial({ color: 0x07090c, roughness: 0.3 });
   const corneaMat = new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.05, roughness: 0.02, clearcoat: 1, clearcoatRoughness: 0.02, depthWrite: false, envMapIntensity: 2.2 });
   const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff, map: catchlightTexture(), transparent: true, depthWrite: false });
@@ -95,7 +96,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const noseMat = new THREE.MeshPhysicalMaterial({ color: cLeather.clone().multiplyScalar(0.92), vertexColors: true, roughness: 0.5, clearcoat: 0.6, clearcoatRoughness: 0.25, bumpMap: pebble, bumpScale: 0.6, envMapIntensity: 0.7 });
   const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, transparent: true, opacity: 0.8 });
   const tongueMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.38, clearcoat: 0.5, clearcoatRoughness: 0.3 });
-  const toothMat = new THREE.MeshStandardMaterial({ color: 0xf6f1e4, roughness: 0.32 });
+  const toothMat = new THREE.MeshStandardMaterial({ color: 0xeee6d4, roughness: 0.34 });
   const nailMat = new THREE.MeshStandardMaterial({ color: cLeather.clone().lerp(cLight, 0.25), roughness: 0.38 });
   const collarMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.62 });
   const metalMat = new THREE.MeshStandardMaterial({ color: 0xd8c9a0, roughness: 0.3, metalness: 0.85 });
@@ -118,7 +119,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const body = addSkinned(bodyGeo, skin, 'body');
   body.castShadow = true;
   // A sleek coat needs fewer layers than Hopper's fluff.
-  const furOpts: FurOptions = { ...DEFAULT_FUR, shells: 8, density: 1500, clump: 260, gravity: 0.08, ...opts.fur };
+  const furOpts: FurOptions = { ...DEFAULT_FUR, shells: 8, density: 1700, clump: 260, gravity: 0.06, sleek: 0.85, ...opts.fur };
   const urlFur = url?.get('fur') ?? null;
   const shells = opts.furShells ?? (urlFur !== null ? Number(urlFur) : low ? 2 : mobile ? 5 : furOpts.shells);
   furOpts.lengthScale ??= 1;
@@ -201,27 +202,27 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     const { p, n } = dogSurfaceAt(...DOG_NOSE);
     const nose = new THREE.Mesh(noseGeometry(), noseMat);
     nose.name = 'nose';
-    nose.scale.set(0.0102, 0.0079, 0.0052);
-    nose.position.copy(toHead(p.clone().addScaledVector(n, -0.0016)));
+    nose.scale.set(0.0092, 0.0071, 0.0046);
+    nose.position.copy(toHead(p.clone().addScaledVector(n, -0.0019)));
     nose.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n.clone().lerp(new THREE.Vector3(0, 0, 1), 0.5).normalize());
     bones.head.add(nose);
   }
 
-  // --- Whiskers: fine and coat-coloured ---------------------------------------------
+  // --- Whiskers: short, fine and coat-coloured ----------------------------------------
   for (const s of [1, -1]) {
     const hairs: THREE.BufferGeometry[] = [];
-    const cW = cLight.clone().lerp(new THREE.Color(1, 1, 1), 0.35);
+    const cW = cLight.clone().lerp(new THREE.Color(1, 1, 1), 0.2);
     [
-      [0.0105, 0.2615, 0.214, 0.021, 0.25],
-      [0.0125, 0.2575, 0.209, 0.025, 0.05],
-      [0.0125, 0.2535, 0.206, 0.022, -0.2],
-      [0.0135, 0.2625, 0.203, 0.019, 0.4],
+      [0.0105, 0.261, 0.2095, 0.014, 0.3],
+      [0.0125, 0.2575, 0.205, 0.017, 0.08],
+      [0.0125, 0.2535, 0.202, 0.015, -0.18],
+      [0.0135, 0.262, 0.199, 0.013, 0.42],
     ].forEach(([x, y, z, len, fan]) => {
       const { p } = dogSurfaceAt(x * s, y, z);
-      const dir = new THREE.Vector3(s, fan, 0.35).normalize();
+      const dir = new THREE.Vector3(s, fan, 0.4).normalize();
       const p0 = toHead(p);
-      const pts = [p0, p0.clone().addScaledVector(dir, len * 0.5).add(new THREE.Vector3(0, 0.0012, 0)), p0.clone().addScaledVector(dir, len).add(new THREE.Vector3(0, -0.002, -0.002))];
-      hairs.push(tubeGeometry(pts, [0, 0, 0], (t) => THREE.MathUtils.lerp(0.00032, 0.00008, t), (t) => cW.clone().multiplyScalar(0.85 + 0.15 * t), 5, 18));
+      const pts = [p0, p0.clone().addScaledVector(dir, len * 0.5).add(new THREE.Vector3(0, 0.0008, 0)), p0.clone().addScaledVector(dir, len).add(new THREE.Vector3(0, -0.0014, -0.0014))];
+      hairs.push(tubeGeometry(pts, [0, 0, 0], (t) => THREE.MathUtils.lerp(0.00026, 0.00007, t), (t) => cW.clone().multiplyScalar(0.85 + 0.15 * t), 5, 18));
     });
     const wh = new THREE.Mesh(mergeGeometries(hairs), whiskerMat);
     wh.name = `whiskers${s > 0 ? 'L' : 'R'}`;
@@ -239,45 +240,50 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     return g;
   };
   {
-    const M = DOG_MOUTH;
-    // Lower teeth stand on the jaw, either side of the tongue's bed.
+    const J = DOG_JAW;
+    const zf = J.c[2] + J.r[2];
+    // How wide the mouth is at z, a little inside the lips: the teeth follow this arch.
+    const arch = (z: number, inset: number) => J.r[0] * Math.sqrt(Math.max(0, 1 - ((z - J.c[2]) / J.r[2]) ** 2)) - inset;
+    // Lower teeth stand on the rims of the jaw, either side of the tongue's bed.
     const lower: THREE.BufferGeometry[] = [];
-    const jawTop = (x: number, z: number) => toJaw(jawSurfaceAt(x, 0.262, z).p);
+    const jawTop = (x: number, z: number) => toJaw(jawSurfaceAt(x, 0.258, z).p);
     for (const s of [1, -1]) {
-      const c0 = jawTop(0.0056 * s, 0.2105);
-      lower.push(tooth(c0.clone().add(new THREE.Vector3(0, -0.001, 0)), c0.clone().add(new THREE.Vector3(0.0006 * s, 0.0052, -0.0008)), 0.00165));
-      for (let q = 0; q < 4; q++) {
-        const b = jawTop((0.0068 + 0.0004 * q) * s, 0.2035 - q * 0.0052);
-        lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0008, 0)), b.clone().add(new THREE.Vector3(0, 0.0022 + 0.0004 * (q % 2), 0)), 0.0015));
+      const zc = zf - 0.0128;
+      const c0 = jawTop((arch(zc, 0.0036) - 0.0004) * s, zc);
+      lower.push(tooth(c0.clone().add(new THREE.Vector3(0, -0.0008, 0)), c0.clone().add(new THREE.Vector3(0.0003 * s, 0.0038, -0.0005)), 0.0013));
+      for (let q = 0; q < 3; q++) {
+        const z = zf - 0.02 - q * 0.0062;
+        const b = jawTop(arch(z, 0.0046) * s, z);
+        lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0006, 0)), b.clone().add(new THREE.Vector3(0, 0.0015 + 0.0003 * (q % 2), 0)), 0.0011));
       }
     }
     for (let q = 0; q < 6; q++) {
-      const a = ((q + 0.5) / 6 - 0.5) * 1.9;
-      const b = jawTop(Math.sin(a) * 0.0046, 0.2128 + Math.cos(a) * 0.0034);
-      lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0006, 0)), b.clone().add(new THREE.Vector3(0, 0.0019, 0.0003)), 0.00085));
+      const a = ((q + 0.5) / 6 - 0.5) * 1.5;
+      const z = zf - 0.0118 + Math.cos(a) * 0.0036;
+      const b = jawTop(Math.sin(a) * 0.0058, z);
+      lower.push(tooth(b.clone().add(new THREE.Vector3(0, -0.0005, 0)), b.clone().add(new THREE.Vector3(0, 0.0012, 0.0002)), 0.00065));
     }
     const lowerTeeth = new THREE.Mesh(mergeGeometries(lower), toothMat);
     lowerTeeth.name = 'teethLower';
     bones.jaw.add(lowerTeeth);
-    // Upper teeth hang from the roof of the channel; the closed jaw hides them.
+    // Upper teeth hang from the roof just inside the lips; the closed jaw hides them.
     const upper: THREE.BufferGeometry[] = [];
-    const roof = (x: number, z: number) => {
-      const t = THREE.MathUtils.clamp((z - M.back[2]) / (M.front[2] - M.back[2]), 0, 1);
-      const r = THREE.MathUtils.lerp(M.rBack, M.rFront, t);
-      return toHead(new THREE.Vector3(x, M.back[1] + Math.sqrt(Math.max(1e-8, r * r - x * x)) + 0.0006, z));
-    };
+    const roof = (x: number, z: number) => toHead(new THREE.Vector3(x, mouthRoof(x, z) + 0.0004, z));
     for (const s of [1, -1]) {
-      const c0 = roof(0.0074 * s, 0.2135);
-      upper.push(tooth(c0, c0.clone().add(new THREE.Vector3(0.0004 * s, -0.0062, 0.0004)), 0.0018));
-      for (let q = 0; q < 4; q++) {
-        const b = roof((0.0082 + 0.0005 * q) * s, 0.2055 - q * 0.0055);
-        upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0026 - 0.0005 * (q % 2), 0)), 0.0016));
+      const zc = zf - 0.0092;
+      const c0 = roof(arch(zc, 0.0042) * s, zc);
+      upper.push(tooth(c0, c0.clone().add(new THREE.Vector3(0.0002 * s, -0.004, 0.0003)), 0.0014));
+      for (let q = 0; q < 3; q++) {
+        const z = zf - 0.0175 - q * 0.0066;
+        const b = roof(arch(z, 0.0048) * s, z);
+        upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0019 - 0.0004 * (q % 2), 0)), 0.0012));
       }
     }
     for (let q = 0; q < 6; q++) {
-      const a = ((q + 0.5) / 6 - 0.5) * 1.9;
-      const b = roof(Math.sin(a) * 0.0056, 0.2148 + Math.cos(a) * 0.0036);
-      upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0024, 0.0002)), 0.00095));
+      const a = ((q + 0.5) / 6 - 0.5) * 1.5;
+      const z = zf - 0.0085 + Math.cos(a) * 0.0034;
+      const b = roof(Math.sin(a) * 0.006, z - 0.0012);
+      upper.push(tooth(b, b.clone().add(new THREE.Vector3(0, -0.0016, 0.0002)), 0.0007));
     }
     const upperTeeth = new THREE.Mesh(mergeGeometries(upper), toothMat);
     upperTeeth.name = 'teethUpper';
@@ -292,15 +298,15 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   for (const side of ['L', 'R'] as const) {
     const s = side === 'L' ? 1 : -1;
     for (const [bone, paw] of [
-      [`hand${side}`, DOG_PAW_F],
+      [`paw${side}`, DOG_PAW_F],
       [`toe${side}`, DOG_PAW_H],
     ] as const) {
       const nails: THREE.BufferGeometry[] = [];
       for (const dx of DOG_TOE_DX) {
-        const g = new THREE.ConeGeometry(0.00165, 0.0054, 7);
-        g.rotateX(Math.PI / 2 + 0.75);
-        g.rotateY(dx * s * 14);
-        g.translate(paw[0] * s + dx * s * 1.06, paw[1] - 0.0066, paw[2] + 0.0128 - Math.abs(dx) * 0.42 + 0.0072);
+        const g = new THREE.ConeGeometry(0.0013, 0.0042, 7);
+        g.rotateX(Math.PI / 2 + 0.8);
+        g.rotateY(dx * s * 16);
+        g.translate(paw[0] * s + dx * s * 1.06, paw[1] - 0.0056, paw[2] + 0.0104 - Math.abs(dx) * 0.42 + 0.0062);
         nails.push(g);
       }
       const mesh = new THREE.Mesh(mergeGeometries(nails), nailMat);
@@ -313,9 +319,8 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   // --- Collar with a glowing tag ----------------------------------------------------------
   {
     // Fitted to the neck: a ring of points on the skin in a plane across it.
-    const a = new THREE.Vector3(0, 0.19, 0.066), b = new THREE.Vector3(0, 0.2625, 0.128);
-    const axis = b.clone().sub(a).normalize();
-    const centre = a.clone().lerp(b, 0.47).add(new THREE.Vector3(0, -0.006, 0.006));
+    const axis = new THREE.Vector3(...DOG_COLLAR.axis).normalize();
+    const centre = new THREE.Vector3(...DOG_COLLAR.at);
     const side = new THREE.Vector3(1, 0, 0), fwd = new THREE.Vector3().crossVectors(side, axis).normalize();
     const N = 48;
     const ringPts: THREE.Vector3[] = [], outs: THREE.Vector3[] = [];
@@ -331,10 +336,11 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
         t += Math.max(0.0004, -d * 0.8);
       }
       const p = centre.clone().addScaledVector(dir, t);
-      ringPts.push(p.addScaledVector(dir, dogFurAt(p.x, p.y, p.z) * 0.6 + 0.0012));
+      // (The coat is pressed flat under it: see the bake.)
+      ringPts.push(p.addScaledVector(dir, 0.0021));
       outs.push(dir);
     }
-    const collar = new THREE.Mesh(bandGeometry(ringPts, outs, axis, 0.0042, 0.0011, new THREE.Color(pal.wing)), collarMat);
+    const collar = new THREE.Mesh(bandGeometry(ringPts, outs, axis, DOG_COLLAR.half, 0.0011, new THREE.Color(pal.wing)), collarMat);
     collar.name = 'collar';
     collar.castShadow = true;
     collar.position.copy(abs.neck).negate();
@@ -377,6 +383,10 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     lidMats: [lidMat, lidFur],
     eyeDepth: DOG_EYE_SCALE[2],
     irisToe: DOG_EYE_SPLAY * 0.8,
+    // Lids at rest sit part-way over the eye: a soft almond, not a round stare.
+    lidUpOpen: -1.12,
+    lidLoOpen: 1.3,
+    pupilScale: 0.66,
     tongue,
   };
   group.traverse((o) => {
@@ -403,32 +413,37 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
  * the lower teeth (panting); morph target 1 arches the middle (a lick, a yawn).
  */
 function tongueGeometry(jawAbs: THREE.Vector3, pink: THREE.Color): THREE.BufferGeometry {
-  const NU = 22, NV = 14;
-  const M = DOG_MOUTH;
-  const z0 = M.back[2] - 0.004, z1 = 0.2125, yBed = 0.2535;
+  const NU = 24, NV = 14;
+  const J = DOG_JAW;
+  const z0 = J.back + 0.001, z1 = J.c[2] + J.r[2] - 0.0115;
   const pos: number[] = [], out: number[] = [], arch: number[] = [], col: number[] = [], idx: number[] = [];
-  const cTip = pink.clone().lerp(new THREE.Color(0xff9aa5), 0.55), cRoot = pink.clone().multiplyScalar(0.72);
+  const cTip = pink.clone().lerp(new THREE.Color(0xff8f9c), 0.6), cRoot = pink.clone().multiplyScalar(0.7);
   const c = new THREE.Color();
   for (let i = 0; i <= NU; i++) {
     const t = i / NU;
+    // Lying in its bed: it follows the floor of the mouth, which rises towards the throat.
+    const yBed = THREE.MathUtils.lerp(0.2496, 0.2488, t);
     // Half-width: even along the blade, rounding off at the tip.
-    const w = 0.0064 * (0.82 + 0.18 * smooth(t / 0.5)) * Math.sqrt(Math.max(0, 1 - Math.pow(t, 5)));
-    const th = 0.0019 * (1 - 0.35 * t) * Math.sqrt(Math.max(0.02, 1 - Math.pow(t, 8)));
+    const w = THREE.MathUtils.lerp(0.0068, 0.0054, t) * Math.sqrt(Math.max(0, 1 - Math.pow(t, 6)));
+    const th = THREE.MathUtils.lerp(0.0016, 0.0012, t) * Math.sqrt(Math.max(0.02, 1 - Math.pow(t, 8)));
     for (let j = 0; j <= NV; j++) {
       const a = (j / NV) * Math.PI * 2;
       const cx = Math.sin(a), cy = Math.cos(a);
-      const groove = cy > 0 ? 0.00055 * Math.exp(-(cx * cx) / 0.05) * (1 - 0.6 * t) : 0;
+      const groove = cy > 0 ? 0.0005 * Math.exp(-(cx * cx) / 0.05) * (1 - 0.6 * t) : 0;
       const x = cx * w, y = cy * th - groove, z = THREE.MathUtils.lerp(z0, z1, t);
       pos.push(x - jawAbs.x, yBed + y - jawAbs.y, z - jawAbs.z);
-      // Out: slides forward, widens, and the front third drapes over the teeth and hangs.
-      const reach = 0.0215 * Math.pow(t, 1.25);
-      const droop = smooth((t - 0.5) / 0.5);
-      const zz = z + reach - 0.0065 * droop * droop;
-      const yy = yBed + 0.0016 * Math.sin(Math.PI * Math.min(1, t / 0.6)) + y * (1 - 0.25 * droop) - 0.0128 * droop * droop - (cy > 0 ? 0 : 0.0006 * droop);
-      out.push(x * (1 + 0.16 * smooth(t / 0.7)) - x, yy - (yBed + y), zz - z);
+      // Out: slides forward and broadens; the front drapes over the lower teeth and hangs, cupped a little.
+      const reach = 0.0215 * Math.pow(t, 1.3);
+      const droop = smooth((t - 0.6) / 0.4);
+      const wide = 1 + 0.45 * smooth(t / 0.75);
+      const zz = z + reach - 0.003 * droop * droop;
+      // It rides up over the lower front teeth, then hangs.
+      const lift = 0.0036 * Math.sin(Math.PI * Math.min(1, t / 0.72));
+      const yy = yBed + lift + y * (1.4 - 0.2 * droop) - 0.0082 * droop * droop + 0.0008 * cx * cx * droop;
+      out.push(x * wide - x, yy - (yBed + y), zz - z);
       // Arch: the middle lifts.
-      arch.push(0, 0.0034 * Math.sin(Math.PI * t) * (1 - 0.5 * cx * cx), 0.002 * t);
-      c.copy(cRoot).lerp(cTip, smooth(t / 0.8)).multiplyScalar(cy > 0 ? 1 - 1.6 * groove * 1000 * 0.25 : 0.82);
+      arch.push(0, 0.003 * Math.sin(Math.PI * t) * (1 - 0.5 * cx * cx), 0.002 * t);
+      c.copy(cRoot).lerp(cTip, smooth(t / 0.7)).multiplyScalar(cy > 0 ? 1 - 420 * groove : 0.8);
       col.push(c.r, c.g, c.b);
     }
   }

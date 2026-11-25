@@ -67,10 +67,11 @@ export function petSamplePoints(rig: PetRig): { p: Vec3; w: number }[] {
   const parent = rig.group.parent;
   if (parent) _toParent.copy(parent.matrixWorld).invert();
   return SAMPLE_BONES.map(([b, w]) => {
-    rig.bones[b].getWorldPosition(_p);
-    if (parent) _p.applyMatrix4(_toParent);
     // Head bone sits at the neck joint; sample the middle of the head instead.
-    if (b === 'head') _p.y += 0.055 * rig.group.scale.y;
+    if (b === 'head' && rig.headSample) rig.bones.head.localToWorld(_p.copy(rig.headSample));
+    else rig.bones[b].getWorldPosition(_p);
+    if (parent) _p.applyMatrix4(_toParent);
+    if (b === 'head' && !rig.headSample) _p.y += 0.055 * rig.group.scale.y;
     return { p: { x: _p.x, y: _p.y, z: _p.z }, w };
   });
 }

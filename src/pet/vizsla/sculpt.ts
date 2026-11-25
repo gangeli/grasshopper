@@ -1,5 +1,5 @@
 import type { V } from '../skeleton';
-import { carve, ellipsoid, ring, roundCone, Sculpt, type BoneWeight, type Prim } from '../sdf/sdf';
+import { alignX, carve, ellipsoid, ring, roundCone, Sculpt, type BoneWeight, type Prim } from '../sdf/sdf';
 import { DOG_P as P, type DogBoneName } from './skeleton';
 
 /**
@@ -11,7 +11,7 @@ import { DOG_P as P, type DogBoneName } from './skeleton';
  *
  * The lower jaw is its own sculpt (meshed separately, rigid on the jaw bone)
  * that sits in a channel carved under the muzzle, so the mouth really opens.
- * The ears are thin leather and are built as surfaces, not sculpted (see ears.ts).
+ * The ears are thin leather and are built as surfaces, not sculpted (see mesh.ts).
  */
 export type DogRegion =
   | 'head' | 'cheek' | 'muzzle' | 'brow' | 'lip' | 'nose' | 'jaw' | 'neck' | 'body' | 'belly' | 'chest'
@@ -19,20 +19,29 @@ export type DogRegion =
 
 type DP = Prim<DogRegion>;
 
-/** Eye centres (pet space): the eyeballs sit in carved sockets. */
-export const DOG_EYE: Record<'L' | 'R', V> = { L: [0.0172, 0.2852, 0.1715], R: [-0.0172, 0.2852, 0.1715] };
-export const DOG_EYE_RADIUS = 0.0102;
+/** Eye centres (pet space): the eyeballs sit in carved sockets under the brow. */
+export const DOG_EYE: Record<'L' | 'R', V> = { L: [0.0146, 0.2838, 0.1716], R: [-0.0146, 0.2838, 0.1716] };
+export const DOG_EYE_RADIUS = 0.0088;
 /** Eyes face forward and a little outward, and are slightly oval. */
-export const DOG_EYE_SPLAY = 0.42;
-export const DOG_EYE_PITCH = -0.06;
-export const DOG_EYE_SCALE: V = [1, 0.97, 0.8];
-export const DOG_NOSE: V = [0, 0.2705, 0.2335];
-/** Front paw centre (pet space, left) and the sideways offsets of the four toes. */
-export const DOG_PAW_F: V = [0.031, 0.0115, 0.066];
-export const DOG_PAW_H: V = [0.031, 0.011, -0.098];
-export const DOG_TOE_DX = [-0.0086, -0.003, 0.003, 0.0086];
-/** Where the lower jaw's channel under the muzzle runs (also the tongue's bed). */
-export const DOG_MOUTH = { back: [0, 0.2465, 0.176] as V, front: [0, 0.2465, 0.2195] as V, rBack: 0.0122, rFront: 0.0096 };
+export const DOG_EYE_SPLAY = 0.4;
+export const DOG_EYE_PITCH = -0.05;
+export const DOG_EYE_SCALE: V = [1, 0.96, 0.8];
+export const DOG_NOSE: V = [0, 0.2698, 0.2295];
+/** Paw centres (pet space, left side) and the sideways offsets of the four toes. */
+export const DOG_PAW_F: V = [0.031, 0.0098, 0.0645];
+export const DOG_PAW_H: V = [0.031, 0.0094, -0.0995];
+export const DOG_TOE_DX = [-0.0072, -0.0025, 0.0025, 0.0072];
+/** The collar: where it sits along the neck (a point on the neck's axis, the axis, and half its width). */
+export const DOG_COLLAR = { at: [0, 0.2148, 0.1022] as V, axis: [0, 0.7907, 0.6122] as V, half: 0.0042 };
+/**
+ * The lower jaw: a broad, shallow ellipsoid nearly as wide as the muzzle, so
+ * the lips meet flush. The muzzle is hollowed to its shape ahead of the
+ * corner of the mouth (`back`, z); behind that the jaw runs under the cheeks.
+ */
+export const DOG_JAW = { c: [0, 0.2442, 0.1848] as V, r: [0.0158, 0.0062, 0.0295] as V, back: 0.1705 };
+/** Room for the tongue: a hollow in the roof of the mouth and a bed in the jaw (centre, radii). */
+const PALATE = { c: [0, 0.2505, 0.1905] as V, r: [0.0088, 0.0052, 0.0185] as V };
+const TONGUE_BED = { c: [0, 0.2513, 0.1895] as V, r: [0.0098, 0.0042, 0.021] as V };
 
 const add = (a: V, b: V): V => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const smooth = (t: number) => {
@@ -40,7 +49,7 @@ const smooth = (t: number) => {
   return t * t * (3 - 2 * t);
 };
 
-/** Torso weights blend hips → spine → chest → neck along the back (by z). */
+/** Torso weights blend hips → spine → chest along the back (by z). */
 function torso(_x: number, _y: number, z: number): BoneWeight[] {
   const zs: [DogBoneName, number][] = [
     ['hips', P.hips[2] + 0.012],
@@ -93,27 +102,52 @@ function limb(region: DogRegion, a: V, b: V, ra: number, rb: number, bone: DogBo
   });
 }
 
-/** The channel under the muzzle that the lower jaw closes into. */
-export function mouthChannel(grow = 0): DP {
-  const M = DOG_MOUTH;
-  return roundCone<DogRegion>('lip', M.back, M.front, M.rBack + grow, M.rFront + grow, 'head', 'head', 0);
+/** The jaw's ellipsoid, grown by `grow` (m). */
+function jawBody(grow: number, bone: DogBoneName): DP {
+  const J = DOG_JAW;
+  return ellipsoid<DogRegion>('jaw', J.c, [J.r[0] + grow, J.r[1] + grow, J.r[2] + grow], bone, 0);
+}
+
+/**
+ * The hollows of the mouth in the head: the socket the closed jaw fills
+ * (ahead of the corner of the mouth only) and the arch of the palate above
+ * the tongue.
+ */
+export function mouthHollows(): DP[] {
+  const e = jawBody(0.0006, 'head');
+  const socket: DP = { ...e, region: 'lip', d: (x, y, z) => Math.max(e.d(x, y, z), DOG_JAW.back - z), min: [e.min[0], e.min[1], DOG_JAW.back] };
+  return [socket, ellipsoid<DogRegion>('lip', PALATE.c, PALATE.r, 'head', 0)];
+}
+
+/** Height of the roof of the mouth above (x, z), in pet space (the upper teeth hang from it). */
+export function mouthRoof(x: number, z: number): number {
+  const J = DOG_JAW, e = [J.r[0] + 0.0006, J.r[1] + 0.0006, J.r[2] + 0.0006];
+  const k = 1 - (x / e[0]) ** 2 - ((z - J.c[2]) / e[2]) ** 2;
+  const kp = 1 - (x / PALATE.r[0]) ** 2 - ((z - PALATE.c[2]) / PALATE.r[2]) ** 2;
+  return Math.max(J.c[1] + e[1] * Math.sqrt(Math.max(0, k)), kp > 0 ? PALATE.c[1] + PALATE.r[1] * Math.sqrt(kp) : -Infinity);
+}
+
+/** 0 at the middle of the mouth .. 1 at the lips (how far out a point is across the jaw's plan). */
+export function mouthRim(x: number, z: number): number {
+  const J = DOG_JAW;
+  return Math.sqrt((x / J.r[0]) ** 2 + ((z - J.c[2]) / J.r[2]) ** 2);
 }
 
 export function buildVizslaSculpt(): Sculpt<DogRegion> {
   const S = new Sculpt<DogRegion>();
   // ---- Torso: deep ribcage, level back, waist tucked up towards the loin ------------------------
   S.add(
-    ellipsoid<DogRegion>('body', [0, 0.1665, 0.03], [0.0355, 0.05, 0.06], torso, 0),
+    ellipsoid<DogRegion>('body', [0, 0.1665, 0.03], [0.0345, 0.05, 0.058], torso, 0),
     // Forechest between the shoulders.
-    ellipsoid<DogRegion>('chest', [0, 0.163, 0.081], [0.0265, 0.034, 0.024], torso, 0.022),
+    ellipsoid<DogRegion>('chest', [0, 0.163, 0.079], [0.0255, 0.033, 0.024], torso, 0.02),
     // Loin: narrower and well off the ground (the tuck-up).
-    weighted(roundCone<DogRegion>('body', [0, 0.1765, -0.002], [0, 0.1795, -0.068], 0.0345, 0.0305, 'spine', 'hips', 0.03), torso),
+    weighted(roundCone<DogRegion>('body', [0, 0.1825, -0.012], [0, 0.182, -0.07], 0.0295, 0.0272, 'spine', 'hips', 0.022), torso),
     // Croup, sloping gently to the tail.
-    ellipsoid<DogRegion>('body', [0, 0.1765, -0.084], [0.0325, 0.0315, 0.035], torso, 0.026),
-    // Withers.
-    ellipsoid<DogRegion>('body', [0, 0.2005, 0.058], [0.019, 0.0165, 0.03], torso, 0.022),
-    // The underline, from the brisket up into the flank.
-    ellipsoid<DogRegion>('belly', [0, 0.136, 0.03], [0.027, 0.02, 0.05], torso, 0.02),
+    ellipsoid<DogRegion>('body', [0, 0.1785, -0.085], [0.031, 0.0295, 0.033], torso, 0.022),
+    // Withers: where the back begins, hardly higher than it.
+    ellipsoid<DogRegion>('body', [0, 0.1985, 0.056], [0.018, 0.016, 0.03], torso, 0.02),
+    // The brisket's keel, reaching the elbows.
+    ellipsoid<DogRegion>('belly', [0, 0.132, 0.04], [0.022, 0.017, 0.04], torso, 0.016),
   );
   // ---- Neck: long, muscled, a little arch along the crest ------------------------------------------
   const neckW = (a: V, b: V) => {
@@ -136,150 +170,163 @@ export function buildVizslaSculpt(): Sculpt<DogRegion> {
     };
   };
   {
-    const a: V = [0, 0.19, 0.066], b: V = [0, 0.2625, 0.128];
+    const a: V = [0, 0.1845, 0.068], b: V = [0, 0.262, 0.128];
     const ta: V = [0, 0.168, 0.088], tb: V = [0, 0.2445, 0.139];
     S.add(
-      weighted(roundCone<DogRegion>('neck', a, b, 0.0345, 0.0235, 'neck', 'head', 0.028), neckW(a, b)),
+      weighted(roundCone<DogRegion>('neck', a, b, 0.031, 0.0225, 'neck', 'head', 0.026), neckW(a, b)),
       // Throat: the underline of the neck, into the forechest.
-      weighted(roundCone<DogRegion>('neck', ta, tb, 0.0265, 0.0185, 'neck', 'head', 0.022), neckW(ta, tb)),
+      weighted(roundCone<DogRegion>('neck', ta, tb, 0.0245, 0.0175, 'neck', 'head', 0.02), neckW(ta, tb)),
     );
   }
   // ---- Head: a lean skull, moderate stop, squared-off muzzle ----------------------------------------
   S.add(
-    ellipsoid<DogRegion>('head', [0, 0.279, 0.148], [0.027, 0.0252, 0.0325], 'head', 0.012),
+    ellipsoid<DogRegion>('head', [0, 0.2772, 0.146], [0.0262, 0.0232, 0.033], 'head', 0.012),
     // Occiput: the back of the skull is a little prominent.
-    ellipsoid<DogRegion>('head', [0, 0.289, 0.127], [0.016, 0.012, 0.012], 'head', 0.012),
+    ellipsoid<DogRegion>('head', [0, 0.2865, 0.1245], [0.015, 0.0115, 0.0115], 'head', 0.012),
+    // Forehead: broad between the eyes, ending in the stop.
+    ellipsoid<DogRegion>('head', [0, 0.2812, 0.1625], [0.0215, 0.0182, 0.0175], 'head', 0.01),
   );
   for (const s of [1, -1]) {
     S.add(
       // Brow ridges over the eyes, with a furrow between them down the forehead.
-      ellipsoid<DogRegion>('brow', [0.0118 * s, 0.2945, 0.1655], [0.011, 0.0068, 0.011], 'head', 0.009),
-      // Cheeks: flat and clean, not bulging.
-      ellipsoid<DogRegion>('cheek', [0.0195 * s, 0.2665, 0.158], [0.0098, 0.0125, 0.019], 'head', 0.012),
+      ellipsoid<DogRegion>('brow', [0.0112 * s, 0.2922, 0.1672], [0.0104, 0.0062, 0.0104], 'head', 0.008),
+      // The orbit's outer rim and the cheekbone running back from it: the eye sits in front of these.
+      ellipsoid<DogRegion>('cheek', [0.0192 * s, 0.2802, 0.158], [0.0066, 0.0082, 0.0125], 'head', 0.008),
+      ellipsoid<DogRegion>('cheek', [0.0198 * s, 0.2695, 0.158], [0.0084, 0.0108, 0.02], 'head', 0.011),
+      // Jowl: the cheek comes down over the back of the jaw.
+      ellipsoid<DogRegion>('cheek', [0.0118 * s, 0.2528, 0.1635], [0.0066, 0.0104, 0.013], 'head', 0.008),
     );
   }
   S.add(
     // Bridge of the muzzle: straight from the stop to the nose.
-    roundCone<DogRegion>('muzzle', [0, 0.2725, 0.172], [0, 0.2702, 0.2175], 0.0162, 0.0128, 'head', 'head', 0.014),
+    roundCone<DogRegion>('muzzle', [0, 0.2712, 0.174], [0, 0.2694, 0.2125], 0.0155, 0.012, 'head', 'head', 0.012),
   );
   for (const s of [1, -1]) {
     S.add(
       // Sides of the muzzle: deep enough that it ends square rather than snipy.
-      roundCone<DogRegion>('muzzle', [0.0078 * s, 0.2672, 0.178], [0.0066 * s, 0.2645, 0.2185], 0.0128, 0.0104, 'head', 'head', 0.008),
-      // Flews: the upper lips, covering the lower jaw without hanging loose.
-      ellipsoid<DogRegion>('lip', [0.0112 * s, 0.2572, 0.2], [0.0072, 0.0082, 0.021], 'head', 0.006),
+      roundCone<DogRegion>('muzzle', [0.0076 * s, 0.2655, 0.178], [0.0063 * s, 0.2637, 0.2132], 0.0126, 0.0104, 'head', 'head', 0.008),
+      // Flews: the upper lips, just overlapping the lower jaw without hanging loose.
+      ellipsoid<DogRegion>('lip', [0.0116 * s, 0.2536, 0.1962], [0.0072, 0.0096, 0.0215], 'head', 0.006),
+      // ...meeting under the nose.
+      ellipsoid<DogRegion>('lip', [0.0052 * s, 0.2532, 0.2162], [0.0058, 0.0086, 0.0062], 'head', 0.004),
     );
   }
-  // Nose leather: broad, well ahead of the lips.
-  S.add(ellipsoid<DogRegion>('nose', [0, 0.2705, 0.2262], [0.0098, 0.0082, 0.0082], 'head', 0.004));
-  for (const s of [1, -1]) S.add(ellipsoid<DogRegion>('nose', [0.0056 * s, 0.2695, 0.2275], [0.0056, 0.0056, 0.0062], 'head', 0.003));
+  // Nose leather: broad, a little ahead of the lips.
+  S.add(ellipsoid<DogRegion>('nose', [0, 0.2698, 0.2215], [0.009, 0.0076, 0.0078], 'head', 0.004));
+  for (const s of [1, -1]) S.add(ellipsoid<DogRegion>('nose', [0.005 * s, 0.2688, 0.2228], [0.005, 0.0052, 0.0058], 'head', 0.003));
   // ---- Forelegs: laid-back shoulder, straight forearm, tight paw ----------------------------------------
   for (const [s, side] of [
     [1, 'L'],
     [-1, 'R'],
   ] as const) {
     const sh = P[`shoulder${side}`], el = P[`elbow${side}`], wr = P[`hand${side}`];
-    const shB = `shoulder${side}` as const, elB = `elbow${side}` as const, haB = `hand${side}` as const;
+    const shB = `shoulder${side}` as const, elB = `elbow${side}` as const, haB = `hand${side}` as const, paB = `paw${side}` as const;
     const pawF: V = [DOG_PAW_F[0] * s, DOG_PAW_F[1], DOG_PAW_F[2]];
     S.add(
       // Shoulder blade and its muscle, lying on the ribs (it mostly rides with the chest).
-      weighted(ellipsoid<DogRegion>('arm', [0.0295 * s, 0.176, 0.062], [0.0125, 0.034, 0.0225], 'chest', 0.018), () => [
+      weighted(ellipsoid<DogRegion>('arm', [0.029 * s, 0.176, 0.062], [0.0115, 0.033, 0.0215], 'chest', 0.018), () => [
         { bone: 'chest', w: 0.65 },
         { bone: shB, w: 0.35 },
       ]),
-      limb('arm', add(sh, [0, 0.004, -0.002]), el, 0.0172, 0.0138, shB, elB, 'chest', 0.016),
+      limb('arm', add(sh, [0, 0.004, -0.002]), el, 0.0158, 0.0122, shB, elB, 'chest', 0.015),
       // Point of the elbow.
-      ellipsoid<DogRegion>('arm', add(el, [0.001 * s, 0.003, -0.0075]), [0.0085, 0.0095, 0.0085], shB, 0.008),
+      ellipsoid<DogRegion>('arm', add(el, [0.001 * s, 0.003, -0.007]), [0.0072, 0.0085, 0.0075], shB, 0.007),
       // Forearm: muscled below the elbow, tapering to a fine wrist.
-      limb('forearm', el, add(wr, [0, 0.001, 0]), 0.0128, 0.0084, elB, haB, shB, 0.008),
-      ellipsoid<DogRegion>('forearm', add(el, [0.001 * s, -0.021, -0.0035]), [0.0102, 0.021, 0.0118], elB, 0.008),
+      limb('forearm', el, add(wr, [0, 0.001, 0]), 0.0112, 0.0072, elB, haB, shB, 0.007),
+      ellipsoid<DogRegion>('forearm', add(el, [0.001 * s, -0.02, -0.003]), [0.0086, 0.02, 0.0102], elB, 0.007),
       // Wrist and pastern, sloping a little into the paw.
-      limb('hand', wr, add(pawF, [0, 0.0065, -0.006]), 0.0088, 0.0094, haB, null, elB, 0.006, 0.35),
-      ellipsoid<DogRegion>('hand', pawF, [0.0124, 0.0102, 0.0148], haB, 0.006),
+      limb('hand', wr, add(pawF, [0, 0.0062, -0.0055]), 0.0073, 0.0078, haB, paB, elB, 0.005, 0.3),
+      ellipsoid<DogRegion>('hand', pawF, [0.0102, 0.0088, 0.012], paB, 0.005),
     );
     // Four arched toes, the middle two a little ahead.
-    for (const dx of DOG_TOE_DX)
-      S.add(ellipsoid<DogRegion>('finger', add(pawF, [dx * s, -0.0028, 0.0128 - Math.abs(dx) * 0.42]), [0.0041, 0.0064, 0.0072], haB, 0.0022));
+    for (const dx of DOG_TOE_DX) S.add(ellipsoid<DogRegion>('finger', add(pawF, [dx * s, -0.0026, 0.0106 - Math.abs(dx) * 0.42]), [0.0035, 0.0056, 0.0062], paB, 0.002));
     // ---- Hind legs: broad muscled thigh, long second thigh, hocks well let down ----------------------------
     const hip = P[`thigh${side}`], kn = P[`shin${side}`], hk = P[`ankle${side}`];
     const thB = `thigh${side}` as const, shinB = `shin${side}` as const, anB = `ankle${side}` as const, toB = `toe${side}` as const;
     const pawH: V = [DOG_PAW_H[0] * s, DOG_PAW_H[1], DOG_PAW_H[2]];
     S.add(
       // The thigh is a broad flat sheet of muscle seen from the side, lean from behind.
-      weighted(ellipsoid<DogRegion>('thigh', [0.0265 * s, 0.158, -0.082], [0.0148, 0.036, 0.0285], thB, 0.02), () => [
+      weighted(ellipsoid<DogRegion>('thigh', [0.0255 * s, 0.156, -0.083], [0.0138, 0.036, 0.0275], thB, 0.018), () => [
         { bone: thB, w: 0.7 },
         { bone: 'hips', w: 0.3 },
       ]),
-      limb('thigh', add(hip, [0, -0.004, 0.002]), kn, 0.0225, 0.0152, thB, shinB, 'hips', 0.018),
-      ellipsoid<DogRegion>('thigh', add(kn, [0, 0.004, 0.0045]), [0.0118, 0.013, 0.0105], thB, 0.01),
+      limb('thigh', add(hip, [0, -0.004, 0.002]), kn, 0.0205, 0.013, thB, shinB, 'hips', 0.018),
+      // ...its front edge running in one line from the flank to the stifle.
+      ellipsoid<DogRegion>(
+        'thigh',
+        [0.0285 * s, 0.5 * (hip[1] + kn[1]) - 0.004, 0.5 * (hip[2] + kn[2]) + 0.005],
+        [0.033, 0.0118, 0.0168],
+        thB,
+        0.014,
+        alignX([0, kn[1] - hip[1], kn[2] - hip[2]], [1, 0, 0]),
+      ),
       // Second thigh (gaskin): its muscle sits high at the back, the tendon runs to the point of the hock.
-      limb('shin', kn, hk, 0.0138, 0.0074, shinB, anB, thB, 0.01),
-      ellipsoid<DogRegion>('shin', [kn[0], kn[1] - 0.02, kn[2] - 0.0165], [0.0098, 0.02, 0.012], shinB, 0.009),
-      ellipsoid<DogRegion>('shin', add(hk, [0, 0.003, -0.0045]), [0.0068, 0.0095, 0.0068], shinB, 0.006),
+      limb('shin', kn, hk, 0.0122, 0.0064, shinB, anB, thB, 0.012),
+      ellipsoid<DogRegion>('shin', [kn[0], kn[1] - 0.019, kn[2] - 0.0155], [0.0088, 0.02, 0.0112], shinB, 0.009),
+      ellipsoid<DogRegion>('shin', add(hk, [0, 0.003, -0.004]), [0.0056, 0.0085, 0.0058], shinB, 0.005),
       // Rear pastern, upright from hock to paw.
-      limb('foot', hk, add(pawH, [0, 0.0085, -0.005]), 0.0076, 0.0084, anB, toB, shinB, 0.006),
-      ellipsoid<DogRegion>('toe', pawH, [0.0116, 0.0098, 0.0142], toB, 0.006),
+      limb('foot', hk, add(pawH, [0, 0.008, -0.0045]), 0.0066, 0.0071, anB, toB, shinB, 0.005),
+      ellipsoid<DogRegion>('toe', pawH, [0.0098, 0.0086, 0.0116], toB, 0.005),
     );
-    for (const dx of DOG_TOE_DX)
-      S.add(ellipsoid<DogRegion>('toe', add(pawH, [dx * s, -0.0026, 0.0122 - Math.abs(dx) * 0.42]), [0.0039, 0.0061, 0.0069], toB, 0.0022));
+    for (const dx of DOG_TOE_DX) S.add(ellipsoid<DogRegion>('toe', add(pawH, [dx * s, -0.0024, 0.0102 - Math.abs(dx) * 0.42]), [0.0034, 0.0054, 0.006], toB, 0.002));
   }
   // ---- Tail: thick at the root, tapering, docked ----------------------------------------------------------
-  const tail: V[] = [[0, 0.1895, -0.098], P.tail0, P.tail1, P.tail2, P.tail3, P.tail4, P.tail5, add(P.tail5, [0, -0.001, -0.0125])];
-  const radii = [0.0142, 0.0112, 0.0098, 0.0088, 0.0079, 0.0071, 0.0063, 0.0054];
+  const tail: V[] = [[0, 0.19, -0.098], P.tail0, P.tail1, P.tail2, P.tail3, P.tail4, P.tail5, add(P.tail5, [0, -0.001, -0.0125])];
+  const radii = [0.0125, 0.0098, 0.0085, 0.0076, 0.0068, 0.0061, 0.0054, 0.0046];
   const tb: DogBoneName[] = ['hips', 'tail0', 'tail1', 'tail2', 'tail3', 'tail4', 'tail5', 'tail5'];
-  for (let q = 0; q < tail.length - 1; q++) S.add(roundCone<DogRegion>('tail', tail[q], tail[q + 1], radii[q], radii[q + 1], tb[q], tb[q + 1], q === 0 ? 0.016 : 0.005));
-  // ---- Mouth: the channel the lower jaw closes into ------------------------------------------------------
-  S.add(carve(mouthChannel(), 0.0025));
+  // (No blend between the segments: they already meet exactly, and a blend would swell each joint into a ring.)
+  for (let q = 0; q < tail.length - 1; q++) S.add(roundCone<DogRegion>('tail', tail[q], tail[q + 1], radii[q], radii[q + 1], tb[q], tb[q + 1], q === 0 ? 0.014 : 0));
+  // ---- Mouth: the socket the lower jaw closes into, and the palate ---------------------------------------
+  for (const h of mouthHollows()) S.add(carve(h, 0.0015));
   // ---- Eye sockets and lid folds ---------------------------------------------------------------------------
   const R = DOG_EYE_RADIUS;
   for (const side of ['L', 'R'] as const) {
     const e = DOG_EYE[side], s = side === 'L' ? 1 : -1;
-    const ax: V = [Math.sin(DOG_EYE_SPLAY) * s, 0.06, Math.cos(DOG_EYE_SPLAY)];
-    S.add(carve(ellipsoid<DogRegion>('head', add(e, [ax[0] * 0.0018, 0, ax[2] * 0.0018]), [R * 0.94, R * 0.94, R * 0.74], 'head', 0), 0.003));
+    const ax: V = [Math.sin(DOG_EYE_SPLAY) * s, 0.05, Math.cos(DOG_EYE_SPLAY)];
+    S.add(carve(ellipsoid<DogRegion>('head', add(e, [ax[0] * 0.0014, 0, ax[2] * 0.0014]), [R * 0.94, R * 0.92, R * 0.74], 'head', 0), 0.0026));
     const o = R * 0.42;
-    S.add(ring<DogRegion>('brow', add(e, [ax[0] * o, ax[1] * o, ax[2] * o]), ax, R * 1.02, R * 0.24, 'head', 0.0028, 0.98));
+    S.add(ring<DogRegion>('brow', add(e, [ax[0] * o, ax[1] * o, ax[2] * o]), ax, R * 1.02, R * 0.25, 'head', 0.0026, 0.96));
   }
   return S;
 }
 
 /**
- * The lower jaw: a slim mandible with a neat chin, rounded off at the hinge so
- * it turns inside the cheeks without opening a gap.
+ * The lower jaw: broad and shallow with a neat chin; its back end runs under
+ * the cheeks to the hinge, so it turns without opening a gap.
  */
 export function buildJawSculpt(): Sculpt<DogRegion> {
   const S = new Sculpt<DogRegion>();
-  const M = DOG_MOUTH;
+  const J = DOG_JAW;
   S.add(
-    roundCone<DogRegion>('jaw', [0, 0.2478, 0.16], [0, 0.2462, 0.2125], 0.0116, 0.0083, 'jaw', 'jaw', 0),
-    ellipsoid<DogRegion>('jaw', [0, 0.2452, 0.2135], [0.0086, 0.0072, 0.0082], 'jaw', 0.004),
-    // Hinge end, tucked under the cheeks.
-    ellipsoid<DogRegion>('jaw', [0, 0.25, 0.156], [0.0125, 0.0125, 0.0125], 'jaw', 0.006),
+    jawBody(0, 'jaw'),
+    // Chin: blunt, a little behind the upper lip.
+    ellipsoid<DogRegion>('jaw', [0, J.c[1] - 0.0008, J.c[2] + J.r[2] - 0.0082], [0.0078, 0.0056, 0.0068], 'jaw', 0.004),
   );
-  // A shallow bed for the tongue between the teeth.
-  S.add(carve(roundCone<DogRegion>('jaw', add(M.back, [0, 0.0128, 0.004]), add(M.front, [0, 0.0098, -0.006]), 0.0078, 0.0058, 'jaw', 'jaw', 0), 0.003));
+  // A bed for the tongue between the rows of teeth.
+  S.add(carve(ellipsoid<DogRegion>('jaw', TONGUE_BED.c, TONGUE_BED.r, 'jaw', 0), 0.002));
   return S;
 }
 
 /** Coat length (m) per region: short, smooth and close-lying all over. */
 export const DOG_FUR: Record<DogRegion, number> = {
-  head: 0.0022,
-  cheek: 0.0021,
-  muzzle: 0.0014,
-  brow: 0.0018,
-  lip: 0.0011,
+  head: 0.0016,
+  cheek: 0.0015,
+  muzzle: 0.001,
+  brow: 0.0013,
+  lip: 0.0008,
   nose: 0,
-  jaw: 0.0013,
-  neck: 0.0034,
-  body: 0.0032,
-  belly: 0.0027,
-  chest: 0.0037,
-  thigh: 0.0031,
-  shin: 0.0021,
-  foot: 0.0016,
-  toe: 0.0013,
-  arm: 0.0029,
-  forearm: 0.0021,
-  hand: 0.0016,
-  finger: 0.0012,
-  tail: 0.0028,
+  jaw: 0.0009,
+  neck: 0.0024,
+  body: 0.0023,
+  belly: 0.0019,
+  chest: 0.0027,
+  thigh: 0.0022,
+  shin: 0.0015,
+  foot: 0.0012,
+  toe: 0.0009,
+  arm: 0.0021,
+  forearm: 0.0015,
+  hand: 0.0012,
+  finger: 0.0009,
+  tail: 0.002,
 };

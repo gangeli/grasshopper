@@ -3,7 +3,7 @@ import type { HideAndSeek, GameOptions } from '../game/HideAndSeek';
 import { petSamplePoints, type ViewPose } from '../game/Visibility';
 import type { Animator } from '../pet/Animator';
 import type { PetController } from '../pet/PetController';
-import type { PetRig, PALETTES } from '../pet/PetModel';
+import type { PetRig, PALETTES, Species } from '../pet/PetModel';
 import type { WorldModel } from '../world/WorldModel';
 import { createStack } from '../game/stack';
 import { roomFromName, type SimRoom } from './SimRoom';
@@ -26,6 +26,8 @@ export interface SimOptions {
   /** Sense every N frames (depth integration is the expensive part). */
   senseEvery?: number;
   palette?: keyof typeof PALETTES;
+  /** Which pet plays (default: the one chosen on the start page; Hopper in tests). */
+  species?: Species;
   /** Sensor realism: 'ideal', 'arcore' or 'harsh' (or a custom profile). */
   noise?: NoiseName | NoiseProfile;
   /**
@@ -76,7 +78,7 @@ export class Simulation {
   constructor(opts: SimOptions = {}) {
     this.room = typeof opts.room === 'object' ? opts.room : roomFromName(opts.room ?? 'living');
     this.sensor = new SimSensor(this.room, opts.caps ?? { depth: true, planes: true, mesh: false }, opts.seed ?? 7, opts.noise ?? 'ideal');
-    const stack = createStack({ seed: opts.seed, palette: opts.palette, game: opts.game });
+    const stack = createStack({ seed: opts.seed, palette: opts.palette, game: opts.game, species: opts.species });
     this.world = stack.world;
     this.rig = stack.rig;
     this.anim = stack.anim;

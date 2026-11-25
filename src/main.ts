@@ -7,7 +7,8 @@ import { SimMode } from './app/SimMode';
 import { CameraFeed } from './app/CameraFeed';
 import { createStack } from './game/stack';
 import { Animator } from './pet/Animator';
-import { buildPet } from './pet/PetModel';
+import { buildPet, type PetRig } from './pet/PetModel';
+import { currentSpecies, setSpecies, SPECIES, speciesLabel, type Species } from './pet/species';
 import { applyPetEnvironment } from './pet/lighting';
 import { Hearts } from './pet/Hearts';
 import { Petting, type PetResponse } from './game/Petting';
@@ -23,6 +24,7 @@ import { setupForgetControl, startMemory } from './app/Memory';
  *   &speed=4          simulation steps per frame (fast-forward)
  *   &fixed=1          fixed 1/30s timestep (deterministic)
  *   &emulate=1        install the IWER WebXR emulator (AR without a device)
+ *   &pet=vizsla|hopper  which pet plays (otherwise the one picked on this page, remembered)
  *   &seed=N
  */
 const q = new URLSearchParams(location.search);
@@ -95,6 +97,9 @@ async function main() {
     voice.petReaction(r);
     document.getElementById('tapme')?.classList.add('gone');
   });
+
+  // Pet picker: Hopper, or a Vizsla. The showcase swaps at once; the game starts with whichever is chosen.
+  setupPetPicker(document.getElementById('pet-picker'), (s) => showcase.setPet(s));
 
   const enter = async (mode: 'ar' | 'sim' | 'camera') => {
     // iOS only shows the motion-sensor prompt from inside the tap itself.
@@ -236,6 +241,47 @@ function setupInstall(note: HTMLElement, installMode = false) {
   };
 }
 
+/**
+ * The pet picker on the start page: one chip per pet. Choosing one is
+ * remembered for next time (unless ?pet= pins it for this visit).
+ */
+function setupPetPicker(el: HTMLElement | null, onPick: (s: Species) => void) {
+  if (!el) return;
+  const chips = new Map<Species, HTMLButtonElement>();
+  const mark = (now: Species) => {
+    for (const [s, b] of chips) {
+      b.classList.toggle('on', s === now);
+      b.setAttribute('aria-checked', String(s === now));
+    }
+  };
+  for (const s of SPECIES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pet';
+    b.dataset.pet = s;
+    b.setAttribute('role', 'radio');
+    b.textContent = speciesLabel(s);
+    b.onclick = () => {
+      if (currentSpecies() === s || el.classList.contains('busy')) return;
+      setSpecies(s);
+      mark(s);
+      // Building a pet takes a moment: show the choice first, then swap.
+      el.classList.add('busy');
+      setTimeout(() => {
+        try {
+          onPick(s);
+        } finally {
+          el.classList.remove('busy');
+        }
+      }, 30);
+    };
+    chips.set(s, b);
+    el.appendChild(b);
+  }
+  mark(currentSpecies());
+  el.style.display = '';
+}
+
 function androidNotChrome(): boolean {
   const ua = navigator.userAgent;
   return /Android/.test(ua) && (!/Chrome\//.test(ua) || /Edg|OPR|SamsungBrowser|Firefox|FxiOS/.test(ua));
@@ -309,10 +355,7 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
   const disc = new THREE.Mesh(new THREE.CircleGeometry(0.45, 48).rotateX(-Math.PI / 2), new THREE.ShadowMaterial({ opacity: 0.45 }));
   disc.receiveShadow = true;
   scene.add(disc);
-  const rig = buildPet('mint');
-  scene.add(rig.group);
-  applyPetEnvironment(renderer, rig);
-  const anim = new Animator(rig, 7);
+  let rig!: PetRig, anim!: Animator;
   const cam = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.01, 10);
   const portrait = innerHeight > innerWidth;
   // Frame Hopper in the upper part of the screen, above the title and buttons.
@@ -324,10 +367,25 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     cam.position.set(0, 0.26, 0.95);
     cam.lookAt(0, 0.19, 0);
   }
-  anim.lookTarget = cam.position.clone();
   const cycle = ['wave', 'idle', 'giggle', 'lookAround', 'celebrate', 'idle', 'peek', 'idle'] as const;
   let i = 0, t = 0, last = performance.now();
-  anim.play(icon ? 'idle' : 'wave', 0);
+  /** Put a pet on the stage (replacing the one there). */
+  const setPet = (species: Species) => {
+    if (rig) {
+      scene.remove(rig.group);
+      for (const m of rig.materials) m.dispose();
+    }
+    rig = buildPet('mint', { species });
+    scene.add(rig.group);
+    applyPetEnvironment(renderer, rig);
+    anim = new Animator(rig, 7);
+    anim.lookTarget = cam.position.clone();
+    i = 0;
+    t = 0;
+    anim.play(icon ? 'idle' : 'wave', 0);
+    // For tests: the petting state and hearts.
+    window.__hopper = { ...window.__hopper, showcase: { anim, petting, hearts, species } };
+  };
   // The "tap me!" bubble floats beside Hopper's head.
   const bubble = document.getElementById('tapme');
   const head = new THREE.Vector3();
@@ -337,7 +395,8 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     head.y += 0.12;
     head.x += 0.16;
     head.project(cam);
-    bubble.style.left = `${((head.x + 1) / 2) * innerWidth}px`;
+    // (Kept on screen: a long-necked pet's head can be near the edge.)
+    bubble.style.left = `${Math.min(innerWidth - 84, ((head.x + 1) / 2) * innerWidth)}px`;
     bubble.style.top = `${((1 - head.y) / 2) * innerHeight}px`;
   };
   // Pet Hopper: tap (anywhere above the buttons), or hold / stroke for more.
@@ -360,8 +419,7 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
     hearts.spawn(heartAt, res.hearts);
     onPet?.(res);
   };
-  // For tests: the petting state and hearts.
-  window.__hopper = { ...window.__hopper, showcase: { anim, petting, hearts } };
+  setPet(currentSpecies());
   const canvas = renderer.domElement;
   canvas.style.cursor = 'pointer';
   canvas.addEventListener('pointerdown', (e) => {
@@ -389,7 +447,9 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
       anim.ctx.peekSide = 1;
       anim.play(cycle[i], 0.3, true);
     }
-    rig.group.rotation.y = icon ? 0.18 : Math.sin(now / 2400) * 0.35;
+    // (A dog shows best a little side-on; Hopper faces you.)
+    const turn = rig.species === 'vizsla' ? 0.5 : 0;
+    rig.group.rotation.y = icon ? 0.18 + turn : turn + Math.sin(now / 2400) * 0.35;
     placeBubble();
     anim.update(dt);
     renderer.render(scene, cam);
@@ -401,6 +461,7 @@ function startShowcase(onPet?: (r: PetResponse) => void) {
   };
   addEventListener('resize', onResize);
   return {
+    setPet,
     stop() {
       renderer.setAnimationLoop(null);
       hearts.dispose();

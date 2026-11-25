@@ -174,17 +174,18 @@ export function dataTexture(size: number, fn: (u: number, v: number) => [number,
 }
 
 /** Radial iris: dark limbal ring, fibrous streaks, a warm ring around the pupil. */
-export function irisTexture(hex: number): THREE.DataTexture {
-  return cachedTexture(`iris${hex}`, () => makeIrisTexture(hex));
+export function irisTexture(hex: number, gain = 1): THREE.DataTexture {
+  return cachedTexture(`iris${hex}${gain === 1 ? '' : `x${gain}`}`, () => makeIrisTexture(hex, gain));
 }
 
-export function makeIrisTexture(hex: number): THREE.DataTexture {
+/** `gain` lifts the iris's lightness (a small eye needs a lighter iris to show its colour). */
+export function makeIrisTexture(hex: number, gain = 1): THREE.DataTexture {
   rng = 7;
   // Vivid, light irises read as friendly; the dark eye colour only tints them.
   const hsl = new THREE.Color(hex).getHSL({ h: 0, s: 0, l: 0 });
-  const deep = new THREE.Color().setHSL(hsl.h + 0.03, Math.min(1, hsl.s * 0.9), 0.13);
-  const base = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 0.8), 0.33);
-  const light = new THREE.Color().setHSL(hsl.h - 0.03, Math.min(1, hsl.s * 0.75), 0.52);
+  const deep = new THREE.Color().setHSL(hsl.h + 0.03, Math.min(1, hsl.s * 0.9), 0.13 * gain);
+  const base = new THREE.Color().setHSL(hsl.h, Math.min(1, hsl.s * 0.8), 0.33 * gain);
+  const light = new THREE.Color().setHSL(hsl.h - 0.03, Math.min(1, hsl.s * 0.75), Math.min(0.8, 0.52 * gain));
   // Warm amber pupillary zone (like a hazel eye) behind the collarette.
   const warm = base.clone().lerp(new THREE.Color(0xc98b3a), 0.75);
   const ring = light.clone().lerp(warm, 0.4);
@@ -329,7 +330,7 @@ export function shellStack(geo: THREE.BufferGeometry, n: number): THREE.BufferGe
  * shaded greyer near the lids, so the eye sits *in* the face instead of
  * bulging out of it like a ball.
  */
-export function scleraMaterial(skin: THREE.Color): THREE.MeshPhysicalMaterial {
+export function scleraMaterial(skin: THREE.Color, apertureX = 0.88, apertureY = 1.3): THREE.MeshPhysicalMaterial {
   const mat = new THREE.MeshPhysicalMaterial({ color: 0xf7f4ee, roughness: 0.35, clearcoat: 0.6 });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSkin = { value: skin.clone() };
@@ -340,7 +341,7 @@ export function scleraMaterial(skin: THREE.Color): THREE.MeshPhysicalMaterial {
       '#include <color_fragment>',
       `#include <color_fragment>
       vec3 en = normalize(vEyeP);
-      float ap = length(vec2(en.x / 0.88, en.y / 1.3));
+      float ap = length(vec2(en.x / ${apertureX === 0.88 ? '0.88' : apertureX.toFixed(4)}, en.y / ${apertureY === 1.3 ? '1.3' : apertureY.toFixed(4)}));
       float inside = (1.0 - smoothstep(0.92, 0.99, ap)) * smoothstep(-0.1, 0.15, en.z);
       diffuseColor.rgb *= mix(vec3(0.6, 0.62, 0.72), vec3(1.0), smoothstep(1.0, 0.5, ap));
       // Shadow of the brow and upper lid across the top of the ball.
@@ -349,7 +350,7 @@ export function scleraMaterial(skin: THREE.Color): THREE.MeshPhysicalMaterial {
       diffuseColor.rgb = mix(skinC, diffuseColor.rgb, inside);`,
     );
   };
-  mat.customProgramCacheKey = () => 'sclera-aperture';
+  mat.customProgramCacheKey = () => (apertureX === 0.88 && apertureY === 1.3 ? 'sclera-aperture' : `sclera-aperture-${apertureX}-${apertureY}`);
   return mat;
 }
 
