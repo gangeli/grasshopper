@@ -181,6 +181,8 @@ npm run sheet            # just the pose contact sheet → artifacts/contact-she
   frees the old body and leaves nothing of the other pet behind; the animator carries every action
   over to the other body; and **a bot-played round survives two swaps** (a Vizsla takes over on the
   walk, Hopper comes back while it hides) and is still found, with no recoveries needed.
+* `e2e/hud.spec.ts`: the one-off walk tip waits until the speech bubble is free (it used to cut off
+  "I remember this room!" when the two came close together).
 * `e2e/pet-picker.spec.ts`: the selector in the browser: on the start page (pets, coats, keyboard,
   remembered across visits), into the game, from the HUD mid-game (GPU resources don't pile up over
   repeated swaps; a round the bot plays through two swaps is still found), and inside an emulated AR

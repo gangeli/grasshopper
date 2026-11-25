@@ -196,6 +196,11 @@ export class Hud {
     this.bubbleTimer = window.setTimeout(() => this.bubble.classList.remove('show'), seconds * 1000);
   }
 
+  /** Is the bubble showing something right now? (What can wait should not talk over it.) */
+  get speaking(): boolean {
+    return this.bubble.classList.contains('show');
+  }
+
   /** Show (or clear, with null) the persistent warning line. */
   setAlert(text: string | null) {
     const t = text ?? '';

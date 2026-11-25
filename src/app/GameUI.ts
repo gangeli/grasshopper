@@ -52,9 +52,13 @@ export class GameUI {
         // After the hello: how to play with Hopper on a walk.
         if (!this.tipShown) {
           this.tipShown = true;
-          setTimeout(() => {
-            if (game.phase === 'roam') hud.say('Tip: tap the floor to send me somewhere — or tap me!', 6);
-          }, 9000);
+          const tip = () => {
+            if (game.phase !== 'roam') return;
+            // It can wait: never over something being said ("I remember this room!").
+            if (hud.speaking) setTimeout(tip, 2500);
+            else hud.say('Tip: tap the floor to send me somewhere — or tap me!', 6);
+          };
+          setTimeout(tip, 9000);
         }
       }
     };
