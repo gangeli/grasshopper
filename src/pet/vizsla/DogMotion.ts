@@ -479,10 +479,10 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.headRoll = 0.2 * paw;
     // The paw comes up, across and down over the muzzle (a little pat as it settles).
     const pat = Math.exp(-Math.max(0, t - 0.8) * 3) * Math.sin(Math.max(0, t - 0.8) * 14);
-    p.handRY += (0.03 + 0.012 * Math.sin(Math.PI * paw) + 0.004 * pat) * paw;
-    p.handRZ += 0.062 * paw;
+    p.handRY += (0.088 + 0.02 * Math.sin(Math.PI * paw) + 0.004 * pat) * paw;
+    p.handRZ += 0.07 * paw;
     p.handRX += 0.03 * paw;
-    p.pawRCurl = D.pawRCurl * e + 0.45 * paw;
+    p.pawRCurl = D.pawRCurl * e + 0.52 * paw;
     p.plantFR = paw > 0.02 ? 0 : 1;
     p.eyeOpen = 1 - e;
     p.happy = 0.5 * e;
@@ -563,6 +563,8 @@ const _m = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qs = new THREE.Quaternion();
 const _qx = new THREE.Quaternion();
+const _qw = new THREE.Quaternion();
+const _w = new THREE.Vector3();
 const X = new THREE.Vector3(1, 0, 0);
 
 export class DogBody {
@@ -672,7 +674,40 @@ export class DogBody {
     this.rig.group.updateMatrixWorld(true);
     for (const j of this.jiggles.ear) j.update(dt);
     this.jiggles.tail.update(dt);
+    this.restEars();
     this.solveLegs(P, dt);
+  }
+
+  /**
+   * Ears don't hang through the floor: when the head is down on it (flat,
+   * asleep, nose to the ground), each leather swings out from its set-on to
+   * lie along the floor instead.
+   */
+  private restEars(): void {
+    const b = this.bones, scaler = this.rig.scaler;
+    const FLOOR = 0.006;
+    for (const side of ['L', 'R'] as const) {
+      const ear = b[`ear${side}`];
+      ear.updateWorldMatrix(true, true);
+      const base = scaler.worldToLocal(ear.getWorldPosition(_v));
+      const tip = scaler.worldToLocal(b[`ant${side}3`].getWorldPosition(_t));
+      if (tip.y >= FLOOR || base.y <= FLOOR + 0.004) continue;
+      const cur = _m.subVectors(tip, base);
+      const len = cur.length();
+      const dy = Math.max(FLOOR - base.y, -len);
+      const reach = Math.sqrt(Math.max(0, len * len - dy * dy));
+      // Out to its own side of the head (not forward under the chin), keeping a little of the way it already leans.
+      const out = _w.set(side === 'L' ? 1 : -1, 0, 0).applyQuaternion(b.head.getWorldQuaternion(_q)).applyQuaternion(scaler.getWorldQuaternion(_qs).invert());
+      const hx = out.x + 4 * cur.x, hz = out.z + 4 * cur.z;
+      const hl = Math.hypot(hx, hz) || 1;
+      const want = _w.set((hx / hl) * reach, dy, (hz / hl) * reach);
+      // The swing, from pet space into the ear's parent's frame.
+      _qx.setFromUnitVectors(cur.normalize(), want.normalize());
+      scaler.getWorldQuaternion(_qs);
+      ear.parent!.getWorldQuaternion(_q);
+      _qw.copy(_q).invert().multiply(_qs).multiply(_qx).multiply(_qs.invert()).multiply(_q);
+      ear.quaternion.premultiply(_qw);
+    }
   }
 
   /**

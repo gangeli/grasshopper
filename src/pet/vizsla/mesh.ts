@@ -430,7 +430,7 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
   const positions = new Float32Array(count * 3), normals = new Float32Array(count * 3);
   const out = blank(count);
   const cOut = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.55);
-  const cIn = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.45).lerp(new THREE.Color(pal.blush), 0.22);
+  const cIn = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.45).lerp(new THREE.Color(pal.blush), 0.08);
   const p = new THREE.Vector3(), pu = new THREE.Vector3(), pv = new THREE.Vector3(), nrm = new THREE.Vector3(), tan = new THREE.Vector3();
   const c = new THREE.Color();
   const joint = (DOG_P.earL[1] - DOG_P.earL1[1]) / EAR_LENGTH;

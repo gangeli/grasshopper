@@ -6,7 +6,7 @@
  * ears and tail swing.  Run: npx tsx scripts/dog-motion-probe.ts
  */
 import * as THREE from 'three';
-import { buildPet, type BoneName } from '../src/pet/PetModel';
+import { buildPet } from '../src/pet/PetModel';
 import { Animator } from '../src/pet/Animator';
 import { PetController } from '../src/pet/PetController';
 
@@ -80,4 +80,3 @@ for (const cruise of [0.3, 0.5, 0.8, 1.0]) {
     );
   console.log(`  bob: hips ${cm('hip')} cm, chest ${cm('chest')} cm, head ${cm('head')} cm, head pitch range ${(r.headPitch.hi - r.headPitch.lo).toFixed(3)} rad; ear tip sideways ${cm('ear')} cm, tail tip sideways ${cm('tail')} cm`);
 }
-void ({} as BoneName);

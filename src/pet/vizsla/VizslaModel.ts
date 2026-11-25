@@ -23,9 +23,9 @@ import { DOG_BONES, DOG_HEAD_SAMPLE, type DogBoneName } from './skeleton';
  */
 export const VIZSLA_PALETTES: Record<string, VizslaPalette> = {
   // The breed's golden rust.
-  golden: { body: 0xb5672f, bodyDark: 0x8e4a20, belly: 0xd09c68, blush: 0xc0606c, glow: 0xffd56a, eye: 0x9c6524, wing: 0x2f8f78, leather: 0x8f5038 },
+  golden: { body: 0xab5d28, bodyDark: 0x86451c, belly: 0xc9905c, blush: 0xc0606c, glow: 0xffd56a, eye: 0x9c6524, wing: 0x2f8f78, leather: 0x8a4a34 },
   // Deeper, redder.
-  russet: { body: 0xa2532a, bodyDark: 0x7a3a1b, belly: 0xc48a5c, blush: 0xb85864, glow: 0x9ffcff, eye: 0x8a5520, wing: 0x33507f, leather: 0x7d4230 },
+  russet: { body: 0x994a24, bodyDark: 0x733417, belly: 0xba7f52, blush: 0xb85864, glow: 0x9ffcff, eye: 0x8a5520, wing: 0x33507f, leather: 0x783e2c },
   // Pale, sandy gold.
   sandy: { body: 0xc68a4c, bodyDark: 0xa2662f, belly: 0xe0b98a, blush: 0xc66a74, glow: 0xfff07a, eye: 0xa87430, wing: 0xb5483e, leather: 0x9a5c40 },
 };
