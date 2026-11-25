@@ -73,6 +73,24 @@ describe('hide and seek with the Vizsla', () => {
   }, 180_000);
 });
 
+describe('petting the Vizsla', () => {
+  it('a tap on its head counts (its head is well ahead of its feet); the same tap misses Hopper', async () => {
+    const { Simulation } = await import('../src/sim/Simulation');
+    const aim = (species: 'vizsla' | 'hopper') => {
+      const sim = new Simulation({ room: 'empty', seed: 2, species });
+      sim.pet.placeAt(sim.pet.pos, 0);
+      for (let i = 0; i < 30; i++) sim.anim.update(1 / 30);
+      sim.rig.group.updateMatrixWorld(true);
+      // Straight down onto where the dog's head is: 22 cm ahead of the pet's spot.
+      const p = sim.pet.pos;
+      const over = { x: p.x, y: p.y + 1, z: p.z + 0.22 }, down = { x: 0, y: -1, z: 0 };
+      return { head: sim.game.rayOnPet(over, down), body: sim.game.rayOnPet({ x: p.x, y: p.y + 1, z: p.z }, down), far: sim.game.rayOnPet({ x: p.x + 0.4, y: p.y + 1, z: p.z }, down) };
+    };
+    expect(aim('vizsla')).toEqual({ head: true, body: true, far: false });
+    expect(aim('hopper')).toEqual({ head: false, body: true, far: false });
+  });
+});
+
 describe('hard mode', () => {
   it('Hopper sneaks to a new hidden spot when the seeker gets close without seeing it', async () => {
     const { Simulation } = await import('../src/sim/Simulation');

@@ -504,8 +504,15 @@ export class HideAndSeek {
   private rayHitsPet(o: THREE.Vector3, d: THREE.Vector3): boolean {
     const toC = this.pet.pos.clone().add(new THREE.Vector3(0, 0.15, 0)).sub(o);
     const t = toC.dot(d);
-    if (t < 0) return false;
-    return toC.sub(d.clone().multiplyScalar(t)).length() < 0.17;
+    if (t >= 0 && toC.sub(d.clone().multiplyScalar(t)).length() < 0.17) return true;
+    if (this.rig.species === 'vizsla') {
+      // A dog's head is well ahead of its feet, and it is where you pet a dog.
+      const h = petSamplePoints(this.rig)[0].p;
+      toC.set(h.x - o.x, h.y - o.y, h.z - o.z);
+      const th = toC.dot(d);
+      return th >= 0 && toC.sub(d.clone().multiplyScalar(th)).length() < 0.1;
+    }
+    return false;
   }
 
   /**

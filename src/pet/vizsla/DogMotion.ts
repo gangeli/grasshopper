@@ -348,7 +348,6 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.happy = 0.85;
     p.eyeOpen = 0.9;
     pant(t * 1.3, p, e);
-    p.blush = 1;
     p.lookWeight = 0.7;
     p.glow = 1;
   },
@@ -390,7 +389,6 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.eyeOpen = 0.9;
     p.jaw = 0.55;
     p.tongue = 0.7;
-    p.blush = 0.8;
     p.tailLift = 0.5;
     p.tailSide = 0.9 * Math.sin(t * 14);
     p.earLift = 0.4;
@@ -515,7 +513,6 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.tailLift = 0.25 * e;
     p.happy = 0.9 * e;
     p.eyeOpen = 1 - 0.12 * e;
-    p.blush = e;
     pant(t, p, 0.75 * e);
     p.lookWeight = 0.25;
     p.glow = 0.6 + 0.4 * e;
@@ -575,7 +572,6 @@ export class DogBody {
   /** Hock → paw in the rest pose (pet space). */
   private readonly pastern: THREE.Vector3;
   private readonly jiggles: { ear: Jiggle[]; tail: Jiggle };
-  private time = 0;
   /** How far it is crouched under something (0..1) and drawn back from something ahead (0..1), smoothed. */
   private low = 0;
   private tuck = 0;
@@ -597,7 +593,6 @@ export class DogBody {
   }
 
   reset(): void {
-    this.time = 0;
     this.low = this.tuck = 0;
     for (const j of this.jiggles.ear) j.reset();
     this.jiggles.tail.reset();
@@ -642,7 +637,6 @@ export class DogBody {
 
   /** Jaw, ears, tail, then the legs; `flick` is the Animator's ear twitch (signed by side). */
   finish(P: Pose, dt: number, flick: number): void {
-    this.time += dt;
     const b = this.bones;
     const face = this.rig.face;
     // Jaw and tongue.
