@@ -8,14 +8,14 @@ import type { DogBoneName } from './skeleton';
 /**
  * How the Vizsla moves: the same actions Hopper has, performed as a dog would.
  *
- *   idle        stands square, weight shifting, tail swinging, pants now and then
+ *   idle        stands square, weight shifting, tail swinging; pants in spells, cocks its head
  *   hop         trots (diagonal pairs), opening into a bounding gallop when it runs
  *   jump…       gathers on its hocks, stretches over the jump, lands forehand first
  *   hide        lies down like a sphinx, ears back, chin low; hideLow: flat, chin on the floor
  *   peek        lifts its head over, or cranes round the side
  *   giggle      a wriggling, panting, tail-thumping laugh without getting up
  *   surprised   startles back, ears and tail up
- *   celebrate   bounces on the spot and spins
+ *   celebrate   bounces on the spot, spins, and drops into a play bow
  *   wave        sits and gives a paw
  *   lookAround  scans, ears pricked
  *   sniff       nose down, quartering, then freezes on point: foreleg up, tail out straight
@@ -78,7 +78,40 @@ function stand(t: number, c: ActionCtx, p: Pose): void {
 function idle(t: number, c: ActionCtx, p: Pose): void {
   stand(t, c, p);
   // Pants in spells, mouth closed in between.
-  pant(t, p, smoothstep(0.05, 0.45, noise1(t * 0.13 + 3.1, c.seed + 20)));
+  const panting = smoothstep(0.05, 0.45, noise1(t * 0.13 + 3.1, c.seed + 20));
+  pant(t, p, panting);
+  // Now and then, between pants, it cocks its head at you, ears pricked: what was that?
+  const n = noise1(t * 0.19 + 7.7, c.seed + 31);
+  const tilt = smoothstep(0.42, 0.6, Math.abs(n)) * (1 - panting);
+  p.headRoll += 0.42 * Math.sign(n) * tilt;
+  p.neckRoll = 0.08 * Math.sign(n) * tilt;
+  p.earLift += 0.6 * tilt;
+  p.tailSide *= 1 - 0.7 * tilt;
+}
+
+/** The play bow: elbows down, rump up, tail going. `k` 0..1 blends it over the pose. */
+function playBow(t: number, p: Pose, k: number): void {
+  if (k <= 0) return;
+  const B = neutralPose();
+  B.bodyY = -0.012;
+  B.bodyZ = -0.012;
+  B.bodyPitch = 0.44;
+  B.spinePitch = 0.13;
+  B.chestPitch = 0.08;
+  B.handLY = B.handRY = -0.0235;
+  B.handLZ = B.handRZ = 0.068;
+  B.handLX = 0.012;
+  B.handRX = -0.012;
+  B.pawLCurl = B.pawRCurl = -1.42;
+  B.neckPitch = -0.78;
+  B.headPitch = 0.12;
+  B.tailLift = 0.95;
+  B.tailSide = 1.0 * Math.sin(t * 17);
+  B.spineYaw = 0.07 * Math.sin(t * 17 + 0.8);
+  B.earLift = 0.5;
+  B.jaw = 0.5;
+  B.tongue = 0.8;
+  blendBody(p, B, k);
 }
 
 /** Lying down like a sphinx: brisket on the floor, forelegs out in front, hocks folded under. `flat` 0..1 sinks it chin-down. */
@@ -377,14 +410,15 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.glow = 1;
   },
   celebrate(t, c, p) {
-    // Bounces on the spot, spinning on every other one.
+    // A bounce, a bounce with a spin, then a play bow: come on, again!
     const ph = (t / 0.9) % 1;
+    const beat = Math.floor(t / 0.9) % 3;
     gait(t, { ...c, hopPhase: ph, speed: 1.05, hopRate: 1 / 0.9 }, p, 0);
-    const spin = Math.floor(t / 0.9) % 2 === 1;
-    if (spin && ph > 0.15 && ph < 0.85) p.bodyYaw = TAU * smoothstep(0.15, 0.85, ph);
+    if (beat === 1 && ph > 0.15 && ph < 0.85) p.bodyYaw = TAU * smoothstep(0.15, 0.85, ph);
     p.bodyY += 0.012 * Math.max(0, Math.sin(TAU * (ph - 0.16)));
     p.neckPitch -= 0.3;
     p.headPitch += 0.25;
+
     p.happy = 0.8;
     p.eyeOpen = 0.9;
     p.jaw = 0.55;
@@ -394,6 +428,11 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.earLift = 0.4;
     p.lookWeight = 0.6;
     p.glow = 1;
+    const bow = beat === 2 ? smoothstep(0, 0.22, ph) * (1 - smoothstep(0.8, 1, ph)) : 0;
+    if (bow > 0) {
+      playBow(t, p, bow);
+      if (bow > 0.5) p.plantFL = p.plantFR = p.plantHL = p.plantHR = 1;
+    }
   },
   wave(t, c, p) {
     // Sits and gives a paw.

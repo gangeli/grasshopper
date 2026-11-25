@@ -16,7 +16,7 @@ test('Vizsla pose contact sheet renders', async ({ page }) => {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => (m.type() === 'error' ? errors.push(m.text()) : m.text().startsWith('lab: ') && console.log(m.text())));
   await page.setViewportSize({ width: 1400, height: 1000 });
-  await page.goto('/lab.html?pet=vizsla&dist=1.0&camY=0.3&lookY=0.13');
+  await page.goto('/lab.html?pet=vizsla');
   await page.waitForFunction(() => (window as unknown as { __labReady?: boolean }).__labReady === true, null, { timeout: 90_000 });
   await page.locator('canvas').screenshot({ path: 'artifacts/contact-sheet-vizsla.png' });
   expect(errors).toEqual([]);

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { buildPet } from './pet/PetModel';
+import { currentSpecies } from './pet/species';
 import { Animator, type ActionName } from './pet/Animator';
 import { applyPetEnvironment } from './pet/lighting';
 import { PetController } from './pet/PetController';
@@ -27,9 +28,11 @@ const actions = seqs ? (seqs as ActionName[]) : (q.get('actions') ?? 'idle,hop,j
 const times = (q.get('times') ?? '0.15,0.45,0.8').split(',').map(Number);
 const yaws = (q.get('yaw') ?? '0.5').split(',').map(Number);
 const cell = Number(q.get('size') ?? 200);
-const dist = Number(q.get('dist') ?? 0.95);
-const camY = Number(q.get('camY') ?? 0.32);
-const lookY = Number(q.get('lookY') ?? 0.15);
+// (The Vizsla is longer than Hopper: its default framing stands a little further back.)
+const dog = currentSpecies() === 'vizsla';
+const dist = Number(q.get('dist') ?? (dog ? 1.0 : 0.95));
+const camY = Number(q.get('camY') ?? (dog ? 0.3 : 0.32));
+const lookY = Number(q.get('lookY') ?? (dog ? 0.13 : 0.15));
 const lookZ = Number(q.get('lookZ') ?? 0);
 const cols = times.length * yaws.length;
 const rows = actions.length;

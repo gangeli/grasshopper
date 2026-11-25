@@ -94,7 +94,8 @@ What a dog needs that Hopper doesn't:
   flesh-brown. Three coats: `golden`, `russet`, `sandy` (`lab.html?pet=vizsla&palette=russet`).
 * **Dog manners** for the same 17 actions: it lies down like a sphinx to hide (flat, chin on the floor,
   under furniture), gives a paw to wave, startles back, quarters with its nose down and then freezes
-  **on point** — foreleg up, tail out straight — and when petted leans in with its whole back end wagging.
+  **on point** — foreleg up, tail out straight — celebrates with a bounce, a spin and a play bow, cocks
+  its head at you while it waits, and when petted leans in with its whole back end wagging.
 * **Room for a long body.** Nose to tail it is twice Hopper's length, so it senses the map around it:
   with furniture right ahead it lifts its head and draws back instead of poking through, and under a
   low table it drops to a belly-crawl.
