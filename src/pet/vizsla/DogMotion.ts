@@ -439,9 +439,10 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     stand(t, c, p);
     // Quarters with its nose to the floor, then locks up on point: neck and
     // tail in one straight line, one foreleg lifted and folded, quite still.
-    const T = 4.2;
+    // (A fidget lasts a few seconds: the point comes soon enough to be seen in most of them.)
+    const T = 3.8;
     const ph = t % T;
-    const point = smoothstep(2.3, 2.7, ph) * (1 - smoothstep(3.8, 4.15, ph));
+    const point = smoothstep(1.3, 1.7, ph) * (1 - smoothstep(3.35, 3.7, ph));
     const snuff = 1 - point;
     const nose = Math.sin(t * 16);
     p.bodyPitch = 0.1 * snuff + 0.03 * point;

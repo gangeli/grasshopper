@@ -190,7 +190,7 @@ describe('Vizsla', () => {
   });
 
   it('points: after quartering, one forepaw comes up while the other three stay planted', () => {
-    const { rig } = play('sniff', 3.3);
+    const { rig } = play('sniff', 2.6);
     expect(worldPos(rig, 'pawL').y, 'lifted forepaw').toBeGreaterThan(0.035);
     for (const b of ['pawR', 'toeL', 'toeR']) expect(worldPos(rig, b).y, b).toBeLessThan(0.022);
     // Nose, back and tail in a line: the tail is out level, not drooping.
