@@ -5,7 +5,10 @@ import type { Sculpt } from '../sdf/sdf';
 import { surfaceNets } from '../sdf/surfaceNets';
 import type { V } from '../skeleton';
 import { DOG_BONES, DOG_P, type DogBoneName } from './skeleton';
-import { buildJawSculpt, buildVizslaSculpt, DOG_COLLAR, DOG_EYE, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_FUR, DOG_JAW, mouthHollows, mouthRim, type DogRegion } from './sculpt';
+import {
+  buildJawSculpt, buildVizslaSculpt, DOG_COLLAR, DOG_EYE, DOG_EYE_RADIUS, DOG_EYE_SCALE, DOG_FUR, DOG_JAW, DOG_PAW_F, DOG_PAW_H, DOG_TOE_DX, mouthHollows, mouthRim,
+  type DogRegion,
+} from './sculpt';
 
 /** Coat and leather colours of a Vizsla (the first seven fields are the shared pet palette). */
 export interface VizslaPalette {
@@ -209,7 +212,7 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     if (rw('neck') > 0.2) {
       const K = DOG_COLLAR;
       const along = (x - K.at[0]) * K.axis[0] + (y - K.at[1]) * K.axis[1] + (z - K.at[2]) * K.axis[2];
-      fl *= 0.1 + 0.9 * smooth(K.half + 0.001, K.half + 0.007, Math.abs(along));
+      fl *= 0.22 + 0.78 * smooth(K.half + 0.001, K.half + 0.007, Math.abs(along));
     }
     furLen[v] = fl;
     // --- groom: nose to tail along the body, down the legs ---
@@ -280,7 +283,9 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     const trunk = rw('body') + rw('belly') + rw('chest') + rw('neck');
     const limbW = rw('arm') + rw('forearm') + rw('hand') + rw('finger') + rw('thigh') + rw('shin') + rw('foot') + rw('toe');
     // A shade deeper along the top line: crown, crest of the neck, back, top of the tail.
-    c.lerp(cDark, 0.34 * smooth(0.45, 0.98, ny) * (trunk + rw('tail') + 0.8 * rw('head') + 0.5 * rw('thigh')));
+    // (Fading out down the muzzle, not stopping at the stop: a hard edge there reads as a mask.)
+    const faceTop = 0.8 * (rw('head') + rw('brow')) + (0.8 - 0.55 * smooth(0.175, 0.215, z)) * rw('muzzle');
+    c.lerp(cDark, 0.34 * smooth(0.45, 0.98, ny) * (trunk + rw('tail') + faceTop + 0.5 * rw('thigh')));
     // Lighter underneath, feathered at the edge: brisket, belly, flank.
     const feather = 0.25 * (vnoise(x * 48, y * 48 + 3, z * 48) - 0.5);
     c.lerp(cLight, 0.62 * smooth(-0.1, -0.8, ny + feather) * trunk);
@@ -297,6 +302,15 @@ function bakeBody(pal: VizslaPalette, resolution: number): Baked {
     c.lerp(cLight, 0.18 * rw('cheek') * smooth(0.2, -0.6, ny));
     // Feet: the short hair between the toes is a touch paler on top.
     c.lerp(cLight, 0.16 * (rw('finger') + rw('toe')) * smooth(0.2, 0.8, ny));
+    // The toes are parted by shadowed grooves (the sculpted ones are too fine to read at a distance).
+    if (paw > 0.3 && y < 0.024) {
+      const front = z > 0;
+      const pz = front ? DOG_PAW_F[2] : DOG_PAW_H[2];
+      const gx = Math.abs(Math.abs(x) - DOG_PAW_F[0]);
+      const gap = 0.5 * (DOG_TOE_DX[2] + DOG_TOE_DX[3]);
+      const groove = Math.max(Math.exp(-Math.pow(gx / 0.001, 2)), Math.exp(-Math.pow((gx - gap) / 0.001, 2))) * smooth(pz + 0.002, pz + 0.008, z) * smooth(0.022, 0.014, y);
+      c.multiplyScalar(1 - 0.5 * groove * Math.min(1, paw));
+    }
     // Nose leather, lip line and pads (flesh-brown, never black).
     c.lerp(cLeather, rw('nose'));
     c.lerp(cLeather, 0.85 * rw('lip') * smooth(-0.25, -0.75, ny) * (1 - mouthK));
@@ -414,7 +428,7 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
   const positions = new Float32Array(count * 3), normals = new Float32Array(count * 3);
   const out = blank(count);
   const cOut = new THREE.Color(pal.body).lerp(new THREE.Color(pal.bodyDark), 0.55);
-  const cIn = new THREE.Color(pal.belly).lerp(new THREE.Color(pal.blush), 0.35);
+  const cIn = new THREE.Color(pal.body).lerp(new THREE.Color(pal.belly), 0.45).lerp(new THREE.Color(pal.blush), 0.22);
   const p = new THREE.Vector3(), pu = new THREE.Vector3(), pv = new THREE.Vector3(), nrm = new THREE.Vector3(), tan = new THREE.Vector3();
   const c = new THREE.Color();
   const joint = (DOG_P.earL[1] - DOG_P.earL1[1]) / EAR_LENGTH;
@@ -450,7 +464,7 @@ function earGeometry(s: number, pal: VizslaPalette): THREE.BufferGeometry {
         // Light glows faintly through the leather.
         out.thin[k] = 0.22 * smooth(0.1, 0.5, u);
         if (layer === 0) c.copy(cOut).multiplyScalar(0.94 + 0.1 * vnoise(p.x * 90, p.y * 90, p.z * 90));
-        else c.copy(cIn).multiplyScalar(0.62 + 0.2 * edge);
+        else c.copy(cIn).multiplyScalar(0.55 + 0.22 * edge);
         // Shaded where it lies against the head.
         c.multiplyScalar(layer === 0 ? 0.88 + 0.12 * smooth(0.0, 0.2, u) : 0.75);
         out.color.set([c.r, c.g, c.b], k * 3);

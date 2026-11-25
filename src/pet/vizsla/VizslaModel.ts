@@ -97,7 +97,7 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
   const whiskerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, transparent: true, opacity: 0.8 });
   const tongueMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.38, clearcoat: 0.5, clearcoatRoughness: 0.3 });
   const toothMat = new THREE.MeshStandardMaterial({ color: 0xeee6d4, roughness: 0.34 });
-  const nailMat = new THREE.MeshStandardMaterial({ color: cLeather.clone().lerp(cLight, 0.25), roughness: 0.38 });
+  const nailMat = new THREE.MeshStandardMaterial({ color: cLeather.clone().multiplyScalar(0.8), roughness: 0.4 });
   const collarMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.62 });
   const metalMat = new THREE.MeshStandardMaterial({ color: 0xd8c9a0, roughness: 0.3, metalness: 0.85 });
   const materials: THREE.Material[] = [skin, glowMaterial, sclera, irisMat, pupilMat, corneaMat, shineMat, lidMat, lashMat, tearMat, noseMat, whiskerMat, tongueMat, toothMat, nailMat, collarMat, metalMat];
@@ -303,10 +303,10 @@ export function buildVizsla(paletteName: string | VizslaPalette = 'golden', opts
     ] as const) {
       const nails: THREE.BufferGeometry[] = [];
       for (const dx of DOG_TOE_DX) {
-        const g = new THREE.ConeGeometry(0.0013, 0.0042, 7);
-        g.rotateX(Math.PI / 2 + 0.8);
+        const g = new THREE.ConeGeometry(0.00125, 0.0036, 7);
+        g.rotateX(Math.PI / 2 + 0.85);
         g.rotateY(dx * s * 16);
-        g.translate(paw[0] * s + dx * s * 1.06, paw[1] - 0.0056, paw[2] + 0.0104 - Math.abs(dx) * 0.42 + 0.0062);
+        g.translate(paw[0] * s + dx * s * 1.06, paw[1] - 0.0058, paw[2] + 0.0104 - Math.abs(dx) * 0.42 + 0.0056);
         nails.push(g);
       }
       const mesh = new THREE.Mesh(mergeGeometries(nails), nailMat);

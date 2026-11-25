@@ -52,6 +52,27 @@ describe('hide and seek, played by a bot', () => {
   });
 });
 
+describe('hide and seek with the Vizsla', () => {
+  // The same game with the other pet: a long-bodied dog that lies down to hide.
+  it.each([
+    ['living', 2],
+    ['r5', 4],
+    ['r21', 11],
+  ] as [string, number][])('room %s (seed %i)', (room, seed) => {
+    const r = runRound(room, seed, { species: 'vizsla' });
+    expect(r.started, 'round started').toBe(true);
+    if (!r.relaxed) {
+      expect(r.truthCoreVisAtSeek, 'core body hidden at seek start').toBeLessThanOrEqual(0.25);
+      expect(r.truthVisAtSeek, 'mostly hidden at seek start').toBeLessThanOrEqual(0.4);
+    }
+    expect(r.petToSpot, 'reached the chosen spot').toBeLessThan(0.15);
+    expect(r.maxPenetration, 'penetration').toBeLessThan(0.06);
+    expect(r.found, 'round finished').not.toBeNull();
+    if (r.found && !r.found.revealed) expect(r.truthVisAtFound, 'visible when found').toBeGreaterThan(0.2);
+    expect(r.health, 'no recoveries needed').toEqual([]);
+  }, 180_000);
+});
+
 describe('hard mode', () => {
   it('Hopper sneaks to a new hidden spot when the seeker gets close without seeing it', async () => {
     const { Simulation } = await import('../src/sim/Simulation');

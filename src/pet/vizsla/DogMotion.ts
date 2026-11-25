@@ -96,7 +96,9 @@ function down(p: Pose, flat: number): void {
   // Neck out along the floor; the head stays level.
   p.neckPitch = 0.62 + 0.82 * flat;
   p.headPitch = -0.56 - 0.86 * flat;
+  // Tail drawn in round its flank, out of the way.
   p.tailLift = -0.42;
+  p.tailSide = 1.25;
   p.tailCurl = 0.1;
   p.earLift = -0.45;
   p.squash = 0;
@@ -116,8 +118,9 @@ function sit(p: Pose): void {
   p.footLX = 0.02;
   p.footRX = -0.02;
   p.hockFlat = 1;
-  p.tailLift = -0.75;
-  p.tailCurl = -0.08;
+  // The tail lies out along the floor behind (the hips are tipped back, so that is "up" for the tail).
+  p.tailLift = 1.0;
+  p.tailCurl = -0.35;
 }
 
 function hideBase(t: number, c: ActionCtx, p: Pose, low: boolean): void {
@@ -127,7 +130,7 @@ function hideBase(t: number, c: ActionCtx, p: Pose, low: boolean): void {
   p.squash = 0.03 * br;
   // Stock still, but the tail can't quite help itself (a hint for sharp eyes).
   const twitch = Math.max(0, noise1(t * 0.9, c.seed + 5));
-  p.tailSide = 0.5 * twitch * Math.sin(t * 13);
+  p.tailSide += 0.4 * twitch * Math.sin(t * 13);
   p.earLift = -0.5 + 0.35 * twitch;
   p.pupilSize = 1.22;
   p.eyeOpen = 0.96;
@@ -337,7 +340,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.headYaw = 0.12 * Math.sin(t * 2.3);
     // One forepaw pats the floor.
     p.handLY += 0.014 * Math.max(0, Math.sin(t * 9)) * e;
-    p.tailSide = 0.95 * wag * e;
+    p.tailSide = 1.25 * (1 - e) + (0.5 + 0.8 * wag) * e;
     p.tailLift = -0.15;
     p.earLift = 0.1 + 0.2 * Math.sin(t * 9);
     p.happy = 0.85;
@@ -411,7 +414,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.chestRoll = -0.05 * up;
     p.headRoll = 0.16 * e;
     p.tailSide = 0.8 * Math.sin(t * 11) * e;
-    p.tailLift = S.tailLift * e + 0.25 * e;
+    p.tailLift = S.tailLift * e;
     p.happy = 0.6 * e;
     pant(t, p, 0.8 * e);
     p.earLift = 0.35 * e;
@@ -481,7 +484,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.plantFR = paw > 0.02 ? 0 : 1;
     p.eyeOpen = 1 - e;
     p.happy = 0.5 * e;
-    p.tailSide = 0.5 * Math.sin(t * 9) * e;
+    p.tailSide = p.tailSide * (1 - e) + (D.tailSide + 0.3 * Math.sin(t * 9)) * e;
     p.earLift = -0.5 * e;
     p.lookWeight = 0;
     p.jaw = 0.01;
@@ -536,7 +539,7 @@ export const DOG_ACTIONS: Record<ActionName, ActionFn> = {
     p.headYaw = 0.14 * sink;
     p.headRoll = 0.3 * sink;
     p.spineRoll = -0.1 * sink;
-    p.tailSide = 1.6 * sink;
+    p.tailSide = p.tailSide * (1 - sink) + 1.6 * sink;
     p.tailCurl = 0.35 * sink;
     p.earLift = -0.2 * sink;
     p.happy = 0.3;
@@ -569,6 +572,9 @@ export class DogBody {
   private readonly pastern: THREE.Vector3;
   private readonly jiggles: { ear: Jiggle[]; tail: Jiggle };
   private time = 0;
+  /** How far it is crouched under something (0..1) and drawn back from something ahead (0..1), smoothed. */
+  private low = 0;
+  private tuck = 0;
 
   constructor(private readonly rig: PetRig) {
     const b = (this.bones = rig.bones as Record<DogBoneName, THREE.Bone>);
@@ -588,6 +594,7 @@ export class DogBody {
 
   reset(): void {
     this.time = 0;
+    this.low = this.tuck = 0;
     for (const j of this.jiggles.ear) j.reset();
     this.jiggles.tail.reset();
     for (const f of Object.values(this.feet)) {
@@ -596,10 +603,30 @@ export class DogBody {
     }
   }
 
-  /** Trunk: where the hips are and how the back bends (the Animator adds neck and head). */
-  poseBody(P: Pose): void {
+  /**
+   * Trunk: where the hips are and how the back bends (the Animator adds neck
+   * and head). First the pose gives way to the room it has: a standing dog
+   * with something low overhead drops to a belly-crawl, head and neck
+   * stretched out level; one with something right in front of its nose lifts
+   * its head, tucks its chin and leans back from it.
+   */
+  poseBody(P: Pose, ctx: ActionCtx, dt: number): void {
     const { rest, scaler } = this.rig;
     const b = this.bones;
+    const k = dt > 0 ? 1 - Math.exp(-dt * 9) : 1;
+    this.low += (smoothstep(0.36, 0.17, ctx.headroom) - this.low) * k;
+    this.tuck += (smoothstep(0.3, 0.14, ctx.clearAhead) - this.tuck) * k;
+    // (Only while it is up on its legs: lying down it is already low and curled.)
+    const up = smoothstep(-0.07, -0.025, P.bodyY);
+    const low = this.low * up, tuck = this.tuck * up * (1 - this.low);
+    if (low > 1e-3 || tuck > 1e-3) {
+      P.bodyY -= 0.095 * low;
+      P.neckPitch += 1.05 * low - 0.7 * tuck;
+      P.headPitch += -0.92 * low + 1.1 * tuck;
+      P.bodyZ -= 0.028 * tuck;
+      P.tailLift -= 0.5 * low;
+      P.earLift -= 0.4 * low;
+    }
     // A dog isn't rubbery: `squash` is its breathing, and only a hint of stretch.
     const sq = 1 + 0.3 * clamp(P.squash, -0.5, 0.5);
     scaler.scale.set(1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq));

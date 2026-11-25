@@ -10,7 +10,8 @@ import type { Waypoint } from './world/NavGrid';
  * angles) so automated tests and humans can review the model and animation at
  * a glance. URL params: actions=a,b,c  times=0.1,0.5  yaw=0.6  size=220  palette=mint
  * dist/camY/lookY/lookZ (camera; lookZ aims ahead of the pet, e.g. at a dog's head), fur=N, res=0.0034 (mesh),
- * look=0 (don't look at the camera), pet=vizsla|hopper (which pet)
+ * look=0 (don't look at the camera), pet=vizsla|hopper (which pet), ahead=/headroom= (metres of room in front /
+ * overhead: the Vizsla draws its head back, or crawls)
  *
  * Filmstrips: seq=walk,jump,... renders whole sequences driven by the real
  * PetController (one row per sequence, one column per time in `times`), on a
@@ -90,6 +91,9 @@ if (q.get('debug') === 'normal') rig.group.traverse((o) => o.name === 'body' && 
 // hide=name,name: hide parts of the rig by object name (to see what a patch belongs to).
 for (const n of q.get('hide')?.split(',') ?? []) rig.group.traverse((o) => o.name === n && (o.visible = false));
 const anim = new Animator(rig, 3);
+// ahead=0.15 / headroom=0.2: the room the pet has in front and overhead (m), as the game would sense it.
+if (q.has('ahead')) anim.ctx.clearAhead = Number(q.get('ahead'));
+if (q.has('headroom')) anim.ctx.headroom = Number(q.get('headroom'));
 const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 10);
 
 function poseAt(action: ActionName, t: number) {

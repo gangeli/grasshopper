@@ -486,7 +486,7 @@ const STEP_TIME = 0.14;
 const _v = new THREE.Vector3();
 
 export class Animator {
-  readonly ctx: ActionCtx = { hopPhase: 0, speed: 0, hopRate: 2.6, jumpU: 0, peekSide: 1, touchSide: 0, seed: 0 };
+  readonly ctx: ActionCtx = { hopPhase: 0, speed: 0, hopRate: 2.6, jumpU: 0, peekSide: 1, touchSide: 0, seed: 0, clearAhead: Infinity, headroom: Infinity };
   private layers: Layer[] = [{ name: 'idle', t: 0, w: 1, target: 1, fade: 4 }];
   readonly pose: Pose = neutralPose();
   private tmp: Pose = neutralPose();
@@ -648,7 +648,7 @@ export class Animator {
       bones[n].rotation.set(x, y, z);
     };
     const dog = this.dog;
-    if (dog) dog.poseBody(P);
+    if (dog) dog.poseBody(P, this.ctx, dt);
     else {
       // Squash & stretch with volume preservation.
       const sq = 1 + clamp(P.squash, -0.5, 0.5);

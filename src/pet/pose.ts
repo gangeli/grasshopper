@@ -49,6 +49,14 @@ export interface ActionCtx {
   touchSide: number;
   /** A per-pet random seed for idle variation. */
   seed: number;
+  /**
+   * Room around the pet, from the mapped world (m; Infinity = open or
+   * unknown): free space straight ahead at head height, and above its back.
+   * A long, tall pet (the Vizsla) pulls its head in when it is up against
+   * something and crawls under low furniture; Hopper, who is neither, ignores them.
+   */
+  clearAhead: number;
+  headroom: number;
 }
 
 export type ActionName =

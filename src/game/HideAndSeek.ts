@@ -708,8 +708,31 @@ export class HideAndSeek {
     this.tickTimers(dt);
     this.guardPath(dt);
     this.pet.update(dt);
+    if (this.rig.species === 'vizsla') this.senseRoom();
     this.anim.update(dt);
     this.health.update(dt, view);
+  }
+
+  /**
+   * How much room a long, tall pet has where it stands: free space ahead of
+   * it at head height and above its back, from the map. The Vizsla's
+   * animation uses these to keep its head out of the furniture (Hopper is
+   * small enough not to need them).
+   */
+  private senseRoom(): void {
+    const g = this.world.grid, ctx = this.anim.ctx;
+    ctx.clearAhead = ctx.headroom = Infinity;
+    // (Not in mid-air: a jump's arc has already been checked for clearance.)
+    if (!g || this.pet.state === 'air') return;
+    const p = this.pet.pos, sx = Math.sin(this.pet.yaw), sz = Math.cos(this.pet.yaw);
+    for (const h of [0.2, 0.27]) {
+      const hit = g.raycast({ x: p.x + sx * 0.05, y: p.y + h, z: p.z + sz * 0.05 }, { x: sx, y: 0, z: sz }, 0.3);
+      if (hit) ctx.clearAhead = Math.min(ctx.clearAhead, 0.05 + hit.t);
+    }
+    for (const f of [-0.04, 0.1]) {
+      const hit = g.raycast({ x: p.x + sx * f, y: p.y + 0.1, z: p.z + sz * f }, { x: 0, y: 1, z: 0 }, 0.3);
+      if (hit) ctx.headroom = Math.min(ctx.headroom, 0.1 + hit.t);
+    }
   }
 
   /** Tracking-frame view → map frame; null if the pose is unusable. */
